@@ -7,6 +7,12 @@
 # centavos al mes en vez de los ~$2-6/mes de un shared-cpu-1x siempre
 # encendido. Ver docs/ARCHITECTURE.md §8 para el resto del análisis de costos.
 #
+# A PROPÓSITO sin `[[http_service.checks]]` acá (sí los tiene fly.prod.toml):
+# un health check activo cuenta como tráfico real para el proxy de Fly, así
+# que la máquina NUNCA se apaga con uno configurado — se confirmó en vivo
+# (logs con un GET /api/v1/health cada 15s, machine sin parar nunca). En
+# dev el costo importa más que la detección activa de caídas.
+#
 # `bog` (Bogotá) está deprecada en Fly y ya no acepta recursos nuevos —
 # `gru` (São Paulo) es la región de Sudamérica más cercana disponible hoy.
 #
@@ -24,7 +30,13 @@
 # imagen ya construida:
 #   fly machine run registry.fly.io/compraventa-backend-dev:latest \
 #     --app compraventa-backend-dev --region gru --vm-size shared-cpu-1x \
-#     --schedule daily --command "python -m app.jobs.nightly"
+#     --schedule daily -- python -m app.jobs.nightly
+#
+# (el `--` importa: sin él, flyctl interpreta el `-m` de `python -m` como su
+# propia flag `--metadata` y falla; con el comando entre comillas como un
+# solo string, en cambio, systemd/init lo busca como UN binario literal
+# "python -m app.jobs.nightly" y no existe — ambos fallaron en la práctica
+# antes de encontrar `-- python -m app.jobs.nightly` con tokens separados)
 
 app = "compraventa-backend-dev"
 primary_region = "gru"
@@ -40,10 +52,3 @@ primary_region = "gru"
   auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 0
-
-  [[http_service.checks]]
-    grace_period = "10s"
-    interval = "15s"
-    method = "GET"
-    timeout = "5s"
-    path = "/api/v1/health"

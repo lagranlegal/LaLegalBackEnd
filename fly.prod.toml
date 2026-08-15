@@ -20,7 +20,14 @@
 # una vez que el proceso `web` ya esté desplegado):
 #   fly machine run registry.fly.io/compraventa-backend-prod:latest \
 #     --app compraventa-backend-prod --region gru --vm-size shared-cpu-1x \
-#     --schedule daily --command "python -m app.jobs.nightly"
+#     --schedule daily -- python -m app.jobs.nightly
+#
+# (el `--` importa: sin él, flyctl interpreta el `-m` de `python -m` como su
+# propia flag `--metadata` y falla)
+#
+# `[[http_service.checks]]` sí tiene sentido acá (a diferencia de
+# fly.dev.toml): prod no escala a cero, así que un check activo no le cuesta
+# nada extra y sí detecta caídas para reemplazar la máquina.
 
 app = "compraventa-backend-prod"
 primary_region = "gru"
