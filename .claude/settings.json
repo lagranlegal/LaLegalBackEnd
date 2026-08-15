@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(grep -i \"\\\\.env$\")",
+      "Bash(grep -v '^$')",
+      "Bash(fly secrets *)",
+      "Bash(fly deploy *)",
+      "Bash(docker version *)",
+      "Bash(fly platform *)",
+      "Bash(fly status *)",
+      "Bash(fly machine *)",
+      "Bash(curl -sS -w \"\\\\nHTTP %{http_code}\\\\n\" https://compraventa-backend-dev.fly.dev/api/v1/health)",
+      "Bash(fly scale *)",
+      "Bash(fly logs *)"
     ]
   }
 }

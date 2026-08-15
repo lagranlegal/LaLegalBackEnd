@@ -7,27 +7,28 @@
 # shared-cpu-1x/256MB siempre encendido cuesta ~$2/mes de cómputo (más
 # ancho de banda); subir a 512MB si el uso real lo pide (`fly scale vm`).
 #
+# `bog` (Bogotá) está deprecada en Fly y ya no acepta recursos nuevos —
+# `gru` (São Paulo) es la región de Sudamérica más cercana disponible hoy.
+#
 # Secretos (nunca acá — este ambiente necesita su PROPIO proyecto Supabase
 # "prod", todavía no creado — ver docs/ARCHITECTURE.md §8):
 #   fly secrets set -a compraventa-backend-prod \
 #     DATABASE_URL=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=...
 #
-# Job nocturno (crear la máquina programada una vez desplegado el proceso
-# `web`, ver docs/ARCHITECTURE.md §11):
-#   fly machine run . --config fly.prod.toml --app compraventa-backend-prod \
-#     --process-group nightly --schedule daily --region bog --vm-size shared-cpu-1x
+# Job nocturno (mismo criterio que fly.dev.toml: NO va en [processes] para
+# no dejarlo corriendo 24/7 — se crea como Fly Machine programada aparte,
+# una vez que el proceso `web` ya esté desplegado):
+#   fly machine run registry.fly.io/compraventa-backend-prod:latest \
+#     --app compraventa-backend-prod --region gru --vm-size shared-cpu-1x \
+#     --schedule daily --command "python -m app.jobs.nightly"
 
 app = "compraventa-backend-prod"
-primary_region = "bog"
+primary_region = "gru"
 
 [build]
 
 [env]
   ENVIRONMENT = "production"
-
-[processes]
-  web = "uvicorn app.main:app --host 0.0.0.0 --port 8000"
-  nightly = "python -m app.jobs.nightly"
 
 [http_service]
   internal_port = 8000
@@ -35,7 +36,6 @@ primary_region = "bog"
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["web"]
 
   [[http_service.checks]]
     grace_period = "10s"

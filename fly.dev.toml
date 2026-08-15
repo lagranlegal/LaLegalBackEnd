@@ -7,28 +7,32 @@
 # centavos al mes en vez de los ~$2-6/mes de un shared-cpu-1x siempre
 # encendido. Ver docs/ARCHITECTURE.md §8 para el resto del análisis de costos.
 #
+# `bog` (Bogotá) está deprecada en Fly y ya no acepta recursos nuevos —
+# `gru` (São Paulo) es la región de Sudamérica más cercana disponible hoy.
+#
 # Secretos (nunca acá — el DATABASE_URL de este ambiente apunta al proyecto
 # Supabase "dev", driyubkodnsqxbtxcmaz, ya existente):
 #   fly secrets set -a compraventa-backend-dev \
 #     DATABASE_URL=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=...
 #
 # Job nocturno (mismo patrón que prod, ver fly.prod.toml y
-# docs/ARCHITECTURE.md §11): crear la máquina programada una vez que el
-# proceso `web` ya esté desplegado —
-#   fly machine run . --config fly.dev.toml --app compraventa-backend-dev \
-#     --process-group nightly --schedule daily --region bog --vm-size shared-cpu-1x
+# docs/ARCHITECTURE.md §11): NO va en [processes] a propósito — si lo
+# declarás ahí, `fly deploy` intenta mantener una máquina "nightly" viva
+# todo el tiempo (le suma cómputo 24/7 a un job que solo debe correr una
+# vez al día). En cambio se crea como una Fly Machine programada,
+# independiente del fleet que gestiona `fly deploy`, apuntando a la misma
+# imagen ya construida:
+#   fly machine run registry.fly.io/compraventa-backend-dev:latest \
+#     --app compraventa-backend-dev --region gru --vm-size shared-cpu-1x \
+#     --schedule daily --command "python -m app.jobs.nightly"
 
 app = "compraventa-backend-dev"
-primary_region = "bog"
+primary_region = "gru"
 
 [build]
 
 [env]
   ENVIRONMENT = "dev"
-
-[processes]
-  web = "uvicorn app.main:app --host 0.0.0.0 --port 8000"
-  nightly = "python -m app.jobs.nightly"
 
 [http_service]
   internal_port = 8000
@@ -36,7 +40,6 @@ primary_region = "bog"
   auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 0
-  processes = ["web"]
 
   [[http_service.checks]]
     grace_period = "10s"
