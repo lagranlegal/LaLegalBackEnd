@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr
@@ -53,3 +53,40 @@ class PermissionOut(BaseModel):
     action: str
     is_special: bool
     description: str | None
+
+
+class MeUserOut(BaseModel):
+    id: UUID
+    full_name: str
+    email: str
+
+
+class MeCompanyOut(BaseModel):
+    id: UUID
+    name: str
+    timezone: str
+    logo_url: str | None
+
+
+class MeRoleOut(BaseModel):
+    id: UUID
+    name: str
+
+
+class MeSubscriptionOut(BaseModel):
+    status: str
+    expires_at: date
+
+
+class MePlanOut(BaseModel):
+    code: str
+    name: str
+
+
+class MeOut(BaseModel):
+    user: MeUserOut
+    company: MeCompanyOut
+    role: MeRoleOut
+    permissions: list[str]
+    subscription: MeSubscriptionOut
+    plan: MePlanOut

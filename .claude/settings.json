@@ -12,7 +12,20 @@
       "Bash(fly machine *)",
       "Bash(curl -sS -w \"\\\\nHTTP %{http_code}\\\\n\" https://compraventa-backend-dev.fly.dev/api/v1/health)",
       "Bash(fly scale *)",
-      "Bash(fly logs *)"
+      "Bash(fly logs *)",
+      "Bash(fly ips *)",
+      "Bash(fly volumes *)",
+      "Bash(time curl -sS -w \"\\\\nHTTP %{http_code}\\\\n\" https://compraventa-backend-dev.fly.dev/api/v1/health)",
+      "Bash(PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/migrations/00009_contract_idempotency.sql)",
+      "Bash(supabase migration *)",
+      "Bash(grep -n 'client.post\\(\\\\s*$\\\\|\"/api/v1/contracts\"' tests/integration/test_contracts.py)",
+      "Bash(grep -n 'headers = _headers\\(contract_tenant\\\\[\"full_token\"\\\\]\\)$\\\\|full_headers = _headers' tests/integration/test_contracts.py)",
+      "Bash(PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -c ' *)",
+      "Bash(PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/migrations/00010_plan_read_policy.sql)",
+      "Bash(curl -sS -w \"\\\\nHTTP %{http_code}\\\\n\" https://compraventa-backend-dev.fly.dev/api/v1/me)",
+      "Bash(curl -sS -i -X OPTIONS https://compraventa-backend-dev.fly.dev/api/v1/health -H 'Origin: http://localhost:5173' -H 'Access-Control-Request-Method: GET')",
+      "Bash(curl -sS -i -X OPTIONS https://compraventa-backend-dev.fly.dev/api/v1/health -H 'Origin: https://lagranlegal-git-feature-x-team.vercel.app' -H 'Access-Control-Request-Method: GET')",
+      "Bash(curl -sS -i -X OPTIONS https://compraventa-backend-dev.fly.dev/api/v1/health -H 'Origin: https://evil.example.com' -H 'Access-Control-Request-Method: GET')"
     ]
   }
 }

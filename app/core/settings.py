@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     jwt_audience: str = "authenticated"
     environment: str = "dev"
     sentry_dsn: str = ""
+    # Orígenes exactos del front (Vercel prod + localhost de desarrollo),
+    # coma-separados — se completa por ambiente vía `fly secrets set`, nunca
+    # hardcodeado (el dominio de prod cambia por cliente/proyecto).
+    cors_allow_origins: str = ""
 
     @model_validator(mode="after")
     def _resolve_jwks_url(self) -> "Settings":

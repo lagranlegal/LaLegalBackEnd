@@ -31,6 +31,18 @@ Este backend **no tiene login propio**. El front habla directo con Supabase Auth
 3. **Altas son solo por invitación** (signups públicos desactivados). El flujo es: un admin invita (`POST /api/v1/identity/invitations`, ver §4) → Supabase manda un correo con un link mágico → la persona pone su contraseña → puede hacer login normalmente. La primera vez que ese usuario le pega a cualquier endpoint del backend con un token válido, su estado pasa de `invited` a `active` automáticamente (no hace falta un endpoint de "aceptar invitación").
 4. **Refresh**: `POST {SUPABASE_URL}/auth/v1/token?grant_type=refresh_token` con el `refresh_token` — maneja el front, este backend ni se entera.
 5. Un JWT trae (además de lo estándar `sub`, `exp`, `aud`) los claims `company_id` y `role_id` **solo si** el usuario tiene una fila activa en `app_user` de una empresa activa (los inyecta el Custom Access Token Hook en Supabase). Si el backend responde `401 UNAUTHORIZED` con un token que por lo demás es válido, casi siempre es por esto — revisar que el usuario esté `active` y su empresa también.
+6. **`GET /api/v1/me`** — llamarlo justo después del login, antes de renderizar nada. Cualquier usuario autenticado (sin exigir un permiso específico — es información sobre sí mismo):
+   ```json
+   {
+     "user": {"id": "...", "full_name": "María Gerente", "email": "..."},
+     "company": {"id": "...", "name": "Compraventa El Dorado", "timezone": "America/Bogota", "logo_url": null},
+     "role": {"id": "...", "name": "Asesor"},
+     "permissions": ["contracts.create", "contracts.view", "customers.create", "..."],
+     "subscription": {"status": "active", "expires_at": "2027-01-01"},
+     "plan": {"code": "full", "name": "Completo"}
+   }
+   ```
+   `permissions` es exactamente el set que `require_permission` va a aceptar (mismo cache TTL 60s) — es lo que reemplaza a intentar `GET /identity/roles/{id}/permissions` (exige `identity.manage_roles`, que un Asesor no tiene) solo para que el front sepa qué botones mostrar. Usarlo para ocultar/deshabilitar acciones en vez de degradar en `403` después del click.
 
 ## 3. Módulo `platform` (solo super-admin)
 
@@ -126,7 +138,7 @@ Requiere una **sesión de caja abierta** (fase 1: una caja por empresa) para des
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `POST` | `/api/v1/contracts` | `contracts.create` | Crea contrato: snapshot legal (tasa la define el usuario, plazo/ventana de mora salen de la categoría del artículo), desembolsa el préstamo (`cash_movement`). Body: `{customer_id, principal, interest_rate_pct, appraisal_value?, items: [{category_id, description, weight_grams?, serial_imei?, item_appraisal?, photos?}], payment_method, extension_months?, legacy_code?, notes?}`. Todos los `items` deben usar categorías **nivel 3** con el mismo `default_term_months`/`arrears_window_months`. |
+| `POST` | `/api/v1/contracts` | `contracts.create` | Header **`Idempotency-Key` obligatorio** (reenviar la misma key en un reintento de red devuelve el mismo contrato, no duplica el desembolso — gap cerrado, antes solo `contract_payment`/`sale` lo tenían). Crea contrato: snapshot legal (tasa la define el usuario, plazo/ventana de mora salen de la categoría del artículo), desembolsa el préstamo (`cash_movement`). Body: `{customer_id, principal, interest_rate_pct, appraisal_value?, items: [{category_id, description, weight_grams?, serial_imei?, item_appraisal?, photos?}], payment_method, extension_months?, legacy_code?, notes?}`. Todos los `items` deben usar categorías **nivel 3** con el mismo `default_term_months`/`arrears_window_months`. |
 | `GET` | `/api/v1/contracts` | `contracts.view` | Lista paginada. `?status=active\|in_arrears\|in_extension\|auctioned\|paid` filtra. |
 | `GET` | `/api/v1/contracts/{id}` | `contracts.view` | Detalle. Recalcula el estado (`active→in_arrears→in_extension`) si quedó desactualizado antes de responder — ver `docs/ARCHITECTURE.md`. |
 | `PATCH` | `/api/v1/contracts/{id}` | `contracts.edit` | Solo `{appraisal_value?, notes?, signed_photo_url?}` — nunca `status`/`capital_balance` (los calcula el servicio). |
@@ -138,7 +150,7 @@ Requiere una **sesión de caja abierta** (fase 1: una caja por empresa) para des
 
 **No implementado todavía** (a propósito): generar el PDF imprimible del contrato con la firma de la empresa — requiere Storage + una librería de PDF, es una pieza de infra aparte. `signed_photo_url` se actualiza vía `PATCH` después de que el front suba la foto del contrato firmado a Supabase Storage por su cuenta.
 
-**Idempotencia real:** `contract_payment` tiene `UNIQUE(company_id, idempotency_key)` en la migración, así que el dedupe de abonos es durable. `contract` (la creación/desembolso) **no** tiene esa columna en el esquema — el header se exige por consistencia de API, pero un reintento de red en `POST /contracts` hoy puede crear un contrato duplicado. Gap conocido, no resuelto en este paso (ver `docs/ARCHITECTURE.md`).
+**Idempotencia real:** `contract`, `contract_payment` y `sale` tienen `UNIQUE(company_id, idempotency_key)` en la migración — el dedupe de los tres es durable, no solo de API. La columna en `contract` es `NULLABLE` (a diferencia de las otras dos, que son `NOT NULL`): la migración que la agregó corrió sobre una tabla con filas ya existentes de antes de que el backend mandara este header, y no hay forma de backfillear una key real para ellas — `UNIQUE` con `NULL`s es seguro en Postgres (cada `NULL` cuenta distinto).
 
 ## 8. Módulo `cashbox`
 
@@ -245,3 +257,7 @@ Con `audit` + `reports` + el job nocturno, todo el núcleo operativo de `CLAUDE.
 - **Desplegar `prod` en Fly.io**: `dev` ya está en producción de pruebas — `https://compraventa-backend-dev.fly.dev`, ver `docs/ARCHITECTURE.md` §8. `prod` usa el mismo `Dockerfile` + `fly.prod.toml`, pero necesita su propio proyecto Supabase (hoy solo existe el de `dev`) antes de poder desplegarse — no reusar el de `dev` para datos reales.
 - **PDFs** (contrato firmado, acta de cierre de caja): requieren Storage + una librería de PDF, fuera de alcance por decisión explícita en los pasos 5 y 6 — el front puede armar ambos con los datos que ya expone la API mientras tanto.
 - **Costeo FIFO por lote** para accesorios de bajo valor: por decisión explícita en el paso 7, todo `inventory_item` usa identificación específica (su propio costo real); FIFO por lote queda como optimización futura.
+
+**Backlog explícito del front** (pedido durante la integración, deliberadamente pospuesto — no bloquean el arranque):
+- **`GET /reports/series?months=12`**: serie histórica mensual de ingresos (empeño/tienda) para la gráfica principal del dashboard. Por ahora `GET /reports/dashboard` (§12) cubre hoy/mes — suficiente para arrancar.
+- **`GET`/`PATCH /company/settings`** (tenant-scoped): pantalla de configuración de empresa (logo, firma, timezone, datos legales). Hoy esos campos existen en `company` pero no hay endpoint propio para editarlos fuera de `platform` (solo super-admin).

@@ -184,7 +184,7 @@ async def _backdate_and_expire_extension(*, company_id, contract_id, months: int
 
 
 def test_auction_rejected_when_contract_not_ready(client: TestClient, auction_tenant: dict) -> None:
-    headers = _headers(auction_tenant["token"])
+    headers = _headers(auction_tenant["token"], idempotency_key=str(uuid4()))
     contract = client.post(
         "/api/v1/contracts",
         headers=headers,
@@ -205,7 +205,7 @@ def test_auction_rejected_when_contract_not_ready(client: TestClient, auction_te
 async def test_auction_splits_cost_proportional_to_appraisal(
     client: TestClient, auction_tenant: dict
 ) -> None:
-    headers = _headers(auction_tenant["token"])
+    headers = _headers(auction_tenant["token"], idempotency_key=str(uuid4()))
     contract = client.post(
         "/api/v1/contracts",
         headers=headers,

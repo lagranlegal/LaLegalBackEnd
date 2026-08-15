@@ -57,6 +57,7 @@ async def insert_contract(
     ltv_warning: bool,
     notes: str | None,
     created_by: UUID,
+    idempotency_key: str,
 ) -> None:
     await db.execute(
         text(
@@ -64,12 +65,13 @@ async def insert_contract(
             insert into public.contract
                 (id, company_id, number, legacy_code, customer_id, principal, capital_balance,
                  appraisal_value, interest_rate_pct, term_months, arrears_window_months,
-                 extension_months, due_date, interest_paid_until, ltv_warning, notes, created_by)
+                 extension_months, due_date, interest_paid_until, ltv_warning, notes, created_by,
+                 idempotency_key)
             values
                 (:id, :company_id, :number, :legacy_code, :customer_id, :principal, :principal,
                  :appraisal_value, :interest_rate_pct, :term_months, :arrears_window_months,
                  :extension_months, :due_date, :interest_paid_until, :ltv_warning, :notes,
-                 :created_by)
+                 :created_by, :idempotency_key)
             """
         ),
         {
@@ -89,8 +91,22 @@ async def insert_contract(
             "ltv_warning": ltv_warning,
             "notes": notes,
             "created_by": str(created_by),
+            "idempotency_key": idempotency_key,
         },
     )
+
+
+async def find_contract_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id from public.contract "
+            "where company_id = :company_id and idempotency_key = :idempotency_key"
+        ),
+        {"company_id": str(company_id), "idempotency_key": idempotency_key},
+    )
+    return result.first()
 
 
 async def insert_contract_item(

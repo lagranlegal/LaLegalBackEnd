@@ -49,6 +49,16 @@ async def get_company(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
     return result.first()
 
 
+async def get_company_profile(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
+    """`id, name, logo_url, settings` — para `GET /me` (identity), que
+    necesita más campos de los que trae `get_company`."""
+    result = await db.execute(
+        text("select id, name, logo_url, settings from public.company where id = :id"),
+        {"id": str(company_id)},
+    )
+    return result.first()
+
+
 async def list_companies(db: AsyncSession, *, cursor: UUID | None, limit: int) -> list[Row[Any]]:
     query = "select id, name, status, created_at from public.company"
     params: dict[str, Any] = {"limit": limit + 1}
@@ -88,6 +98,23 @@ async def get_active_subscription(db: AsyncSession, *, company_id: UUID) -> Row[
             select id, company_id, plan_id, status, expires_at
             from public.subscription
             where company_id = :company_id and status = 'active'
+            """
+        ),
+        {"company_id": str(company_id)},
+    )
+    return result.first()
+
+
+async def get_active_subscription_with_plan(
+    db: AsyncSession, *, company_id: UUID
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            """
+            select s.status, s.expires_at, p.code as plan_code, p.name as plan_name
+            from public.subscription s
+            join public.plan p on p.id = s.plan_id
+            where s.company_id = :company_id and s.status = 'active'
             """
         ),
         {"company_id": str(company_id)},

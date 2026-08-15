@@ -204,7 +204,7 @@ def test_dashboard_and_closing_history(client: TestClient, reports_tenant: dict)
 
     contract = client.post(
         "/api/v1/contracts",
-        headers=headers,
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
         json={
             "customer_id": str(reports_tenant["customer_id"]),
             "principal": "1000000.00",

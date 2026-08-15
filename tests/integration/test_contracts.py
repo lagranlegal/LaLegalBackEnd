@@ -254,7 +254,7 @@ def test_create_contract_without_open_session_is_409(
 ) -> None:
     response = client.post(
         "/api/v1/contracts",
-        headers=_headers(contract_tenant["full_token"]),
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
         json=_contract_payload(contract_tenant),
     )
     assert response.status_code == 409
@@ -270,7 +270,7 @@ async def test_create_contract_disburses_and_sets_snapshot(
 
     response = client.post(
         "/api/v1/contracts",
-        headers=_headers(contract_tenant["full_token"]),
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
         json=_contract_payload(contract_tenant),
     )
     assert response.status_code == 201, response.text
@@ -295,6 +295,58 @@ async def test_create_contract_disburses_and_sets_snapshot(
     assert movement[0] == "out"
     assert movement[1] == "loan_disbursed"
     assert str(movement[2]) == "1000000.00"
+
+
+def test_create_contract_without_idempotency_key_is_400(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    response = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"]),
+        json=_contract_payload(contract_tenant),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+async def test_create_contract_idempotency_key_replays_same_contract_no_double_disbursement(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    key = str(uuid4())
+    headers = _headers(contract_tenant["full_token"], idempotency_key=key)
+    payload = _contract_payload(contract_tenant)
+
+    first = client.post("/api/v1/contracts", headers=headers, json=payload)
+    second = client.post("/api/v1/contracts", headers=headers, json=payload)
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert first.json()["id"] == second.json()["id"]
+
+    async with AsyncSessionLocal() as session, session.begin():
+        contract_count = (
+            await session.execute(
+                text(
+                    "select count(*) from public.contract "
+                    "where company_id = :cid and idempotency_key = :key"
+                ),
+                {"cid": str(contract_tenant["company_id"]), "key": key},
+            )
+        ).scalar_one()
+        movement_count = (
+            await session.execute(
+                text(
+                    "select count(*) from public.cash_movement "
+                    "where company_id = :cid and reference_type = 'contract' "
+                    "and reference_id = :id"
+                ),
+                {"cid": str(contract_tenant["company_id"]), "id": first.json()["id"]},
+            )
+        ).scalar_one()
+    assert contract_count == 1
+    assert movement_count == 1
 
 
 async def test_create_contract_rejects_mismatched_category_terms(
@@ -329,7 +381,7 @@ async def test_create_contract_rejects_mismatched_category_terms(
 
     response = client.post(
         "/api/v1/contracts",
-        headers=_headers(contract_tenant["full_token"]),
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
         json=_contract_payload(
             contract_tenant,
             items=[
@@ -349,7 +401,9 @@ async def test_payment_covers_owed_months_and_capital(
     )
     headers = _headers(contract_tenant["full_token"])
     contract = client.post(
-        "/api/v1/contracts", headers=headers, json=_contract_payload(contract_tenant)
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
     ).json()
     await _backdate_interest_paid_until(
         company_id=contract_tenant["company_id"], contract_id=contract["id"], months=2
@@ -387,9 +441,10 @@ async def test_capital_before_interest_caught_up_is_rejected(
     await _open_cash_session(
         company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
     )
-    headers = _headers(contract_tenant["full_token"])
     contract = client.post(
-        "/api/v1/contracts", headers=headers, json=_contract_payload(contract_tenant)
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
     ).json()
     await _backdate_interest_paid_until(
         company_id=contract_tenant["company_id"], contract_id=contract["id"], months=2
@@ -412,7 +467,9 @@ async def test_payment_idempotency_key_replays_same_payment(
     )
     headers = _headers(contract_tenant["full_token"])
     contract = client.post(
-        "/api/v1/contracts", headers=headers, json=_contract_payload(contract_tenant)
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
     ).json()
     await _backdate_interest_paid_until(
         company_id=contract_tenant["company_id"], contract_id=contract["id"], months=1
@@ -447,9 +504,10 @@ async def test_discount_requires_permission(client: TestClient, contract_tenant:
     await _open_cash_session(
         company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
     )
-    full_headers = _headers(contract_tenant["full_token"])
     contract = client.post(
-        "/api/v1/contracts", headers=full_headers, json=_contract_payload(contract_tenant)
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
     ).json()
     await _backdate_interest_paid_until(
         company_id=contract_tenant["company_id"], contract_id=contract["id"], months=1
@@ -503,7 +561,9 @@ async def test_ready_for_auction_lists_after_extension_triggered(
     )
     headers = _headers(contract_tenant["full_token"])
     contract = client.post(
-        "/api/v1/contracts", headers=headers, json=_contract_payload(contract_tenant)
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
     ).json()
     # ventana=4 meses + 1 mes de prórroga; nos vamos 8 meses atrás para que
     # la prórroga ya esté vencida.

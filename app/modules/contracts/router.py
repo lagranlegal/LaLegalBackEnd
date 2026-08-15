@@ -39,9 +39,14 @@ async def create_contract(
     body: ContractCreateIn,
     user: Annotated[CurrentUser, Depends(_create)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
 ) -> ContractOut:
     return await service.create_contract(
-        db, company_id=user.company_id, body=body, created_by=user.id
+        db,
+        company_id=user.company_id,
+        body=body,
+        created_by=user.id,
+        idempotency_key=idempotency_key,
     )
 
 

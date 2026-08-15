@@ -36,8 +36,11 @@ async def _require_postgres() -> None:
         pytest.skip("Postgres local no disponible: correr `supabase start` primero.")
 
 
-def _headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+def _headers(token: str, idempotency_key: str | None = None) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {token}"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return headers
 
 
 @pytest_asyncio.fixture
@@ -193,7 +196,7 @@ async def _read_contract_status(*, company_id: uuid.UUID, contract_id: str) -> s
 async def test_recompute_all_statuses_moves_active_contract_into_arrears(
     client: TestClient, recompute_tenant: dict
 ) -> None:
-    headers = _headers(recompute_tenant["token"])
+    headers = _headers(recompute_tenant["token"], idempotency_key=str(uuid4()))
     created = client.post(
         "/api/v1/contracts",
         headers=headers,

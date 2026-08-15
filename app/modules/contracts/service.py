@@ -104,8 +104,19 @@ def _row_to_payment(row: Row[Any]) -> PaymentOut:
 
 
 async def create_contract(
-    db: AsyncSession, *, company_id: UUID, body: ContractCreateIn, created_by: UUID
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: ContractCreateIn,
+    created_by: UUID,
+    idempotency_key: str,
 ) -> ContractOut:
+    existing = await repository.find_contract_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if existing is not None:
+        return await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"])
+
     customer = await customers_repo.get_customer(
         db, company_id=company_id, customer_id=body.customer_id
     )
@@ -181,6 +192,7 @@ async def create_contract(
         ltv_warning=ltv_warning,
         notes=body.notes,
         created_by=created_by,
+        idempotency_key=idempotency_key,
     )
     for item in body.items:
         await repository.insert_contract_item(

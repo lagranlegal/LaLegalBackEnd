@@ -217,3 +217,13 @@ async def has_permission(db: AsyncSession, role_id: UUID, code: str) -> bool:
     """
     permissions = await _load_role_permissions(db, role_id)
     return code in permissions
+
+
+async def get_role_permissions(db: AsyncSession, role_id: UUID) -> list[str]:
+    """Lista completa de códigos de permiso de un rol — para `GET /me`, así
+    el front sabe exactamente qué puede hacer sin ir probando y recibiendo
+    403. Mismo cache (TTL 60s) que `require_permission`/`has_permission`:
+    lo que devuelve acá es exactamente lo que el backend va a aceptar.
+    """
+    permissions = await _load_role_permissions(db, role_id)
+    return sorted(permissions)

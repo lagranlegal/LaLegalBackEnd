@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, decode_cursor
-from app.core.security import CurrentUser, get_tenant_db, require_permission
+from app.core.security import CurrentUser, get_current_user, get_tenant_db, require_permission
 from app.modules.identity import service
 from app.modules.identity.schemas import (
     InviteUserIn,
+    MeOut,
     PermissionOut,
     RoleCreateIn,
     RoleOut,
@@ -22,6 +23,19 @@ router = APIRouter(prefix="/api/v1/identity", tags=["identity"])
 
 _manage_users = require_permission("identity.manage_users")
 _manage_roles = require_permission("identity.manage_roles")
+
+# Prefijo propio (no /identity): `GET /me` es de cualquier usuario logueado,
+# sin depender de un permiso específico — es lo que el front usa para saber
+# qué permisos tiene, así que no puede exigir uno él mismo.
+router_me = APIRouter(prefix="/api/v1", tags=["me"])
+
+
+@router_me.get("/me", response_model=MeOut)
+async def get_me(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> MeOut:
+    return await service.get_me(db, user=user)
 
 
 @router.get("/users", response_model=CursorPage[UserOut])

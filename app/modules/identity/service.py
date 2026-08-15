@@ -6,8 +6,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
 from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.security import CurrentUser
+from app.core.security import get_role_permissions as get_cached_role_permissions
 from app.modules.identity import integration, repository
-from app.modules.identity.schemas import PermissionOut, RoleOut, UserOut
+from app.modules.identity.schemas import (
+    MeCompanyOut,
+    MeOut,
+    MePlanOut,
+    MeRoleOut,
+    MeSubscriptionOut,
+    MeUserOut,
+    PermissionOut,
+    RoleOut,
+    UserOut,
+)
+from app.modules.platform import repository as platform_repo
 
 _ADMIN_PERMISSION = "identity.manage_roles"
 
@@ -302,3 +315,42 @@ async def list_permissions(db: AsyncSession) -> list[PermissionOut]:
         )
         for r in rows
     ]
+
+
+async def get_me(db: AsyncSession, *, user: CurrentUser) -> MeOut:
+    """El front no puede saber qué puede hacer el usuario logueado sin esto:
+    `GET /identity/roles/{id}/permissions` exige `identity.manage_roles`, que
+    un Asesor no tiene. Devuelve exactamente el mismo set de permisos
+    (mismo cache TTL 60s) que `require_permission` va a aceptar o rechazar.
+    """
+    role_row = await repository.get_role(db, company_id=user.company_id, role_id=user.role_id)
+    if role_row is None:
+        raise NotFoundError("El rol del usuario no existe en esta empresa.")
+
+    company_row = await platform_repo.get_company_profile(db, company_id=user.company_id)
+    if company_row is None:
+        raise NotFoundError("La empresa no existe.")
+
+    subscription_row = await platform_repo.get_active_subscription_with_plan(
+        db, company_id=user.company_id
+    )
+    if subscription_row is None:
+        raise NotFoundError("La empresa no tiene una suscripción activa.")
+
+    permissions = await get_cached_role_permissions(db, user.role_id)
+
+    cm = company_row._mapping
+    sm = subscription_row._mapping
+    return MeOut(
+        user=MeUserOut(id=user.id, full_name=user.full_name, email=user.email),
+        company=MeCompanyOut(
+            id=cm["id"],
+            name=cm["name"],
+            timezone=(cm["settings"] or {}).get("timezone", "America/Bogota"),
+            logo_url=cm["logo_url"],
+        ),
+        role=MeRoleOut(id=role_row._mapping["id"], name=role_row._mapping["name"]),
+        permissions=permissions,
+        subscription=MeSubscriptionOut(status=sm["status"], expires_at=sm["expires_at"]),
+        plan=MePlanOut(code=sm["plan_code"], name=sm["plan_name"]),
+    )
