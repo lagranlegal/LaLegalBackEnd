@@ -1,0 +1,45 @@
+# Ambiente PROD. Deploy: fly deploy --config fly.prod.toml --app compraventa-backend-prod
+# Solo se despliega acá después de que main recibe el merge desde dev ya
+# probado (ver README/CONTRIBUTING para el flujo de ramas).
+#
+# `min_machines_running = 1`: siempre encendida (sin cold start para
+# clientes reales) — a diferencia de dev, que escala a cero. Un
+# shared-cpu-1x/256MB siempre encendido cuesta ~$2/mes de cómputo (más
+# ancho de banda); subir a 512MB si el uso real lo pide (`fly scale vm`).
+#
+# Secretos (nunca acá — este ambiente necesita su PROPIO proyecto Supabase
+# "prod", todavía no creado — ver docs/ARCHITECTURE.md §8):
+#   fly secrets set -a compraventa-backend-prod \
+#     DATABASE_URL=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=...
+#
+# Job nocturno (crear la máquina programada una vez desplegado el proceso
+# `web`, ver docs/ARCHITECTURE.md §11):
+#   fly machine run . --config fly.prod.toml --app compraventa-backend-prod \
+#     --process-group nightly --schedule daily --region bog --vm-size shared-cpu-1x
+
+app = "compraventa-backend-prod"
+primary_region = "bog"
+
+[build]
+
+[env]
+  ENVIRONMENT = "production"
+
+[processes]
+  web = "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+  nightly = "python -m app.jobs.nightly"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["web"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/v1/health"
