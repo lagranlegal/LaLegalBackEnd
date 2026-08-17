@@ -10,6 +10,7 @@ from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.contracts import service
 from app.modules.contracts.schemas import (
     ContractCreateIn,
+    ContractImportIn,
     ContractOut,
     ContractUpdateIn,
     PaymentCreateIn,
@@ -24,6 +25,7 @@ _create = require_permission("contracts.create")
 _edit = require_permission("contracts.edit")
 _pay = require_permission("payments.create")
 _auction = require_permission("contracts.auction")
+_import = require_permission("contracts.import")
 
 
 @router.get("/ready-for-auction", response_model=list[ContractOut])
@@ -42,6 +44,22 @@ async def create_contract(
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
 ) -> ContractOut:
     return await service.create_contract(
+        db,
+        company_id=user.company_id,
+        body=body,
+        created_by=user.id,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/import", response_model=ContractOut, status_code=201)
+async def import_contract(
+    body: ContractImportIn,
+    user: Annotated[CurrentUser, Depends(_import)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+) -> ContractOut:
+    return await service.import_contract(
         db,
         company_id=user.company_id,
         body=body,

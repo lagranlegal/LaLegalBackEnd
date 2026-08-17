@@ -38,6 +38,18 @@ def months_between(start: date, end: date) -> int:
     return max(months, 0)
 
 
+def months_since_start_exact(start: date, end: date) -> int | None:
+    """N tal que `add_months(start, N) == end`, o `None` si `end` no cae
+    exactamente en un múltiplo entero de meses desde `start` (import de
+    contratos: valida `interest_paid_until` contra `start_date` reusando la
+    misma convención de fin de mes que `due_date`/`months_owed`, en vez de
+    inventar otra — ver docs/MIGRACION_CONTRATOS.md §3)."""
+    n = (end.year - start.year) * 12 + (end.month - start.month)
+    if n < 0:
+        return None
+    return n if add_months(start, n) == end else None
+
+
 def monthly_interest(interest_rate_pct: Decimal, capital_balance: Decimal) -> Decimal:
     """CLAUDE.md: interés mensual = tasa_contrato × saldo_capital_actual."""
     return quantize(interest_rate_pct / Decimal(100) * capital_balance)

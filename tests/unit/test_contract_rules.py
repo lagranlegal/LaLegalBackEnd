@@ -6,6 +6,7 @@ from app.modules.contracts.rules import (
     compute_status,
     monthly_interest,
     months_between,
+    months_since_start_exact,
     quote_payment_options,
 )
 
@@ -51,6 +52,39 @@ class TestMonthsBetween:
 
     def test_several_months(self) -> None:
         assert months_between(date(2025, 1, 1), date(2026, 4, 1)) == 15
+
+
+class TestMonthsSinceStartExact:
+    """docs/MIGRACION_CONTRATOS.md §3: valida `interest_paid_until` contra
+    `start_date` en el import — reusa `add_months`, la misma convención de
+    fin de mes que `due_date`/`months_owed`."""
+
+    def test_same_day_is_zero_months(self) -> None:
+        assert months_since_start_exact(date(2026, 1, 10), date(2026, 1, 10)) == 0
+
+    def test_exact_multiple_of_months(self) -> None:
+        assert months_since_start_exact(date(2026, 1, 10), date(2026, 6, 10)) == 5
+
+    def test_one_day_off_is_misaligned(self) -> None:
+        assert months_since_start_exact(date(2026, 1, 10), date(2026, 6, 11)) is None
+        assert months_since_start_exact(date(2026, 1, 10), date(2026, 6, 9)) is None
+
+    def test_before_start_date_is_misaligned(self) -> None:
+        assert months_since_start_exact(date(2026, 6, 1), date(2026, 5, 1)) is None
+
+    def test_future_prepaid_is_valid(self) -> None:
+        # el cliente pagó intereses por adelantado en el sistema viejo:
+        # interest_paid_until en el futuro respecto a start_date es válido.
+        assert months_since_start_exact(date(2026, 1, 10), date(2027, 1, 10)) == 12
+
+    def test_month_end_clamping_31_to_28(self) -> None:
+        # 31-ene + 1 mes "completo" cae en 28-feb (add_months la recorta ahí,
+        # igual que en months_between) — debe alinear, no rechazar.
+        assert months_since_start_exact(date(2026, 1, 31), date(2026, 2, 28)) == 1
+        assert months_since_start_exact(date(2026, 1, 31), date(2026, 2, 27)) is None
+
+    def test_month_end_clamping_31_to_leap_29(self) -> None:
+        assert months_since_start_exact(date(2028, 1, 31), date(2028, 2, 29)) == 1
 
 
 class TestMonthlyInterest:

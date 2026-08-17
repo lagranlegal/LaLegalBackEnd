@@ -1,6 +1,6 @@
 from app.modules.platform.service import build_seed_role_permissions
 
-# Los 24 códigos exactos de supabase/seed.sql — si el seed cambia, este test
+# Los 25 códigos exactos de supabase/seed.sql — si el seed cambia, este test
 # debe actualizarse a la par (evita que la matriz de roles semilla quede
 # desincronizada del catálogo real sin que nadie se dé cuenta).
 _SEED_PERMISSION_CODES = {
@@ -8,6 +8,7 @@ _SEED_PERMISSION_CODES = {
     "contracts.create",
     "contracts.edit",
     "contracts.auction",
+    "contracts.import",
     "payments.create",
     "payments.apply_discount",
     "customers.view",
@@ -55,6 +56,7 @@ def test_moderador_excludes_exactly_the_documented_codes() -> None:
         "sales.apply_discount",
         "audit.view",
         "company.configure",
+        "contracts.import",
     }
 
 

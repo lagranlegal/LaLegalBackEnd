@@ -43,6 +43,7 @@ _MODERADOR_EXCLUDED_CODES = {
     "sales.apply_discount",
     "audit.view",
     "company.configure",
+    "contracts.import",
 }
 
 

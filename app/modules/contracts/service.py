@@ -12,6 +12,8 @@ from app.core.errors import (
     AppError,
     CashSessionNotOpenError,
     ConflictError,
+    ImportCapitalExceedsPrincipalError,
+    ImportDatesMisalignedError,
     NotFoundError,
     PaymentPartialInterestRejectedError,
     PermissionDeniedError,
@@ -22,6 +24,7 @@ from app.modules.catalogs import repository as catalogs_repo
 from app.modules.contracts import repository, rules
 from app.modules.contracts.schemas import (
     ContractCreateIn,
+    ContractImportIn,
     ContractItemOut,
     ContractOut,
     ContractUpdateIn,
@@ -182,15 +185,18 @@ async def create_contract(
         legacy_code=body.legacy_code,
         customer_id=body.customer_id,
         principal=body.principal,
+        capital_balance=body.principal,
         appraisal_value=body.appraisal_value,
         interest_rate_pct=body.interest_rate_pct,
         term_months=term_months,
         arrears_window_months=arrears_window_months,
         extension_months=body.extension_months,
+        start_date=start_date,
         due_date=due_date,
         interest_paid_until=start_date,
         ltv_warning=ltv_warning,
         notes=body.notes,
+        signed_photo_url=None,
         created_by=created_by,
         idempotency_key=idempotency_key,
     )
@@ -230,6 +236,145 @@ async def create_contract(
         entity_type="contract",
         entity_id=contract_id,
         after={"number": number, "principal": str(body.principal)},
+    )
+
+    return await get_contract(db, company_id=company_id, contract_id=contract_id)
+
+
+async def import_contract(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: ContractImportIn,
+    created_by: UUID,
+    idempotency_key: str,
+) -> ContractOut:
+    """docs/MIGRACION_CONTRATOS.md: registra la foto financiera al corte de
+    un contrato del sistema anterior. Sin sesión de caja, sin
+    cash_movement — el desembolso ya ocurrió en el pasado. `status` se
+    inserta `active` y pasa por el mismo recálculo que `get_contract`
+    (llamado al final) antes de responder: nunca se acepta un estado en el
+    body, un solo origen de verdad.
+    """
+    existing = await repository.find_contract_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if existing is not None:
+        return await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"])
+
+    legacy_existing = await repository.find_contract_by_legacy_code(
+        db, company_id=company_id, legacy_code=body.legacy_code
+    )
+    if legacy_existing is not None:
+        raise ConflictError(
+            "Ya existe un contrato con ese legacy_code en esta empresa.",
+            code="CONTRACT_LEGACY_CODE_EXISTS",
+        )
+
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    if body.start_date > today:
+        raise AppError("start_date no puede estar en el futuro.")
+    if body.term_months <= 0 or body.arrears_window_months <= 0 or body.extension_months <= 0:
+        raise AppError(
+            "term_months, arrears_window_months y extension_months deben ser mayores a cero."
+        )
+    if not body.items:
+        raise AppError("El contrato debe incluir al menos un artículo.")
+    if body.capital_balance <= 0 or body.capital_balance > body.principal:
+        raise ImportCapitalExceedsPrincipalError(
+            "capital_balance debe ser mayor a cero y no puede superar el principal."
+        )
+
+    aligned_months = rules.months_since_start_exact(body.start_date, body.interest_paid_until)
+    if aligned_months is None:
+        raise ImportDatesMisalignedError(
+            "interest_paid_until debe caer en un número entero de meses completos desde start_date."
+        )
+
+    customer = await customers_repo.get_customer(
+        db, company_id=company_id, customer_id=body.customer_id
+    )
+    if customer is None:
+        raise NotFoundError("El cliente no existe en esta empresa.")
+
+    categories = []
+    for item in body.items:
+        category = await catalogs_repo.get_category(
+            db, company_id=company_id, category_id=item.category_id
+        )
+        if category is None:
+            raise NotFoundError(
+                "Una de las categorías de los artículos no existe.",
+                details={"category_id": str(item.category_id)},
+            )
+        if category._mapping["level"] != _MAX_LEVEL:
+            raise AppError(
+                "Los artículos deben clasificarse en una categoría de nivel 3 (la más específica).",
+                details={"category_id": str(item.category_id)},
+            )
+        categories.append(category)
+
+    due_date = rules.add_months(body.start_date, body.term_months)
+
+    ltv_warning = False
+    if body.appraisal_value and body.appraisal_value > 0:
+        max_ltv_pct = categories[0]._mapping["max_ltv_pct"]
+        if max_ltv_pct is not None:
+            ltv_pct = body.principal / body.appraisal_value * 100
+            ltv_warning = ltv_pct > max_ltv_pct
+
+    contract_id = uuid4()
+    number = await repository.next_number(db, company_id=company_id)
+    await repository.insert_contract(
+        db,
+        contract_id=contract_id,
+        company_id=company_id,
+        number=number,
+        legacy_code=body.legacy_code,
+        customer_id=body.customer_id,
+        principal=body.principal,
+        capital_balance=body.capital_balance,
+        appraisal_value=body.appraisal_value,
+        interest_rate_pct=body.interest_rate_pct,
+        term_months=body.term_months,
+        arrears_window_months=body.arrears_window_months,
+        extension_months=body.extension_months,
+        start_date=body.start_date,
+        due_date=due_date,
+        interest_paid_until=body.interest_paid_until,
+        ltv_warning=ltv_warning,
+        notes=body.notes,
+        signed_photo_url=body.signed_photo_url,
+        created_by=created_by,
+        idempotency_key=idempotency_key,
+    )
+    for item in body.items:
+        await repository.insert_contract_item(
+            db,
+            item_id=uuid4(),
+            company_id=company_id,
+            contract_id=contract_id,
+            category_id=item.category_id,
+            description=item.description,
+            weight_grams=item.weight_grams,
+            serial_imei=item.serial_imei,
+            item_appraisal=item.item_appraisal,
+            photos=item.photos,
+        )
+
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=created_by,
+        module="contracts",
+        action="import_contract",
+        entity_type="contract",
+        entity_id=contract_id,
+        after={
+            "legacy_code": body.legacy_code,
+            "principal": str(body.principal),
+            "capital_balance": str(body.capital_balance),
+        },
     )
 
     return await get_contract(db, company_id=company_id, contract_id=contract_id)

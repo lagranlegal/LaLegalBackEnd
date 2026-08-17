@@ -57,6 +57,16 @@ class PaymentPartialInterestRejectedError(AppError):
     code = "PAYMENT_PARTIAL_INTEREST_REJECTED"
 
 
+class ImportDatesMisalignedError(AppError):
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "IMPORT_DATES_MISALIGNED"
+
+
+class ImportCapitalExceedsPrincipalError(AppError):
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "IMPORT_CAPITAL_EXCEEDS_PRINCIPAL"
+
+
 def _error_response(
     status_code: int, code: str, message: str, details: dict[str, Any]
 ) -> JSONResponse:

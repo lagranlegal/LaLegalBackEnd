@@ -42,6 +42,33 @@ class ContractCreateIn(BaseModel):
     notes: str | None = None
 
 
+class ContractImportIn(BaseModel):
+    """docs/MIGRACION_CONTRATOS.md: importa la foto financiera al corte de
+    un contrato del sistema anterior. A diferencia de `ContractCreateIn`,
+    `term_months`/`arrears_window_months`/`extension_months` NO salen de la
+    categoría: son el snapshot real del contrato viejo, y `capital_balance`
+    puede ya ser menor que `principal` (abonos hechos antes del import).
+    Los límites de negocio (>0, alineación de fechas, etc.) se validan en el
+    servicio -no acá- para poder devolver los códigos de error específicos
+    del import (`IMPORT_*`) en vez del genérico `VALIDATION_ERROR`.
+    """
+
+    legacy_code: str
+    customer_id: UUID
+    principal: Money
+    capital_balance: Decimal = Field(max_digits=14, decimal_places=2)
+    interest_rate_pct: Decimal = Field(gt=0, le=100)
+    term_months: int
+    arrears_window_months: int
+    extension_months: int = 1
+    start_date: date
+    interest_paid_until: date
+    items: list[ContractItemIn]
+    appraisal_value: Money | None = None
+    signed_photo_url: str | None = None
+    notes: str | None = None
+
+
 class ContractUpdateIn(BaseModel):
     appraisal_value: Money | None = None
     notes: str | None = None

@@ -13,6 +13,7 @@ insert into public.permission (code, module, action, is_special, description) va
   ('contracts.create',  'contracts', 'create',  false, 'Crear contratos de empeño'),
   ('contracts.edit',    'contracts', 'edit',    false, 'Editar datos no sensibles del contrato'),
   ('contracts.auction', 'contracts', 'auction', true,  'Rematar contrato (crea artículo en inventario)'),
+  ('contracts.import',  'contracts', 'import',  true,  'Importar contratos del sistema anterior (sin caja, sin cash_movement)'),
   -- Abonos
   ('payments.create',         'payments', 'create',   false, 'Registrar abonos y pagos'),
   ('payments.apply_discount', 'payments', 'discount', true,  'Aplicar descuento sobre intereses'),
@@ -56,7 +57,8 @@ on conflict (code) do nothing;
 --   Moderador:  todos MENOS inventory.create, inventory.exit,
 --               identity.manage_users, identity.manage_roles,
 --               cashbox.open_close, cashbox.reopen, payments.apply_discount,
---               sales.apply_discount, audit.view, company.configure.
+--               sales.apply_discount, audit.view, company.configure,
+--               contracts.import.
 --   Asesor:     contracts.view/create, payments.create, customers.*,
 --               inventory.view, sales.create, cashbox.view.
 --   Bodega:     inventory.view/create, catalogs.manage (proveedores),

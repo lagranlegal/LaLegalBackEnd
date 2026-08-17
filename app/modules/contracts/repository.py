@@ -47,15 +47,18 @@ async def insert_contract(
     legacy_code: str | None,
     customer_id: UUID,
     principal: Decimal,
+    capital_balance: Decimal,
     appraisal_value: Decimal | None,
     interest_rate_pct: Decimal,
     term_months: int,
     arrears_window_months: int,
     extension_months: int,
+    start_date: date,
     due_date: date,
     interest_paid_until: date,
     ltv_warning: bool,
     notes: str | None,
+    signed_photo_url: str | None,
     created_by: UUID,
     idempotency_key: str,
 ) -> None:
@@ -65,13 +68,14 @@ async def insert_contract(
             insert into public.contract
                 (id, company_id, number, legacy_code, customer_id, principal, capital_balance,
                  appraisal_value, interest_rate_pct, term_months, arrears_window_months,
-                 extension_months, due_date, interest_paid_until, ltv_warning, notes, created_by,
-                 idempotency_key)
+                 extension_months, start_date, due_date, interest_paid_until, ltv_warning, notes,
+                 signed_photo_url, created_by, idempotency_key)
             values
-                (:id, :company_id, :number, :legacy_code, :customer_id, :principal, :principal,
-                 :appraisal_value, :interest_rate_pct, :term_months, :arrears_window_months,
-                 :extension_months, :due_date, :interest_paid_until, :ltv_warning, :notes,
-                 :created_by, :idempotency_key)
+                (:id, :company_id, :number, :legacy_code, :customer_id, :principal,
+                 :capital_balance, :appraisal_value, :interest_rate_pct, :term_months,
+                 :arrears_window_months, :extension_months, :start_date, :due_date,
+                 :interest_paid_until, :ltv_warning, :notes, :signed_photo_url, :created_by,
+                 :idempotency_key)
             """
         ),
         {
@@ -81,15 +85,18 @@ async def insert_contract(
             "legacy_code": legacy_code,
             "customer_id": str(customer_id),
             "principal": principal,
+            "capital_balance": capital_balance,
             "appraisal_value": appraisal_value,
             "interest_rate_pct": interest_rate_pct,
             "term_months": term_months,
             "arrears_window_months": arrears_window_months,
             "extension_months": extension_months,
+            "start_date": start_date,
             "due_date": due_date,
             "interest_paid_until": interest_paid_until,
             "ltv_warning": ltv_warning,
             "notes": notes,
+            "signed_photo_url": signed_photo_url,
             "created_by": str(created_by),
             "idempotency_key": idempotency_key,
         },
@@ -105,6 +112,19 @@ async def find_contract_by_idempotency_key(
             "where company_id = :company_id and idempotency_key = :idempotency_key"
         ),
         {"company_id": str(company_id), "idempotency_key": idempotency_key},
+    )
+    return result.first()
+
+
+async def find_contract_by_legacy_code(
+    db: AsyncSession, *, company_id: UUID, legacy_code: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id from public.contract "
+            "where company_id = :company_id and legacy_code = :legacy_code"
+        ),
+        {"company_id": str(company_id), "legacy_code": legacy_code},
     )
     return result.first()
 

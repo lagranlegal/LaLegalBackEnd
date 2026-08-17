@@ -97,7 +97,7 @@ supabase/
 2. **Seguridad base:** verificación JWKS, `get_current_user`, `require_permission`, claims por transacción, tests RLS del esqueleto.
 3. **platform + identity:** crear empresa (con seeds por empresa), suspender, suscripción manual; invitaciones, roles, matriz de permisos, salvaguardas.
 4. **customers + catalogs:** CRUD con validaciones de árbol y letras.
-5. **contracts:** crear contrato (snapshot, consecutivo, PDF con firma), abonos (validación de meses completos), máquina de estados + job, migrados (legacy_code).
+5. **contracts:** crear contrato (snapshot, consecutivo, PDF con firma), abonos (validación de meses completos), máquina de estados + job, migrados (legacy_code — implementado como `POST /contracts/import`, ver `docs/MIGRACION_CONTRATOS.md`).
 6. **cashbox:** sesiones, movimientos automáticos, gastos, cierre con desglose + acta PDF, reapertura.
 7. **inventory + sales:** códigos, ingresos, egresos, ventas, anulación, remate asistido (integra contracts+inventory+cashbox).
 8. **audit + reports:** consulta de auditoría, KPIs, histórico de cierres.
