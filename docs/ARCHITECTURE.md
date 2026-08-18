@@ -29,15 +29,15 @@ flowchart LR
 
     FE -- "login/signup (invitación)" --> Auth
     FE -- "Bearer JWT" --> API
+    FE -. "subida + URLs firmadas\n(supabase-js, sesión propia)" .-> Storage
     API -- "verifica firma\n(JWKS, sin tocar BD)" --> Auth
     API -- "SET ROLE authenticated\n+ claims por TX" --> Pool
     Pool --> PG
-    API -. "URLs firmadas" .-> Storage
 ```
 
 Puntos clave de este diagrama:
 
-- El **front nunca le pega directo a Postgres para escrituras de negocio** — siempre pasa por el backend, que aplica reglas (intereses, estados, caja, etc.). Lecturas simples *podrían* ir directo React→PostgREST protegidas por RLS (decisión de arquitectura tomada), pero hoy todo pasa por la API.
+- El **front nunca le pega directo a Postgres para escrituras de negocio** — siempre pasa por el backend, que aplica reglas (intereses, estados, caja, etc.). Lecturas simples *podrían* ir directo React→PostgREST protegidas por RLS (decisión de arquitectura tomada), pero hoy todo pasa por la API. **Storage es la excepción explícita:** el front sube fotos y pide URLs firmadas directo con `supabase-js` y su propia sesión, sin pasar por la API — no hay lógica de negocio que aplicar, solo aislamiento por `company_id`, que RLS sobre `storage.objects` ya garantiza por sí sola (`docs/STORAGE_PENDIENTE.md` §6).
 - El backend **no valida contraseñas ni emite tokens** — eso es 100% de Supabase Auth. El backend solo **verifica** la firma del JWT contra el JWKS público de Supabase (`SUPABASE_JWKS_URL`), sin ninguna llamada de red a Auth por request (la llave pública se cachea).
 - La conexión a Postgres va por **Supavisor en modo transacción** (puerto 6543), pensado para muchas conexiones cortas desde un backend serverless/contenedor — nunca modo sesión.
 
