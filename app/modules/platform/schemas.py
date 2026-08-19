@@ -18,6 +18,9 @@ class CompanyOut(BaseModel):
     name: str
     status: str
     created_at: datetime
+    plan_code: str | None
+    plan_name: str | None
+    subscription_expires_at: date | None
 
 
 class SubscriptionExtendIn(BaseModel):
@@ -38,4 +41,5 @@ class PlanOut(BaseModel):
     name: str
     code: str
     price: Decimal | None
+    modules: dict[str, bool]
     active: bool

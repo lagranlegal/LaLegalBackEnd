@@ -262,6 +262,86 @@ def test_cannot_edit_item_after_publish(client: TestClient, inventory_tenant: di
     assert response.status_code == 409
 
 
+async def test_update_item_can_correct_category_while_draft(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md #17: un artículo de remate hereda
+    la categoría de la prenda del contrato, que puede no ser la correcta
+    para vender en tienda — debe poder corregirse mientras sigue en draft."""
+    headers = _headers(inventory_tenant["token"])
+    entry = client.post(
+        "/api/v1/inventory/entries", headers=headers, json=_entry_payload(inventory_tenant)
+    ).json()
+    item_id = entry["items"][0]["id"]
+
+    # Segunda rama de categorías nivel 1->2->3 para mover el artículo.
+    company_id = inventory_tenant["company_id"]
+    tech1, tech2, tech3 = uuid4(), uuid4(), uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.category (id, company_id, parent_id, level, name, code_letter) "
+                "values (:id, :cid, null, 1, 'Tecnología', 'T')"
+            ),
+            {"id": str(tech1), "cid": str(company_id)},
+        )
+        await session.execute(
+            text(
+                "insert into public.category (id, company_id, parent_id, level, name, code_letter) "
+                "values (:id, :cid, :parent, 2, 'Celulares', 'E')"
+            ),
+            {"id": str(tech2), "cid": str(company_id), "parent": str(tech1)},
+        )
+        await session.execute(
+            text(
+                "insert into public.category (id, company_id, parent_id, level, name, code_letter) "
+                "values (:id, :cid, :parent, 3, 'Smartphone', 'S')"
+            ),
+            {"id": str(tech3), "cid": str(company_id), "parent": str(tech2)},
+        )
+
+    partial = client.patch(
+        f"/api/v1/inventory/items/{item_id}",
+        headers=headers,
+        json={"cat1_id": str(tech1)},
+    )
+    assert partial.status_code == 400
+
+    response = client.patch(
+        f"/api/v1/inventory/items/{item_id}",
+        headers=headers,
+        json={"cat1_id": str(tech1), "cat2_id": str(tech2), "cat3_id": str(tech3)},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["cat1_id"] == str(tech1)
+    assert body["cat2_id"] == str(tech2)
+    assert body["cat3_id"] == str(tech3)
+
+    published = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=headers,
+        json={"sale_price": "650000.00"},
+    )
+    assert published.status_code == 400  # sin foto todavía, la categoría no lo evita
+
+    client.patch(
+        f"/api/v1/inventory/items/{item_id}",
+        headers=headers,
+        json={"photos": ["https://example.com/foto.jpg"]},
+    )
+    republished = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=headers,
+        json={"sale_price": "650000.00"},
+    )
+    assert republished.status_code == 200, republished.text
+    assert republished.json()["code"].startswith("TES")
+    # Limpieza: inventory_tenant borra categorías por company_id+level en su
+    # teardown (después de borrar inventory_item, que ya referencia estas
+    # categorías) — no hace falta borrar tech1/tech2/tech3 acá.
+
+
 def test_exit_reduces_stock_and_writes_off_at_zero(
     client: TestClient, inventory_tenant: dict
 ) -> None:

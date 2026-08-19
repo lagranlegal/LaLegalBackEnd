@@ -58,7 +58,15 @@ def build_seed_role_permissions(all_codes: set[str]) -> dict[str, set[str]]:
 
 def _row_to_company(row: Row[Any]) -> CompanyOut:
     m = row._mapping
-    return CompanyOut(id=m["id"], name=m["name"], status=m["status"], created_at=m["created_at"])
+    return CompanyOut(
+        id=m["id"],
+        name=m["name"],
+        status=m["status"],
+        created_at=m["created_at"],
+        plan_code=m["plan_code"],
+        plan_name=m["plan_name"],
+        subscription_expires_at=m["subscription_expires_at"],
+    )
 
 
 async def create_company_defaults(
@@ -251,6 +259,7 @@ async def list_plans(db: AsyncSession) -> list[PlanOut]:
             name=r._mapping["name"],
             code=r._mapping["code"],
             price=r._mapping["price"],
+            modules=r._mapping["modules"],
             active=r._mapping["active"],
         )
         for r in rows

@@ -84,8 +84,16 @@ async def list_customers(
     query = f"select {_COLUMNS} from public.customer where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if q:
-        query += " and to_tsvector('spanish', full_name) @@ plainto_tsquery('spanish', :q)"
+        # Nombre: full-text (fragmentos, tildes, orden de palabras). Documento:
+        # coincidencia exacta o por prefijo — en el mostrador se tipea el
+        # número completo o casi completo, nunca un fragmento suelto como en
+        # un nombre, así que no necesita full-text ahí.
+        query += (
+            " and (to_tsvector('spanish', full_name) @@ plainto_tsquery('spanish', :q)"
+            " or doc_number like :doc_prefix)"
+        )
         params["q"] = q
+        params["doc_prefix"] = f"{q}%"
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)

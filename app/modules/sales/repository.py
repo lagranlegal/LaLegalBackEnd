@@ -127,10 +127,22 @@ async def list_sale_lines(db: AsyncSession, *, company_id: UUID, sale_id: UUID) 
 
 
 async def list_sales(
-    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    customer_id: UUID | None,
+    status_filter: str | None,
 ) -> list[Row[Any]]:
     query = f"select {_SALE_COLUMNS} from public.sale where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
+    if customer_id is not None:
+        query += " and customer_id = :customer_id"
+        params["customer_id"] = str(customer_id)
+    if status_filter:
+        query += " and status = :status"
+        params["status"] = status_filter
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)

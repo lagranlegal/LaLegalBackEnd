@@ -73,9 +73,14 @@ Authorization: Bearer <token con app_metadata.platform_role=super_admin>
 ```
 ```json
 201
-{"id": "c1...", "name": "Compraventa El Dorado", "status": "active", "created_at": "2026-08-15T..."}
+{
+  "id": "c1...", "name": "Compraventa El Dorado", "status": "active", "created_at": "2026-08-15T...",
+  "plan_code": "full", "plan_name": "Completo", "subscription_expires_at": "2027-01-01"
+}
 ```
 El admin invitado recibe un correo de Supabase Auth; hasta que no active su cuenta, aparece en `GET /api/v1/identity/users` con `status: "invited"`.
+
+`CompanyOut` (creación, detalle y listado) siempre trae `plan_code`/`plan_name`/`subscription_expires_at` de la suscripción `active` actual — `null` los tres si la empresa no tiene ninguna suscripción activa (recién creada sin insertarla nunca, o vencida). `PlanOut` trae `modules: {"pawn": bool, "store": bool}` además de `{id, name, code, price, active}`.
 
 ## 4. Módulo `identity` (dentro de una empresa)
 
@@ -103,7 +108,7 @@ Todo tenant-scoped: solo ve/afecta datos de la empresa del usuario autenticado (
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `GET` | `/api/v1/customers` | `customers.view` | Lista clientes (paginado). `?q=texto` busca por nombre (full-text en español). |
+| `GET` | `/api/v1/customers` | `customers.view` | Lista clientes (paginado). `?q=texto` busca por nombre (full-text en español) **o por `doc_number`** (coincidencia exacta o por prefijo — pensado para tipear la cédula tal cual, no fragmentos como en un nombre). |
 | `POST` | `/api/v1/customers` | `customers.create` | Crea cliente. Body: `{full_name, doc_type, doc_number, phone, address?, email?, doc_issue_place?, doc_photo_url?, notes?}`. `doc_type` ∈ `cc\|ce\|passport\|nit`. |
 | `GET` | `/api/v1/customers/{id}` | `customers.view` | Detalle. |
 | `PATCH` | `/api/v1/customers/{id}` | `customers.create` | Edición parcial (no hay `customers.edit` en el catálogo de permisos — usa el mismo que crear). No permite cambiar `doc_type`/`doc_number` (identidad del cliente). |
@@ -186,7 +191,7 @@ Acto único diario de apertura/cierre, base única de efectivo (fase 1: una sola
 | `POST` | `/api/v1/inventory/exits` | `inventory.exit` | Egreso (ajuste/daño/devolución a proveedor/uso interno). Body: `{exit_type, reason, lines: [{item_id, quantity}]}`. Sin aprobación adicional — basta el permiso (CLAUDE.md). Descuenta `quantity`; si llega a 0, el ítem queda `written_off`. Auditado. |
 | `GET` | `/api/v1/inventory/exits`, `/{id}` | `inventory.view` | |
 | `GET` | `/api/v1/inventory/items`, `/{id}` | `inventory.view` | `?status=draft\|available\|reserved\|sold\|written_off` filtra. |
-| `PATCH` | `/api/v1/inventory/items/{id}` | `inventory.create` | Solo mientras `status='draft'` (`409` si ya se publicó) — `{name?, description?, sale_price?, photos?}`. |
+| `PATCH` | `/api/v1/inventory/items/{id}` | `inventory.create` | Solo mientras `status='draft'` (`409` si ya se publicó) — `{name?, description?, sale_price?, photos?, cat1_id?, cat2_id?, cat3_id?}`. Los tres campos de categoría son todo-o-nada: mandar uno solo → `400`. Pensado para corregir la categoría heredada de un artículo creado por remate (`origin='auction'`) antes de publicarlo — misma validación de árbol de 3 niveles que `POST /entries`. |
 | `POST` | `/api/v1/inventory/items/{id}/publish` | `inventory.create` | Exige `sale_price` (body) y ≥1 foto ya cargada (`400` si falta cualquiera). Arma el código desde las letras de `cat1`/`cat2`/`cat3` + consecutivo (`next_counter` por prefijo) + letra de proveedor (o `R` si `origin='auction'`). `draft→available`. |
 
 ## 10. Módulo `sales`
@@ -196,7 +201,7 @@ No existe `sales.view` en el catálogo de permisos (seed.sql solo trae `sales.cr
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
 | `POST` | `/api/v1/sales` | `sales.create` (+`sales.apply_discount` si trae descuento) | Header **`Idempotency-Key` obligatorio**. Body: `{customer_id?, payment_method, lines: [{item_id, quantity, unit_price}], discount_amount?, discount_reason?}`. Cada ítem debe estar `available` con `quantity` suficiente. Descuenta stock (a 0 → `sold`); `cash_movement(concept='sale', direction='in', module='store')`; exige sesión de caja abierta (`409 CASH_SESSION_NOT_OPEN` si no). Reenviar la misma `Idempotency-Key` devuelve la misma venta (no duplica ni vuelve a descontar stock). |
-| `GET` | `/api/v1/sales`, `/{id}` | `sales.create` | |
+| `GET` | `/api/v1/sales`, `/{id}` | `sales.create` | `GET /sales` acepta `?customer_id=` y `?status=completed\|voided` (mismos filtros que `contracts`, para el historial de un cliente y para listar solo anuladas sin traer todo y filtrar en el front). |
 | `POST` | `/api/v1/sales/{id}/void` | `sales.void` | Body `{reason}` (obligatorio). Repone stock de cada línea, `cash_movement` contrario (`direction='out'`), auditado. `409` si la venta ya estaba anulada. |
 
 ## 11. Módulo `audit`

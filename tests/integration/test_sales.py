@@ -185,6 +185,7 @@ async def sales_tenant(
 
     await _try_delete("delete from public.sale_line where company_id = :cid")
     await _try_delete("delete from public.sale where company_id = :cid")
+    await _try_delete("delete from public.customer where company_id = :cid")
     await _try_delete("delete from public.inventory_item where company_id = :cid")
     await _try_delete("delete from public.code_counter where company_id = :cid")
     await _try_delete("delete from public.category where company_id = :cid and level = 3")
@@ -379,6 +380,73 @@ async def test_sale_discount_requires_permission(client: TestClient, sales_tenan
     )
     assert allowed.status_code == 201, allowed.text
     assert allowed.json()["total"] == "450000.00"
+
+
+async def test_list_sales_filters_by_customer_and_status(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md #3: GET /sales no tenía NINGÚN
+    filtro — bloqueaba el historial de cliente y listar solo anuladas."""
+    await _open_cash_session(
+        company_id=sales_tenant["company_id"], register_id=sales_tenant["register_id"]
+    )
+    customer_id = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.customer "
+                "(id, company_id, full_name, doc_type, doc_number, phone) "
+                "values (:id, :cid, 'Cliente Filtro', 'cc', :doc, '3000000000')"
+            ),
+            {"id": str(customer_id), "cid": str(sales_tenant["company_id"]), "doc": "111222333"},
+        )
+
+    with_customer = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(customer_id),
+            "payment_method": "cash",
+            "lines": [
+                {"item_id": str(sales_tenant["item_id"]), "quantity": 1, "unit_price": "500000.00"}
+            ],
+        },
+    ).json()
+    without_customer = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "lines": [
+                {"item_id": str(sales_tenant["item_id"]), "quantity": 1, "unit_price": "500000.00"}
+            ],
+        },
+    ).json()
+
+    headers = _headers(sales_tenant["full_token"])
+    by_customer = client.get(
+        "/api/v1/sales", headers=headers, params={"customer_id": str(customer_id)}
+    )
+    assert by_customer.status_code == 200
+    ids = [s["id"] for s in by_customer.json()["items"]]
+    assert with_customer["id"] in ids
+    assert without_customer["id"] not in ids
+
+    client.post(
+        f"/api/v1/sales/{with_customer['id']}/void",
+        headers=headers,
+        json={"reason": "prueba de filtro"},
+    )
+    voided = client.get("/api/v1/sales", headers=headers, params={"status": "voided"})
+    assert voided.status_code == 200
+    voided_ids = [s["id"] for s in voided.json()["items"]]
+    assert with_customer["id"] in voided_ids
+    assert without_customer["id"] not in voided_ids
+
+    completed = client.get("/api/v1/sales", headers=headers, params={"status": "completed"})
+    completed_ids = [s["id"] for s in completed.json()["items"]]
+    assert without_customer["id"] in completed_ids
+    assert with_customer["id"] not in completed_ids
 
 
 async def test_void_sale_restores_stock_and_blocks_double_void(

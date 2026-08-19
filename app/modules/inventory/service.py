@@ -276,6 +276,9 @@ async def get_item(db: AsyncSession, *, company_id: UUID, item_id: UUID) -> Item
     return _row_to_item(row)
 
 
+_CATEGORY_FIELDS = {"cat1_id", "cat2_id", "cat3_id"}
+
+
 async def update_item(
     db: AsyncSession, *, company_id: UUID, item_id: UUID, body: ItemUpdateIn
 ) -> ItemOut:
@@ -285,6 +288,21 @@ async def update_item(
     if row._mapping["status"] != "draft":
         raise ConflictError("Solo se puede editar un artículo mientras está en borrador.")
     fields = body.model_dump(exclude_unset=True)
+
+    provided_cat_fields = _CATEGORY_FIELDS & fields.keys()
+    if provided_cat_fields:
+        if provided_cat_fields != _CATEGORY_FIELDS:
+            raise AppError(
+                "Para corregir la categoría hay que enviar cat1_id, cat2_id y cat3_id juntos."
+            )
+        await _validate_category_chain(
+            db,
+            company_id=company_id,
+            cat1_id=fields["cat1_id"],
+            cat2_id=fields["cat2_id"],
+            cat3_id=fields["cat3_id"],
+        )
+
     if fields:
         await repository.update_item_fields(
             db, company_id=company_id, item_id=item_id, fields=fields

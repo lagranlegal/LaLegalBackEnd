@@ -34,12 +34,16 @@ async def list_sales(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    customer_id: Annotated[UUID | None, Query()] = None,
+    status: str | None = Query(default=None),
 ) -> CursorPage[SaleOut]:
     return await service.list_sales(
         db,
         company_id=user.company_id,
         cursor=decode_cursor(cursor) if cursor else None,
         limit=limit,
+        customer_id=customer_id,
+        status_filter=status,
     )
 
 

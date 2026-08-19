@@ -218,6 +218,42 @@ def test_suspend_and_activate_company(
     assert activate_resp.json()["status"] == "active"
 
 
+def test_created_company_includes_plan_and_subscription_expiry(created_company: dict) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md #4/#14: el panel de plataforma
+    necesita ver el plan y la fecha de expiración sin un segundo request."""
+    assert created_company["plan_code"] == "full"
+    assert created_company["plan_name"] == "Completo"
+    assert created_company["subscription_expires_at"] == "2099-01-01"
+
+
+def test_get_and_list_companies_include_plan_and_subscription(
+    client: TestClient, created_company: dict, super_admin_token: str
+) -> None:
+    headers = {"Authorization": f"Bearer {super_admin_token}"}
+    company_id = created_company["id"]
+
+    detail = client.get(f"/api/v1/platform/companies/{company_id}", headers=headers)
+    assert detail.status_code == 200
+    assert detail.json()["plan_code"] == "full"
+
+    listing = client.get("/api/v1/platform/companies", headers=headers)
+    assert listing.status_code == 200
+    row = next(c for c in listing.json()["items"] if c["id"] == company_id)
+    assert row["plan_code"] == "full"
+    assert row["subscription_expires_at"] == "2099-01-01"
+
+
+def test_list_plans_includes_modules(client: TestClient, super_admin_token: str) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md #14: PlanOut no exponía `modules`
+    aunque la columna ya existe con datos reales en `plan`."""
+    response = client.get(
+        "/api/v1/platform/plans", headers={"Authorization": f"Bearer {super_admin_token}"}
+    )
+    assert response.status_code == 200
+    full_plan = next(p for p in response.json() if p["code"] == "full")
+    assert full_plan["modules"] == {"pawn": True, "store": True}
+
+
 def test_extend_subscription(
     client: TestClient, created_company: dict, super_admin_token: str
 ) -> None:

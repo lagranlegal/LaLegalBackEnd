@@ -36,6 +36,12 @@ class ItemUpdateIn(BaseModel):
     description: str | None = None
     sale_price: Money | None = None
     photos: list[str] | None = None
+    # Solo mientras status='draft' (mismo gate que el resto de este schema).
+    # Si se manda alguno de los tres, hay que mandar los tres juntos — ver
+    # inventory.service.update_item.
+    cat1_id: UUID | None = None
+    cat2_id: UUID | None = None
+    cat3_id: UUID | None = None
 
 
 class ItemPublishIn(BaseModel):

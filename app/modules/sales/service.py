@@ -187,9 +187,22 @@ async def get_sale(db: AsyncSession, *, company_id: UUID, sale_id: UUID) -> Sale
 
 
 async def list_sales(
-    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    customer_id: UUID | None = None,
+    status_filter: str | None = None,
 ) -> CursorPage[SaleOut]:
-    rows = await repository.list_sales(db, company_id=company_id, cursor=cursor, limit=limit)
+    rows = await repository.list_sales(
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        customer_id=customer_id,
+        status_filter=status_filter,
+    )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     out = []
     for row in page.items:

@@ -77,6 +77,37 @@ def test_get_customer_not_found(client: TestClient, tenant: dict) -> None:
     assert response.status_code == 404
 
 
+def test_list_customers_search_matches_doc_number(client: TestClient, tenant: dict) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md #1: en el mostrador se tipea la
+    cédula, no el nombre — `?q=` debe encontrar por documento también."""
+    created = client.post(
+        "/api/v1/customers",
+        headers=_headers(tenant["token"]),
+        json=_payload(full_name="Ana Gómez", doc_number="900123456"),
+    ).json()
+
+    exact = client.get(
+        "/api/v1/customers", headers=_headers(tenant["token"]), params={"q": "900123456"}
+    )
+    assert exact.status_code == 200
+    assert created["id"] in [item["id"] for item in exact.json()["items"]]
+
+    prefix = client.get(
+        "/api/v1/customers", headers=_headers(tenant["token"]), params={"q": "900123"}
+    )
+    assert created["id"] in [item["id"] for item in prefix.json()["items"]]
+
+    by_name_still_works = client.get(
+        "/api/v1/customers", headers=_headers(tenant["token"]), params={"q": "Gómez"}
+    )
+    assert created["id"] in [item["id"] for item in by_name_still_works.json()["items"]]
+
+    no_match = client.get(
+        "/api/v1/customers", headers=_headers(tenant["token"]), params={"q": "999999999"}
+    )
+    assert created["id"] not in [item["id"] for item in no_match.json()["items"]]
+
+
 def test_update_customer(client: TestClient, tenant: dict) -> None:
     created = client.post(
         "/api/v1/customers", headers=_headers(tenant["token"]), json=_payload()

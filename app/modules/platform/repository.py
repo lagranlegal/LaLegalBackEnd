@@ -6,6 +6,20 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# LEFT JOIN (no inner): una empresa recién creada, suspendida sin
+# suscripción activa, o con la suscripción ya vencida (job nocturno) sigue
+# debiendo listarse — plan_code/plan_name/subscription_expires_at salen
+# null en esos casos, no desaparece la fila.
+_COMPANY_COLUMNS = """
+    c.id, c.name, c.status, c.created_at,
+    p.code as plan_code, p.name as plan_name, s.expires_at as subscription_expires_at
+"""
+_COMPANY_FROM = """
+    from public.company c
+    left join public.subscription s on s.company_id = c.id and s.status = 'active'
+    left join public.plan p on p.id = s.plan_id
+"""
+
 
 async def get_company_timezone(db: AsyncSession, *, company_id: UUID) -> str:
     result = await db.execute(
@@ -29,7 +43,7 @@ async def get_plan_id_by_code(db: AsyncSession, *, code: str) -> UUID | None:
 
 async def list_plans(db: AsyncSession) -> list[Row[Any]]:
     result = await db.execute(
-        text("select id, name, code, price, active from public.plan order by name")
+        text("select id, name, code, price, modules, active from public.plan order by name")
     )
     return list(result.all())
 
@@ -43,7 +57,7 @@ async def insert_company(db: AsyncSession, *, company_id: UUID, name: str) -> No
 
 async def get_company(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
     result = await db.execute(
-        text("select id, name, status, created_at from public.company where id = :id"),
+        text(f"select {_COMPANY_COLUMNS} {_COMPANY_FROM} where c.id = :id"),
         {"id": str(company_id)},
     )
     return result.first()
@@ -60,12 +74,12 @@ async def get_company_profile(db: AsyncSession, *, company_id: UUID) -> Row[Any]
 
 
 async def list_companies(db: AsyncSession, *, cursor: UUID | None, limit: int) -> list[Row[Any]]:
-    query = "select id, name, status, created_at from public.company"
+    query = f"select {_COMPANY_COLUMNS} {_COMPANY_FROM}"
     params: dict[str, Any] = {"limit": limit + 1}
     if cursor is not None:
-        query += " where id > :cursor"
+        query += " where c.id > :cursor"
         params["cursor"] = str(cursor)
-    query += " order by id limit :limit"
+    query += " order by c.id limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
 
