@@ -3,6 +3,8 @@
 > Documento de traspaso — no es una queja sobre el backend, es la lista concreta de huecos reales encontrados construyendo el front, para decidir en equipo qué se resuelve y en qué orden. Cada punto dice qué se verificó, cómo, y por qué importa para el negocio (no solo técnicamente). Última actualización: 19/08/2026 (segunda revisión — se suman los puntos 13 a 18: reportes, panel de plataforma, ajustes de usuario, paginación, edición de artículos de remate, resumen financiero).
 >
 > **Tercera revisión (backend, mismo día):** puntos 1, 3, 4, 17 y la mitad de 14 (`PlanOut.modules` + `CompanyOut` con plan/suscripción) ya resueltos — ver la nota "✅ Resuelto" en cada uno. Puntos 10 y 14 (auditoría) además tenían un diagnóstico distinto al reportado — corregido inline, no era el bug descrito originalmente.
+>
+> **Cuarta revisión (backend, mismo día):** se suma el punto 19 (`ContractItemOut.inventory_item_id`, reportado por el front después de la tercera revisión) — también resuelto.
 
 ## 1. Búsqueda de clientes: solo por nombre, no por documento
 
@@ -158,3 +160,14 @@ Pedido: un apartado con el resumen en dinero de contratos (abonos, desembolsos, 
 Como complemento liviano (no reemplaza lo anterior): agregar una fila corta de KPIs arriba de `ContractsListPage` y `SalesListPage` (cartera activa + capital en mora arriba de contratos; total vendido hoy/este mes arriba de ventas) — mismo patrón `KpiRow` que ya existe en el dashboard, dando contexto inmediato sin salir de la pantalla operativa. Esto sí se puede construir con los datos que YA expone `GET /reports/dashboard` hoy, sin esperar nada nuevo del backend.
 
 **Qué necesita el backend para el resumen completo (no el KPI liviano):** los mismos puntos 1 y 2 del punto 13 — desglose de caja por rango de fechas e intereses cobrados por período son, en la práctica, el "resumen financiero de contratos" que se pide acá. No es una pieza aparte, es el mismo pendiente visto desde dos ángulos de producto distintos (una pantalla de reportes vs. un resumen dentro de contratos) — se resuelven con el mismo trabajo de backend.
+
+## 19. Trazabilidad contrato → artículo de inventario: falta el vínculo inverso
+
+Pedido explícito: poder asociar un artículo rematado a su contrato de origen. La dirección **artículo → contrato** ya se resolvió del lado del front (punto 17: `ItemOut.source_contract_id` ya existía en la API, solo faltaba mostrarlo). La dirección **contrato → artículo** (desde la prenda del contrato, saber en qué artículo específico se convirtió) es la que sí necesita un cambio de backend:
+
+- **`ContractItemOut` no trae `inventory_item_id`**, aunque `docs/pending/API_GUIDE.md` §7 describe explícitamente que existe la columna: *"`contract_item.inventory_item_id` guarda el vínculo"*. Confirmado contra el schema real (`npm run gen:api` sin diff, no es un tipo desactualizado): el campo simplemente no está en la respuesta de la API, aunque exista en la base de datos.
+- El front no puede reconstruir esto de forma confiable por su cuenta: `GET /inventory/items` no tiene filtro por `source_contract_id`, y aunque lo tuviera, un contrato con **varias prendas** genera varios artículos — sin el vínculo por prenda específica, no hay forma de saber cuál artículo corresponde a cuál prenda (emparejar por nombre/descripción sería frágil, no una solución real).
+
+**Sugerencia:** exponer `inventory_item_id` (nullable) en `ContractItemOut` — es literalmente el mismo dato que `ItemOut.source_contract_id` visto desde el otro lado, la columna ya existe según la propia documentación del backend, solo falta incluirla en el schema Pydantic de salida. Con eso, el detalle del contrato podría mostrar, junto a cada prenda ya rematada, un link directo al artículo específico en el que se convirtió (en vez de solo el estado "Rematado").
+
+**✅ Resuelto (19/08/2026):** `ContractItemOut` ya trae `inventory_item_id` (`null` mientras la prenda no se remata). Cero migración — la columna y el `UPDATE` que la llena (`auction_contract` → `mark_item_auctioned`) ya existían; solo faltaba incluirla en el `SELECT` del repositorio y en el schema de salida. Ver `docs/API_GUIDE.md` §7. Test de regresión en `tests/integration/test_auction.py` que compara el `inventory_item_id` de cada prenda en la respuesta de `POST /contracts/{id}/auction` contra el valor real en `contract_item` — no solo "no es null", sino que es exactamente el mismo id.

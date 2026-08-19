@@ -28,6 +28,7 @@ class ContractItemOut(BaseModel):
     item_appraisal: Decimal | None
     status: str
     photos: list[str]
+    inventory_item_id: UUID | None
 
 
 class ContractCreateIn(BaseModel):

@@ -55,6 +55,7 @@ def _row_to_items(rows: list[Row[Any]]) -> list[ContractItemOut]:
                 item_appraisal=m["item_appraisal"],
                 status=m["status"],
                 photos=list(m["photos"] or []),
+                inventory_item_id=m["inventory_item_id"],
             )
         )
     return items

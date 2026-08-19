@@ -15,7 +15,8 @@ _CONTRACT_COLUMNS = (
     "signed_photo_url, created_at"
 )
 _ITEM_COLUMNS = (
-    "id, category_id, description, weight_grams, serial_imei, item_appraisal, status, photos"
+    "id, category_id, description, weight_grams, serial_imei, item_appraisal, status, photos, "
+    "inventory_item_id"
 )
 _PAYMENT_COLUMNS = (
     "id, receipt_number, paid_at, months_covered, interest_amount, capital_amount, "

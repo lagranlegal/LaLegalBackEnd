@@ -244,6 +244,11 @@ async def test_auction_splits_cost_proportional_to_appraisal(
     assert body["status"] == "auctioned"
     for item in body["items"]:
         assert item["status"] == "auctioned"
+        # docs/PENDIENTES_BACKEND_INFRA.md #19: contract_item.inventory_item_id
+        # existía en la BD pero no salía en ContractItemOut — sin esto el
+        # front no puede ir de "prenda rematada" al artículo específico en
+        # el que se convirtió.
+        assert item["inventory_item_id"] is not None
 
     async with AsyncSessionLocal() as session, session.begin():
         inventory_rows = (
@@ -284,3 +289,4 @@ async def test_auction_splits_cost_proportional_to_appraisal(
     assert all(row[0] is not None for row in linked)
     assert entry is not None
     assert entry[0] == "auction"
+    assert {str(row[0]) for row in linked} == {item["inventory_item_id"] for item in body["items"]}
