@@ -236,9 +236,24 @@ def test_get_and_list_companies_include_plan_and_subscription(
     assert detail.status_code == 200
     assert detail.json()["plan_code"] == "full"
 
-    listing = client.get("/api/v1/platform/companies", headers=headers)
-    assert listing.status_code == 200
-    row = next(c for c in listing.json()["items"] if c["id"] == company_id)
+    # Se pagina hasta encontrarla en vez de asumir que cae en la primera
+    # página: `GET /platform/companies` ordena por `id` (UUID aleatorio) y
+    # devuelve 50 por defecto, así que en una BD con varias empresas la recién
+    # creada aparece en cualquier página. Asumirlo hacía fallar este test con
+    # `StopIteration` en cuanto la BD de pruebas acumulaba empresas.
+    row = None
+    cursor = None
+    for _ in range(50):  # tope defensivo, no debería hacer falta
+        params = {"limit": 200, **({"cursor": cursor} if cursor else {})}
+        listing = client.get("/api/v1/platform/companies", headers=headers, params=params)
+        assert listing.status_code == 200
+        page = listing.json()
+        row = next((c for c in page["items"] if c["id"] == company_id), None)
+        if row is not None or not page.get("next_cursor"):
+            break
+        cursor = page["next_cursor"]
+
+    assert row is not None, "la empresa creada no apareció en ninguna página del listado"
     assert row["plan_code"] == "full"
     assert row["subscription_expires_at"] == "2099-01-01"
 
