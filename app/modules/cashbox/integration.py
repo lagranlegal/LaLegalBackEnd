@@ -44,17 +44,28 @@ async def record_movement(
     reference_id: UUID,
     created_by: UUID | None,
     notes: str | None = None,
+    account_id: UUID | None = None,
 ) -> UUID:
+    """`account_id` es opcional durante la fase 2 del catálogo de cuentas: si
+    no viene, se resuelve la cuenta por defecto del tipo que corresponde al
+    `payment_method`. Así las operaciones que todavía no eligen cuenta siguen
+    quedando bien clasificadas en vez de sin cuenta, y el saldo por cuenta no
+    nace incompleto. La fase 3 lo vuelve obligatorio.
+    """
+    if account_id is None:
+        account_id = await _default_account_for(
+            db, company_id=company_id, payment_method=payment_method
+        )
     movement_id = uuid4()
     await db.execute(
         text(
             """
             insert into public.cash_movement
                 (id, company_id, session_id, module, direction, concept, reference_type,
-                 reference_id, amount, payment_method, notes, created_by)
+                 reference_id, amount, payment_method, notes, created_by, account_id)
             values
                 (:id, :company_id, :session_id, :module, :direction, :concept, :reference_type,
-                 :reference_id, :amount, :payment_method, :notes, :created_by)
+                 :reference_id, :amount, :payment_method, :notes, :created_by, :account_id)
             """
         ),
         {
@@ -70,6 +81,29 @@ async def record_movement(
             "payment_method": payment_method,
             "notes": notes,
             "created_by": str(created_by) if created_by else None,
+            "account_id": str(account_id) if account_id else None,
         },
     )
     return movement_id
+
+
+async def _default_account_for(
+    db: AsyncSession, *, company_id: UUID, payment_method: str
+) -> UUID | None:
+    """Cuenta por defecto del tipo que corresponde a un medio de pago.
+
+    `cash` -> la cuenta de efectivo; cualquier otro medio -> la bancaria por
+    defecto. Es el mismo mapeo del backfill de 00024, para que un movimiento
+    creado por código que aún no elige cuenta caiga donde caerían sus
+    hermanos históricos.
+    """
+    tipo = "cash" if payment_method == "cash" else "bank"
+    result = await db.execute(
+        text(
+            "select id from public.account "
+            "where company_id = :cid and type = :type and is_default and active"
+        ),
+        {"cid": str(company_id), "type": tipo},
+    )
+    row = result.first()
+    return UUID(str(row[0])) if row else None

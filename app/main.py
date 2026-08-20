@@ -5,6 +5,7 @@ from app.common.cors import build_cors_config
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.settings import get_settings
+from app.modules.accounts.router import router as accounts_router
 from app.modules.audit.router import router as audit_router
 from app.modules.cashbox.router import router as cashbox_router
 from app.modules.catalogs.router import router as catalogs_router
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
     app.include_router(platform_router)
     app.include_router(identity_router)
     app.include_router(me_router)
+    app.include_router(accounts_router)
     app.include_router(company_router)
     app.include_router(customers_router)
     app.include_router(catalogs_router)
