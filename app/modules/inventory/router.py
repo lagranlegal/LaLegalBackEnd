@@ -11,6 +11,7 @@ from app.modules.inventory import service
 from app.modules.inventory.schemas import (
     EntryCreateIn,
     EntryOut,
+    EntryPayIn,
     ExitCreateIn,
     ExitOut,
     ItemOut,
@@ -38,6 +39,27 @@ async def create_entry(
         body=body,
         registered_by=user.id,
         idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/entries/{entry_id}/pay", response_model=EntryOut)
+async def pay_entry(
+    entry_id: UUID,
+    body: EntryPayIn,
+    user: Annotated[CurrentUser, Depends(_create)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+) -> EntryOut:
+    """Salda una compra registrada como pendiente de pago.
+
+    El egreso cae en la sesión de caja abierta de HOY, no en la fecha de la
+    compra: una sesión cerrada es inmutable y meterle un movimiento
+    invalidaría un acta ya cuadrada. Una compra puede tener `entry_date` de la
+    semana pasada y su pago aparecer en el cierre de hoy — la mercancía entró
+    entonces, la plata sale ahora.
+    """
+    return await service.pay_entry(
+        db, company_id=user.company_id, entry_id=entry_id, body=body, registered_by=user.id
     )
 
 

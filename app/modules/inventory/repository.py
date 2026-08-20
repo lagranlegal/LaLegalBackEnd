@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -13,7 +14,7 @@ _ITEM_COLUMNS = (
 )
 _ENTRY_COLUMNS = (
     "id, number, origin_type, supplier_id, supplier_invoice, contract_id, total_cost, "
-    "notes, payment_method, created_at"
+    "notes, payment_method, entry_date, paid_at, created_at"
 )
 _EXIT_COLUMNS = "id, number, exit_type, reason, created_at"
 
@@ -206,6 +207,8 @@ async def insert_entry(
     # dinero — lo dispara `contracts.auction`, que ya es idempotente.
     payment_method: str | None = None,
     idempotency_key: str | None = None,
+    entry_date: date | None = None,
+    paid_at_now: bool = False,
 ) -> None:
     await db.execute(
         text(
@@ -213,11 +216,12 @@ async def insert_entry(
             insert into public.inventory_entry
                 (id, company_id, number, origin_type, supplier_id, supplier_invoice,
                  contract_id, total_cost, notes, registered_by, payment_method,
-                 idempotency_key)
+                 idempotency_key, entry_date, paid_at)
             values
                 (:id, :company_id, :number, :origin_type, :supplier_id, :supplier_invoice,
                  :contract_id, :total_cost, :notes, :registered_by, :payment_method,
-                 :idempotency_key)
+                 :idempotency_key, coalesce(:entry_date, current_date),
+                 case when :paid_at_now then now() else null end)
             """
         ),
         {
@@ -233,6 +237,8 @@ async def insert_entry(
             "registered_by": str(registered_by) if registered_by else None,
             "payment_method": payment_method,
             "idempotency_key": idempotency_key,
+            "entry_date": entry_date,
+            "paid_at_now": paid_at_now,
         },
     )
 
@@ -452,3 +458,22 @@ async def get_category_chain_letters(
     if row is None or None in row:
         return None
     return (row[0], row[1], row[2])
+
+
+async def mark_entry_paid(
+    db: AsyncSession, *, company_id: UUID, entry_id: UUID, payment_method: str
+) -> None:
+    """Salda una compra pendiente. El `paid_at` es AHORA, no la fecha de la
+    compra: el movimiento de caja cae en la sesión abierta de hoy, que es lo
+    único posible — una sesión cerrada es inmutable.
+    """
+    await db.execute(
+        text(
+            """
+            update public.inventory_entry
+            set payment_method = :payment_method, paid_at = now()
+            where company_id = :company_id and id = :id
+            """
+        ),
+        {"company_id": str(company_id), "id": str(entry_id), "payment_method": payment_method},
+    )

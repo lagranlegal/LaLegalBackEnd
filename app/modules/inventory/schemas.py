@@ -65,10 +65,19 @@ class EntryCreateIn(BaseModel):
     supplier_id: UUID | None = None
     supplier_invoice: str | None = None
     notes: str | None = None
-    # Obligatorio cuando origin_type='purchase' (lo valida el servicio): una
-    # compra entrega plata al proveedor, y el medio es lo que decide si baja
-    # el efectivo esperado del cierre o se concilia por otro medio.
+    # Solo para compras. Si viene, la compra se paga EN EL ACTO: exige caja
+    # abierta y genera el egreso. Si se omite, la compra queda PENDIENTE de
+    # pago —no toca caja, no exige sesión— y se salda después con
+    # `POST /inventory/entries/{id}/pay`.
+    #
+    # Ese es el camino para cargar facturas de días anteriores o de noche con
+    # la caja cerrada: el movimiento de caja no puede insertarse en una sesión
+    # ya cerrada (es inmutable), así que se registra cuando efectivamente se
+    # paga.
     payment_method: PaymentMethod | None = None
+    #: Cuándo ENTRÓ la mercancía (no cuándo se digitó). Por defecto hoy; puede
+    #: ser pasada, nunca futura.
+    entry_date: date | None = None
     lines: list[EntryLineIn] = Field(min_length=1)
 
 
@@ -82,8 +91,15 @@ class EntryOut(BaseModel):
     total_cost: Decimal
     notes: str | None
     payment_method: str | None
+    entry_date: date
+    #: `None` mientras la compra esté pendiente de pago.
+    paid_at: datetime | None
     created_at: datetime
     items: list[ItemOut]
+
+
+class EntryPayIn(BaseModel):
+    payment_method: PaymentMethod
 
 
 class ExitLineIn(BaseModel):

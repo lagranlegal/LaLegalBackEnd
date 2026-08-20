@@ -14,12 +14,14 @@ from app.modules.inventory import repository, rules
 from app.modules.inventory.schemas import (
     EntryCreateIn,
     EntryOut,
+    EntryPayIn,
     ExitCreateIn,
     ExitOut,
     ItemOut,
     ItemPublishIn,
     ItemUpdateIn,
 )
+from app.modules.platform import integration as platform_integration
 
 _LEVEL_1, _LEVEL_2, _LEVEL_3 = 1, 2, 3
 
@@ -59,6 +61,8 @@ def _row_to_entry(row: Row[Any], items: list[ItemOut]) -> EntryOut:
         total_cost=m["total_cost"],
         notes=m["notes"],
         payment_method=m["payment_method"],
+        entry_date=m["entry_date"],
+        paid_at=m["paid_at"],
         created_at=m["created_at"],
         items=items,
     )
@@ -112,20 +116,33 @@ async def create_entry(
     is_purchase = body.origin_type == "purchase"
     if is_purchase and body.supplier_id is None:
         raise AppError("Un ingreso de compra requiere `supplier_id`.")
-    if is_purchase and body.payment_method is None:
-        raise AppError("Un ingreso de compra requiere `payment_method`.")
+    if not is_purchase and body.payment_method is not None:
+        raise AppError("Solo un ingreso de compra puede llevar `payment_method`.")
+
+    # La mercancía no puede haber entrado en el futuro. Sí puede haber entrado
+    # ayer: ese es justamente el caso que esta separación viene a resolver.
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    entry_date = body.entry_date or today
+    if entry_date > today:
+        raise AppError(
+            "`entry_date` no puede ser una fecha futura.",
+            details={"entry_date": str(entry_date), "today": str(today)},
+        )
 
     total_cost = sum((line.unit_cost * line.quantity for line in body.lines), start=Decimal("0"))
 
-    # Una compra entrega plata al proveedor, así que es una operación de caja
-    # como la venta o el abono: sin sesión abierta no puede ocurrir. Un
-    # ingreso 'other' (ajuste, sobrante) no mueve dinero y no la exige.
+    # Solo se exige caja abierta si la compra se PAGA en el acto. Si nace
+    # pendiente (sin `payment_method`), no toca caja: así se pueden cargar
+    # facturas de días anteriores o de noche con la caja cerrada, que era
+    # imposible antes. El pago se registra después con `pay_entry`.
+    pay_now = is_purchase and body.payment_method is not None
     session = None
-    if is_purchase:
+    if pay_now:
         session = await cashbox_integration.get_open_session(db, company_id=company_id)
         if session is None:
             raise CashSessionNotOpenError(
-                "No hay una sesión de caja abierta para registrar una compra."
+                "No hay una sesión de caja abierta para pagar la compra. "
+                "Puedes registrarla como pendiente de pago y saldarla después."
             )
 
     entry_id = uuid4()
@@ -148,6 +165,8 @@ async def create_entry(
         registered_by=registered_by,
         payment_method=body.payment_method if is_purchase else None,
         idempotency_key=idempotency_key,
+        entry_date=entry_date,
+        paid_at_now=pay_now,
     )
 
     item_ids: list[UUID] = []
@@ -430,3 +449,51 @@ async def publish_item(
 
     await repository.publish_item(db, company_id=company_id, item_id=item_id, code=code)
     return await get_item(db, company_id=company_id, item_id=item_id)
+
+
+async def pay_entry(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    entry_id: UUID,
+    body: EntryPayIn,
+    registered_by: UUID,
+) -> EntryOut:
+    """Salda una compra que quedó pendiente de pago.
+
+    El egreso de caja cae en la sesión abierta de HOY, no en la fecha de la
+    compra: una sesión cerrada es inmutable (00007) y meterle un movimiento
+    invalidaría un acta ya cuadrada e impresa. Por eso la compra puede tener
+    `entry_date` de la semana pasada y su pago aparecer en el cierre de hoy —
+    es lo correcto: la mercancía entró entonces, la plata sale ahora.
+    """
+    row = await repository.get_entry(db, company_id=company_id, entry_id=entry_id)
+    if row is None:
+        raise NotFoundError("El ingreso no existe en esta empresa.")
+    m = row._mapping
+    if m["origin_type"] != "purchase":
+        raise AppError("Solo un ingreso de compra puede tener un pago asociado.")
+    if m["paid_at"] is not None:
+        raise ConflictError("Esta compra ya fue pagada.")
+
+    session = await cashbox_integration.get_open_session(db, company_id=company_id)
+    if session is None:
+        raise CashSessionNotOpenError("No hay una sesión de caja abierta para registrar el pago.")
+
+    await repository.mark_entry_paid(
+        db, company_id=company_id, entry_id=entry_id, payment_method=body.payment_method
+    )
+    await cashbox_integration.record_movement(
+        db,
+        session_id=session._mapping["id"],
+        company_id=company_id,
+        module="store",
+        direction="out",
+        concept="purchase",
+        amount=m["total_cost"],
+        payment_method=body.payment_method,
+        reference_type="inventory_entry",
+        reference_id=entry_id,
+        created_by=registered_by,
+    )
+    return await get_entry(db, company_id=company_id, entry_id=entry_id)

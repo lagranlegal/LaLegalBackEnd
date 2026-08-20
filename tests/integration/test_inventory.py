@@ -4,6 +4,7 @@ stock, y la compra a proveedor sale por caja (concepto `purchase`).
 Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -210,6 +211,16 @@ def _entry_payload(tenant: dict, **overrides: object) -> dict:
     return base
 
 
+async def _close_session(tenant: dict) -> None:
+    """Cierra la sesión del fixture con SQL directo — el objetivo es probar el
+    comportamiento sin caja abierta, no el flujo de cierre."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.cash_session set status = 'closed' where id = :sid"),
+            {"sid": str(tenant["session_id"])},
+        )
+
+
 def test_create_entry_creates_draft_items(client: TestClient, inventory_tenant: dict) -> None:
     response = client.post(
         "/api/v1/inventory/entries",
@@ -274,11 +285,16 @@ async def test_purchase_records_cash_movement(client: TestClient, inventory_tena
     assert row.session_id == inventory_tenant["session_id"]
 
 
-def test_purchase_without_payment_method_is_rejected(
+def test_only_a_purchase_can_carry_a_payment_method(
     client: TestClient, inventory_tenant: dict
 ) -> None:
-    payload = _entry_payload(inventory_tenant)
-    del payload["payment_method"]
+    """Reemplaza a `test_purchase_without_payment_method_is_rejected`: desde
+    00020 una compra SÍ puede nacer sin medio de pago (queda pendiente). Lo que
+    sigue sin tener sentido es lo inverso — un ingreso que no es compra con
+    medio de pago sería un remate o un ajuste con egreso de caja, que nadie
+    sabría interpretar en el acta."""
+    payload = _entry_payload(inventory_tenant, origin_type="other")
+    del payload["supplier_id"]
     response = client.post(
         "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=payload
     )
@@ -733,3 +749,135 @@ def test_search_combines_with_status_filter(client: TestClient, inventory_tenant
 
     assert len(_search(client, token, q="cadena", status="draft")) == 1
     assert len(_search(client, token, q="cadena", status="available")) == 0
+
+
+# ---- Compra a crédito y fecha real de entrada (pedido del cliente: el admin
+# carga facturas de días anteriores, o de noche con la caja ya cerrada).
+
+
+@pytest.mark.asyncio
+async def test_purchase_without_payment_method_is_pending_and_needs_no_session(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El caso de las 11 de la noche: sin caja abierta la compra igual se
+    registra, pendiente de pago. Antes esto era imposible — se exigía sesión."""
+    token = inventory_tenant["token"]
+    await _close_session(inventory_tenant)
+
+    payload = _entry_payload(inventory_tenant)
+    del payload["payment_method"]
+    response = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["payment_method"] is None
+    assert body["paid_at"] is None
+
+
+def test_purchase_accepts_a_past_entry_date(client: TestClient, inventory_tenant: dict) -> None:
+    """La mercancía entró ayer aunque se digite hoy. `entry_date` es lo que
+    importa para inventario y costo; el pago es otro hecho."""
+    token = inventory_tenant["token"]
+    ayer = (date.today() - timedelta(days=3)).isoformat()
+
+    payload = _entry_payload(inventory_tenant, entry_date=ayer)
+    del payload["payment_method"]
+    response = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["entry_date"] == ayer
+
+
+def test_purchase_rejects_a_future_entry_date(client: TestClient, inventory_tenant: dict) -> None:
+    payload = _entry_payload(
+        inventory_tenant, entry_date=(date.today() + timedelta(days=1)).isoformat()
+    )
+    del payload["payment_method"]
+    response = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=payload
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_paying_a_pending_purchase_moves_cash_today(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El punto central del diseño: la compra puede ser de la semana pasada,
+    pero su egreso cae en la sesión de HOY. Una sesión cerrada es inmutable, así
+    que no hay forma —ni debería haberla— de afectar la caja de aquel día."""
+    token = inventory_tenant["token"]
+    payload = _entry_payload(
+        inventory_tenant, entry_date=(date.today() - timedelta(days=5)).isoformat()
+    )
+    del payload["payment_method"]
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).json()
+
+    paid = client.post(
+        f"/api/v1/inventory/entries/{entry['id']}/pay",
+        headers=_headers(token),
+        json={"payment_method": "transfer"},
+    )
+    assert paid.status_code == 200, paid.text
+    body = paid.json()
+    assert body["payment_method"] == "transfer"
+    assert body["paid_at"] is not None
+    # La fecha de la mercancía NO se toca al pagar.
+    assert body["entry_date"] == payload["entry_date"]
+
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                text(
+                    "select concept, direction, amount, payment_method, session_id "
+                    "from public.cash_movement "
+                    "where company_id = :cid and reference_id = :eid"
+                ),
+                {"cid": str(inventory_tenant["company_id"]), "eid": entry["id"]},
+            )
+        ).one()
+    assert row.concept == "purchase"
+    assert row.direction == "out"
+    assert row.payment_method == "transfer"
+    # Cae en la sesión abierta de hoy, no en ninguna del pasado.
+    assert row.session_id == inventory_tenant["session_id"]
+
+
+def test_paying_twice_is_rejected(client: TestClient, inventory_tenant: dict) -> None:
+    token = inventory_tenant["token"]
+    payload = _entry_payload(inventory_tenant)
+    del payload["payment_method"]
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).json()
+
+    first = client.post(
+        f"/api/v1/inventory/entries/{entry['id']}/pay",
+        headers=_headers(token),
+        json={"payment_method": "cash"},
+    )
+    assert first.status_code == 200, first.text
+
+    second = client.post(
+        f"/api/v1/inventory/entries/{entry['id']}/pay",
+        headers=_headers(token),
+        json={"payment_method": "cash"},
+    )
+    assert second.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_paying_without_open_session_is_rejected(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    token = inventory_tenant["token"]
+    payload = _entry_payload(inventory_tenant)
+    del payload["payment_method"]
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).json()
+
+    await _close_session(inventory_tenant)
+    response = client.post(
+        f"/api/v1/inventory/entries/{entry['id']}/pay",
+        headers=_headers(token),
+        json={"payment_method": "cash"},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "CASH_SESSION_NOT_OPEN"
