@@ -11,6 +11,7 @@ from app.core.security import get_role_permissions as get_cached_role_permission
 from app.modules.identity import integration, repository
 from app.modules.identity.schemas import (
     MeCompanyOut,
+    MeDocumentsOut,
     MeOut,
     MePlanOut,
     MeRoleOut,
@@ -341,13 +342,25 @@ async def get_me(db: AsyncSession, *, user: CurrentUser) -> MeOut:
 
     cm = company_row._mapping
     sm = subscription_row._mapping
+    company_settings = cm["settings"] or {}
+    documents = company_settings.get("documents") or {}
     return MeOut(
         user=MeUserOut(id=user.id, full_name=user.full_name, email=user.email),
         company=MeCompanyOut(
             id=cm["id"],
             name=cm["name"],
-            timezone=(cm["settings"] or {}).get("timezone", "America/Bogota"),
+            timezone=company_settings.get("timezone", "America/Bogota"),
             logo_url=cm["logo_url"],
+            signature_url=cm["signature_url"],
+            legal_name=cm["legal_name"],
+            tax_id=cm["tax_id"],
+            address=cm["address"],
+            contact_phone=cm["contact_phone"],
+            documents=MeDocumentsOut(
+                header_note=documents.get("header_note"),
+                footer_note=documents.get("footer_note"),
+                legal_notice=documents.get("legal_notice"),
+            ),
         ),
         role=MeRoleOut(id=role_row._mapping["id"], name=role_row._mapping["name"]),
         permissions=permissions,

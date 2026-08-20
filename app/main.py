@@ -8,6 +8,7 @@ from app.core.settings import get_settings
 from app.modules.audit.router import router as audit_router
 from app.modules.cashbox.router import router as cashbox_router
 from app.modules.catalogs.router import router as catalogs_router
+from app.modules.company.router import router as company_router
 from app.modules.contracts.router import router as contracts_router
 from app.modules.customers.router import router as customers_router
 from app.modules.identity.router import router as identity_router
@@ -37,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(platform_router)
     app.include_router(identity_router)
     app.include_router(me_router)
+    app.include_router(company_router)
     app.include_router(customers_router)
     app.include_router(catalogs_router)
     app.include_router(contracts_router)

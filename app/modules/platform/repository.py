@@ -64,10 +64,18 @@ async def get_company(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
 
 
 async def get_company_profile(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
-    """`id, name, logo_url, settings` — para `GET /me` (identity), que
-    necesita más campos de los que trae `get_company`."""
+    """Para `GET /me` (identity), que necesita más campos de los que trae
+    `get_company`. Incluye los datos que los documentos imprimibles estampan
+    (firma, razón social, NIT, dirección, teléfono y los textos de
+    `settings->documents`): imprimir un contrato lo hace cualquier asesor, así
+    que no puede depender de `GET /company/settings`, que exige el permiso
+    `company.configure`.
+    """
     result = await db.execute(
-        text("select id, name, logo_url, settings from public.company where id = :id"),
+        text(
+            "select id, name, logo_url, signature_url, legal_name, tax_id, address, "
+            "contact_phone, settings from public.company where id = :id"
+        ),
         {"id": str(company_id)},
     )
     return result.first()

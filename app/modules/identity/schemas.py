@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class UserOut(BaseModel):
@@ -66,6 +66,22 @@ class MeCompanyOut(BaseModel):
     name: str
     timezone: str
     logo_url: str | None
+    # Lo que necesitan los documentos imprimibles (contrato, acta de cierre,
+    # comprobante) va acá y NO solo en `GET /company/settings`: imprimir un
+    # contrato lo hace cualquier asesor, y ese endpoint exige el permiso
+    # `company.configure`, que un asesor no tiene ni debería tener.
+    signature_url: str | None = None
+    legal_name: str | None = None
+    tax_id: str | None = None
+    address: str | None = None
+    contact_phone: str | None = None
+    documents: "MeDocumentsOut" = Field(default_factory=lambda: MeDocumentsOut())
+
+
+class MeDocumentsOut(BaseModel):
+    header_note: str | None = None
+    footer_note: str | None = None
+    legal_notice: str | None = None
 
 
 class MeRoleOut(BaseModel):
