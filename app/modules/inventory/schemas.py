@@ -38,16 +38,17 @@ class ItemOut(BaseModel):
 
 
 class ItemUpdateIn(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    sale_price: Money | None = None
+    """Solo FOTOS. Desde 00022 el nombre, la descripción, la categoría y el
+    precio pertenecen al producto y se editan con `PATCH /products/{id}`,
+    donde el cambio aplica a todos sus lotes — que es el comportamiento
+    correcto: dos lotes del mismo producto no pueden llamarse distinto ni
+    costar distinto al cliente.
+
+    Las fotos sí son del lote: una pieza de remate tiene las suyas, y un lote
+    puede fotografiarse aparte.
+    """
+
     photos: list[str] | None = None
-    # Solo mientras status='draft' (mismo gate que el resto de este schema).
-    # Si se manda alguno de los tres, hay que mandar los tres juntos — ver
-    # inventory.service.update_item.
-    cat1_id: UUID | None = None
-    cat2_id: UUID | None = None
-    cat3_id: UUID | None = None
 
 
 class ItemPublishIn(BaseModel):

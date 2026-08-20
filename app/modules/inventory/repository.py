@@ -8,10 +8,22 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Desde 00022 el nombre, la categoría, la descripción y el precio viven en
+# `product`: el lote solo guarda lo que es propio de ESA compra. `ItemOut`
+# conserva su forma —sigue exponiendo esos campos— pero salen del JOIN, así
+# que ningún consumidor tuvo que cambiar por la contracción.
 _ITEM_COLUMNS = (
-    "id, code, name, cat1_id, cat2_id, cat3_id, description, origin, supplier_id, "
-    "source_contract_id, cost, sale_price, quantity, status, photos, entry_date, "
-    "product_id, lot_number, created_at"
+    "i.id, i.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description, "
+    "i.origin, i.supplier_id, i.source_contract_id, i.cost, p.sale_price, "
+    "i.quantity, i.status, i.photos, i.entry_date, i.product_id, i.lot_number, "
+    "i.created_at"
+)
+# Los filtros de categoría apuntan a `product` (ahí viven ahora); el de
+# proveedor sigue en el lote, que es de quien se compró ESA vez.
+_ITEM_FILTER_TABLE = {"cat1_id": "p", "cat2_id": "p", "cat3_id": "p", "supplier_id": "i"}
+_ITEM_FROM = (
+    "from public.inventory_item i "
+    "join public.product p on p.id = i.product_id and p.company_id = i.company_id"
 )
 _ENTRY_COLUMNS = (
     "id, number, origin_type, supplier_id, supplier_invoice, contract_id, total_cost, "
@@ -33,11 +45,8 @@ async def insert_item(
     *,
     item_id: UUID,
     company_id: UUID,
-    name: str,
-    cat1_id: UUID,
-    cat2_id: UUID,
-    cat3_id: UUID,
-    description: str | None,
+    product_id: UUID,
+    lot_number: int,
     origin: str,
     supplier_id: UUID | None,
     source_contract_id: UUID | None,
@@ -46,14 +55,18 @@ async def insert_item(
     photos: list[str],
     created_by: UUID | None,
 ) -> None:
+    """Un lote. Desde 00022 no lleva nombre ni categoría ni precio: eso es del
+    producto, y por eso `product_id` es obligatorio al insertar — un lote sin
+    producto no tendría cómo llamarse.
+    """
     await db.execute(
         text(
             """
             insert into public.inventory_item
-                (id, company_id, name, cat1_id, cat2_id, cat3_id, description, origin,
+                (id, company_id, product_id, lot_number, origin,
                  supplier_id, source_contract_id, cost, quantity, photos, created_by)
             values
-                (:id, :company_id, :name, :cat1_id, :cat2_id, :cat3_id, :description, :origin,
+                (:id, :company_id, :product_id, :lot_number, :origin,
                  :supplier_id, :source_contract_id, :cost, :quantity, cast(:photos as jsonb),
                  :created_by)
             """
@@ -61,11 +74,8 @@ async def insert_item(
         {
             "id": str(item_id),
             "company_id": str(company_id),
-            "name": name,
-            "cat1_id": str(cat1_id),
-            "cat2_id": str(cat2_id),
-            "cat3_id": str(cat3_id),
-            "description": description,
+            "product_id": str(product_id),
+            "lot_number": lot_number,
             "origin": origin,
             "supplier_id": str(supplier_id) if supplier_id else None,
             "source_contract_id": str(source_contract_id) if source_contract_id else None,
@@ -80,8 +90,7 @@ async def insert_item(
 async def get_item(db: AsyncSession, *, company_id: UUID, item_id: UUID) -> Row[Any] | None:
     result = await db.execute(
         text(
-            f"select {_ITEM_COLUMNS} from public.inventory_item "
-            "where company_id = :company_id and id = :id"
+            f"select {_ITEM_COLUMNS} {_ITEM_FROM} where i.company_id = :company_id and i.id = :id"
         ),
         {"company_id": str(company_id), "id": str(item_id)},
     )
@@ -102,10 +111,10 @@ async def list_items(
     supplier_id: UUID | None = None,
     origin: str | None = None,
 ) -> list[Row[Any]]:
-    query = f"select {_ITEM_COLUMNS} from public.inventory_item where company_id = :company_id"
+    query = f"select {_ITEM_COLUMNS} {_ITEM_FROM} where i.company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if status_filter:
-        query += " and status = :status"
+        query += " and i.status = :status"
         params["status"] = status_filter
     if q:
         # Código: prefijo case-insensitive. Es la búsqueda del mostrador — el
@@ -120,8 +129,8 @@ async def list_items(
         # publicar), y `like` sobre NULL da NULL, no false — por eso el
         # `coalesce`: sin él, buscar por nombre nunca encontraría un borrador.
         query += (
-            " and (coalesce(code, '') ilike :code_prefix"
-            " or to_tsvector('spanish', name) @@ plainto_tsquery('spanish', :q))"
+            " and (coalesce(i.code, '') ilike :code_prefix"
+            " or to_tsvector('spanish', p.name) @@ plainto_tsquery('spanish', :q))"
         )
         params["q"] = q
         params["code_prefix"] = f"{q}%"
@@ -132,15 +141,15 @@ async def list_items(
         ("supplier_id", supplier_id),
     ):
         if value is not None:
-            query += f" and {column} = :{column}"
+            query += f" and {_ITEM_FILTER_TABLE[column]}.{column} = :{column}"
             params[column] = str(value)
     if origin:
-        query += " and origin = :origin"
+        query += " and i.origin = :origin"
         params["origin"] = origin
     if cursor is not None:
-        query += " and id > :cursor"
+        query += " and i.id > :cursor"
         params["cursor"] = str(cursor)
-    query += " order by id limit :limit"
+    query += " order by i.id limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
 
@@ -336,12 +345,12 @@ async def list_items_for_entry(
     result = await db.execute(
         text(
             f"""
-            select {_ITEM_COLUMNS} from public.inventory_item
-            where company_id = :company_id and id in (
+            select {_ITEM_COLUMNS} {_ITEM_FROM}
+            where i.company_id = :company_id and i.id in (
                 select item_id from public.inventory_entry_line
                 where company_id = :company_id and entry_id = :entry_id
             )
-            order by created_at, id
+            order by i.created_at, i.id
             """
         ),
         {"company_id": str(company_id), "entry_id": str(entry_id)},
@@ -689,9 +698,9 @@ async def list_lots_for_product(
     result = await db.execute(
         text(
             f"""
-            select {_ITEM_COLUMNS} from public.inventory_item
-            where company_id = :company_id and product_id = :product_id
-            order by lot_number, entry_date, id
+            select {_ITEM_COLUMNS} {_ITEM_FROM}
+            where i.company_id = :company_id and i.product_id = :product_id
+            order by i.lot_number, i.entry_date, i.id
             """
         ),
         {"company_id": str(company_id), "product_id": str(product_id)},
@@ -714,33 +723,4 @@ async def update_product_fields(
             f"update public.product set {assignments} where company_id = :company_id and id = :id"
         ),
         params,
-    )
-
-
-async def sync_lot_prices(
-    db: AsyncSession, *, company_id: UUID, product_id: UUID, sale_price: Decimal
-) -> None:
-    """Propaga el precio del producto a todos sus lotes.
-
-    Existe SOLO mientras dure la fase 2 (expandir/migrar/contraer): el precio
-    ya vive en `product`, pero `inventory_item.sale_price` sigue siendo lo que
-    lee el POS al armar la venta. Sin esta propagación, cambiar el precio
-    desde la vista de productos no afectaría lo que se cobra en caja — la
-    doble fuente de verdad se convertiría en un bug de dinero.
-
-    La fase 3 borra `inventory_item.sale_price` y esta función se va con ella.
-
-    No toca los lotes vendidos ni dados de baja: su precio ya es historia y
-    `sale_line` congeló el suyo al vender de todos modos.
-    """
-    await db.execute(
-        text(
-            """
-            update public.inventory_item
-            set sale_price = :price
-            where company_id = :cid and product_id = :pid
-              and status not in ('sold', 'written_off')
-            """
-        ),
-        {"cid": str(company_id), "pid": str(product_id), "price": sale_price},
     )

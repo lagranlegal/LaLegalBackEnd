@@ -51,6 +51,7 @@ async def sales_tenant(
     limited_user_id = uuid4()
     cat1, cat2, cat3 = uuid4(), uuid4(), uuid4()
     item_id = uuid4()
+    product_id = uuid4()
     register_id = uuid4()
 
     full_codes = ("sales.create", "sales.void", "sales.apply_discount")
@@ -137,21 +138,29 @@ async def sales_tenant(
             ),
             {"id": str(cat3), "cid": str(company_id), "parent": str(cat2)},
         )
+        # Desde 00022 el nombre, la categoría y el precio viven en `product`
+        # y el lote es solo la compra: el fixture crea las dos piezas.
         await session.execute(
             text(
-                "insert into public.inventory_item "
-                "(id, company_id, code, name, cat1_id, cat2_id, cat3_id, origin, cost, "
-                " sale_price, quantity, status) "
-                "values (:id, :cid, 'JOC0001I', 'Cadena de oro', :cat1, :cat2, :cat3, 'other', "
-                " 300000, 500000, 3, 'available')"
+                "insert into public.product "
+                "(id, company_id, code, name, cat1_id, cat2_id, cat3_id, sale_price) "
+                "values (:id, :cid, 'JOC0001', 'Cadena de oro', :cat1, :cat2, :cat3, 500000)"
             ),
             {
-                "id": str(item_id),
+                "id": str(product_id),
                 "cid": str(company_id),
                 "cat1": str(cat1),
                 "cat2": str(cat2),
                 "cat3": str(cat3),
             },
+        )
+        await session.execute(
+            text(
+                "insert into public.inventory_item "
+                "(id, company_id, product_id, lot_number, code, origin, cost, quantity, status) "
+                "values (:id, :cid, :pid, 1, 'JOC0001-01I', 'other', 300000, 3, 'available')"
+            ),
+            {"id": str(item_id), "cid": str(company_id), "pid": str(product_id)},
         )
         await session.execute(
             text("insert into public.cash_register (id, company_id) values (:id, :cid)"),
@@ -187,6 +196,7 @@ async def sales_tenant(
     await _try_delete("delete from public.sale where company_id = :cid")
     await _try_delete("delete from public.customer where company_id = :cid")
     await _try_delete("delete from public.inventory_item where company_id = :cid")
+    await _try_delete("delete from public.product where company_id = :cid")
     await _try_delete("delete from public.code_counter where company_id = :cid")
     await _try_delete("delete from public.category where company_id = :cid and level = 3")
     await _try_delete("delete from public.category where company_id = :cid and level = 2")

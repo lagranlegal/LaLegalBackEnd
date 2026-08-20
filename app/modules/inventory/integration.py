@@ -71,16 +71,28 @@ async def create_draft_items_from_auction(
                 details={"category_id": str(auction_item.category_id)},
             )
         cat1_id, cat2_id, cat3_id = chain
-        item_id = uuid4()
-        await repository.insert_item(
+        # Producto ÚNICO por pieza rematada: ese anillo, de ese contrato, no
+        # es "otro lote" de nada y nunca debe agrupar con otra pieza.
+        product_id = uuid4()
+        await repository.insert_product(
             db,
-            item_id=item_id,
+            product_id=product_id,
             company_id=company_id,
             name=auction_item.description,
             cat1_id=cat1_id,
             cat2_id=cat2_id,
             cat3_id=cat3_id,
             description=auction_item.description,
+            is_unique=True,
+        )
+
+        item_id = uuid4()
+        await repository.insert_item(
+            db,
+            item_id=item_id,
+            company_id=company_id,
+            product_id=product_id,
+            lot_number=1,
             origin="auction",
             supplier_id=None,
             source_contract_id=source_contract_id,
@@ -99,28 +111,6 @@ async def create_draft_items_from_auction(
             unit_cost=cost,
         )
 
-        # Producto ÚNICO por pieza rematada (00021): ese anillo, de ese
-        # contrato, no es "otro lote" de nada. Nunca agrupa con otra pieza,
-        # ni siquiera con otra del mismo nombre.
-        product_id = uuid4()
-        await repository.insert_product(
-            db,
-            product_id=product_id,
-            company_id=company_id,
-            name=auction_item.description,
-            cat1_id=cat1_id,
-            cat2_id=cat2_id,
-            cat3_id=cat3_id,
-            description=auction_item.description,
-            is_unique=True,
-        )
-        await repository.set_item_product(
-            db,
-            company_id=company_id,
-            item_id=item_id,
-            product_id=product_id,
-            lot_number=1,
-        )
         result[auction_item.contract_item_id] = item_id
 
     return result

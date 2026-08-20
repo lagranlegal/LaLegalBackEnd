@@ -231,16 +231,29 @@ async def create_entry(
             cat2_id=line.cat2_id,
             cat3_id=line.cat3_id,
         )
-        item_id = uuid4()
-        await repository.insert_item(
+        # El producto se resuelve ANTES del lote: desde 00022 un lote sin
+        # producto no tendría ni nombre ni categoría. Si ya se compró algo
+        # igual, cae en ese producto y suma un lote.
+        product_id = await _resolve_product(
             db,
-            item_id=item_id,
             company_id=company_id,
             name=line.name,
             cat1_id=line.cat1_id,
             cat2_id=line.cat2_id,
             cat3_id=line.cat3_id,
             description=line.description,
+        )
+        lot_number = await repository.next_lot_number(
+            db, company_id=company_id, product_id=product_id
+        )
+
+        item_id = uuid4()
+        await repository.insert_item(
+            db,
+            item_id=item_id,
+            company_id=company_id,
+            product_id=product_id,
+            lot_number=lot_number,
             origin=item_origin,
             supplier_id=body.supplier_id,
             source_contract_id=None,
@@ -259,27 +272,6 @@ async def create_entry(
             unit_cost=line.unit_cost,
         )
 
-        # El lote se enlaza a su producto (00021). Si ya se compró antes lo
-        # mismo, cae en el producto existente y suma un lote; si no, se crea.
-        product_id = await _resolve_product(
-            db,
-            company_id=company_id,
-            name=line.name,
-            cat1_id=line.cat1_id,
-            cat2_id=line.cat2_id,
-            cat3_id=line.cat3_id,
-            description=line.description,
-        )
-        lot_number = await repository.next_lot_number(
-            db, company_id=company_id, product_id=product_id
-        )
-        await repository.set_item_product(
-            db,
-            company_id=company_id,
-            item_id=item_id,
-            product_id=product_id,
-            lot_number=lot_number,
-        )
         item_ids.append(item_id)
 
     # El movimiento de caja va en la MISMA transacción que el ingreso y sus
@@ -440,32 +432,20 @@ async def get_item(db: AsyncSession, *, company_id: UUID, item_id: UUID) -> Item
     return _row_to_item(row)
 
 
-_CATEGORY_FIELDS = {"cat1_id", "cat2_id", "cat3_id"}
-
-
 async def update_item(
     db: AsyncSession, *, company_id: UUID, item_id: UUID, body: ItemUpdateIn
 ) -> ItemOut:
+    """Solo fotos. El nombre, la descripción, la categoría y el precio se
+    editan en el PRODUCTO (`PATCH /products/{id}`) desde 00022: son atributos
+    de qué es el artículo, no de esta compra puntual, y editarlos por lote
+    permitía que dos lotes del mismo producto divergieran.
+    """
     row = await repository.get_item(db, company_id=company_id, item_id=item_id)
     if row is None:
         raise NotFoundError("El artículo no existe en esta empresa.")
     if row._mapping["status"] != "draft":
         raise ConflictError("Solo se puede editar un artículo mientras está en borrador.")
     fields = body.model_dump(exclude_unset=True)
-
-    provided_cat_fields = _CATEGORY_FIELDS & fields.keys()
-    if provided_cat_fields:
-        if provided_cat_fields != _CATEGORY_FIELDS:
-            raise AppError(
-                "Para corregir la categoría hay que enviar cat1_id, cat2_id y cat3_id juntos."
-            )
-        await _validate_category_chain(
-            db,
-            company_id=company_id,
-            cat1_id=fields["cat1_id"],
-            cat2_id=fields["cat2_id"],
-            cat3_id=fields["cat3_id"],
-        )
 
     if fields:
         await repository.update_item_fields(
@@ -487,10 +467,8 @@ async def publish_item(
     if not photos:
         raise AppError("El artículo necesita al menos una foto para publicarse.")
 
-    await repository.update_item_fields(
-        db, company_id=company_id, item_id=item_id, fields={"sale_price": body.sale_price}
-    )
-
+    # El precio va SOLO al producto (más abajo). Desde 00022 el lote ya no
+    # tiene columna de precio: el dato existe una sola vez.
     letters = await repository.get_category_chain_letters(
         db, company_id=company_id, cat1_id=m["cat1_id"], cat2_id=m["cat2_id"], cat3_id=m["cat3_id"]
     )
@@ -537,10 +515,8 @@ async def publish_item(
             db, company_id=company_id, product_id=product_id, code=product_code
         )
 
-    # El precio va al PRODUCTO, no al lote: aplica a todos sus lotes de una
-    # vez. Se sigue escribiendo también en el ítem mientras dure la fase 2
-    # (expandir/migrar/contraer) para no romper lo que todavía lo lee de ahí;
-    # la fase 3 quita esa columna.
+    # El precio va al producto: aplica a todos sus lotes de una vez, y desde
+    # 00022 es el único lugar donde vive.
     await repository.set_product_price(
         db, company_id=company_id, product_id=product_id, sale_price=body.sale_price
     )
@@ -673,18 +649,10 @@ async def update_product(
         db, company_id=company_id, product_id=product_id, fields=fields
     )
 
-    # El precio nuevo tiene que llegar a los lotes: el POS arma la venta con
-    # `inventory_item.sale_price`, así que sin esto cambiar el precio desde la
-    # vista de productos no afectaría lo que se cobra en caja. Es la doble
-    # fuente de verdad de la fase 2, sincronizada a propósito hasta que la
-    # fase 3 elimine la columna duplicada.
-    if fields.get("sale_price") is not None:
-        await repository.sync_lot_prices(
-            db,
-            company_id=company_id,
-            product_id=product_id,
-            sale_price=fields["sale_price"],
-        )
+    # Ya NO hay que propagar el precio a los lotes: desde 00022 el dato existe
+    # una sola vez, en `product`. Esa propagación existió durante la fase 2 y
+    # se fue con la columna duplicada — que era justamente el punto de
+    # contraer.
 
     rows = await repository.list_products(
         db, company_id=company_id, cursor=None, limit=1000, include_unique=True
