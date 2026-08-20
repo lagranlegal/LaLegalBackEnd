@@ -63,6 +63,12 @@ async def _cleanup_company(company_id: uuid.UUID) -> None:
     # company/role — se deja huérfano a propósito, no bloquea el resto del
     # cleanup.
     async with AsyncSessionLocal() as session, session.begin():
+        # subscription_event referencia subscription y company: se borra antes
+        # que ambas.
+        await session.execute(
+            text("delete from public.subscription_event where company_id = :id"),
+            {"id": str(company_id)},
+        )
         await session.execute(
             text("delete from public.app_user where company_id = :id"), {"id": str(company_id)}
         )
@@ -281,3 +287,106 @@ def test_extend_subscription(
         json={"new_expires_at": "2099-12-31", "notes": "prueba de integración"},
     )
     assert response.status_code == 204
+
+
+# ---- Historial comercial de la suscripción (docs/PENDIENTES_BACKEND_INFRA.md
+# #14: la fila de `subscription` se sobrescribe en cada extensión y el
+# `audit_log` es tenant-scoped, así que el rastro existía pero era inalcanzable
+# y perdía las notas de cada renovación).
+
+
+def _events(client: TestClient, token: str, company_id: str) -> list[dict]:
+    response = client.get(
+        f"/api/v1/platform/companies/{company_id}/subscription/events",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    return list(response.json()["items"])
+
+
+def test_company_creation_records_first_event(
+    client: TestClient, created_company: dict, super_admin_token: str
+) -> None:
+    """Sin el evento de alta, una empresa que nunca renovó tendría historial
+    vacío y no se distinguiría de una a la que se le perdieron los eventos."""
+    events = _events(client, super_admin_token, created_company["id"])
+    assert [e["event_type"] for e in events] == ["created"]
+    assert events[0]["new_expires_at"] == "2099-01-01"
+
+
+def test_extension_records_amount_and_notes(
+    client: TestClient, created_company: dict, super_admin_token: str
+) -> None:
+    """Las `notes` de cada extensión se perdían: la fila de `subscription` las
+    sobrescribe y el `audit_log` solo copia `expires_at`."""
+    headers = {"Authorization": f"Bearer {super_admin_token}"}
+    company_id = created_company["id"]
+
+    client.post(
+        f"/api/v1/platform/companies/{company_id}/subscription/extend",
+        headers=headers,
+        json={
+            "new_expires_at": "2099-06-30",
+            "notes": "pagó por transferencia",
+            "amount": "150000.00",
+        },
+    )
+
+    events = _events(client, super_admin_token, company_id)
+    assert [e["event_type"] for e in events] == ["extended", "created"]  # más reciente primero
+    extended = events[0]
+    assert extended["previous_expires_at"] == "2099-01-01"
+    assert extended["new_expires_at"] == "2099-06-30"
+    assert extended["amount"] == "150000.00"
+    assert extended["notes"] == "pagó por transferencia"
+
+
+def test_extension_without_amount_is_valid(
+    client: TestClient, created_company: dict, super_admin_token: str
+) -> None:
+    """El cobro es manual y fuera del sistema: registrar el monto es una
+    conveniencia, no un requisito."""
+    headers = {"Authorization": f"Bearer {super_admin_token}"}
+    company_id = created_company["id"]
+
+    response = client.post(
+        f"/api/v1/platform/companies/{company_id}/subscription/extend",
+        headers=headers,
+        json={"new_expires_at": "2099-07-31"},
+    )
+    assert response.status_code == 204
+
+    assert _events(client, super_admin_token, company_id)[0]["amount"] is None
+
+
+def test_suspend_and_activate_are_recorded_without_dates(
+    client: TestClient, created_company: dict, super_admin_token: str
+) -> None:
+    """Suspender no mueve el vencimiento — así el historial distingue "renovó
+    hasta X" de "le cortaron el acceso"."""
+    headers = {"Authorization": f"Bearer {super_admin_token}"}
+    company_id = created_company["id"]
+
+    client.post(f"/api/v1/platform/companies/{company_id}/suspend", headers=headers)
+    client.post(f"/api/v1/platform/companies/{company_id}/activate", headers=headers)
+
+    events = _events(client, super_admin_token, company_id)
+    assert [e["event_type"] for e in events] == ["activated", "suspended", "created"]
+    for event in events[:2]:
+        assert event["previous_expires_at"] is None
+        assert event["new_expires_at"] is None
+
+
+def test_subscription_events_require_super_admin(client: TestClient, created_company: dict) -> None:
+    response = client.get(f"/api/v1/platform/companies/{created_company['id']}/subscription/events")
+    assert response.status_code == 401
+
+
+def test_subscription_events_for_unknown_company_is_404(
+    client: TestClient, super_admin_token: str
+) -> None:
+    response = client.get(
+        f"/api/v1/platform/companies/{uuid4()}/subscription/events",
+        headers={"Authorization": f"Bearer {super_admin_token}"},
+    )
+    assert response.status_code == 404

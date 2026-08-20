@@ -26,6 +26,21 @@ class CompanyOut(BaseModel):
 class SubscriptionExtendIn(BaseModel):
     new_expires_at: date
     notes: str | None = None
+    # Opcional: el cobro es manual y fuera del sistema (CONTEXTO.md §3).
+    # Registrarlo da trazabilidad básica de "quién pagó cuánto y cuándo" sin
+    # construir un módulo de facturación; una extensión sin monto es válida.
+    amount: Decimal | None = None
+
+
+class SubscriptionEventOut(BaseModel):
+    id: UUID
+    event_type: str
+    previous_expires_at: date | None
+    new_expires_at: date | None
+    amount: Decimal | None
+    notes: str | None
+    created_by: UUID | None
+    created_at: datetime
 
 
 class SubscriptionOut(BaseModel):

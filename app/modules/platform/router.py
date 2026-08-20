@@ -12,6 +12,7 @@ from app.modules.platform.schemas import (
     CompanyCreateIn,
     CompanyOut,
     PlanOut,
+    SubscriptionEventOut,
     SubscriptionExtendIn,
 )
 
@@ -86,6 +87,31 @@ async def extend_subscription(
         new_expires_at=body.new_expires_at,
         notes=body.notes,
         actor_id=claims.sub,
+        amount=body.amount,
+    )
+
+
+@router.get(
+    "/companies/{company_id}/subscription/events",
+    response_model=CursorPage[SubscriptionEventOut],
+)
+async def list_subscription_events(
+    company_id: UUID,
+    _claims: Annotated[TokenClaims, Depends(require_super_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    cursor: str | None = None,
+    limit: int = 50,
+) -> CursorPage[SubscriptionEventOut]:
+    """Historial comercial de la empresa: altas, renovaciones (con monto y
+    notas), suspensiones, reactivaciones y vencimientos. Distinto del
+    `audit_log`, que es el registro de seguridad y además es tenant-scoped
+    por RLS — un super-admin no puede leer el de otra empresa.
+    """
+    return await service.list_subscription_events(
+        db,
+        company_id=company_id,
+        cursor=decode_cursor(cursor) if cursor else None,
+        limit=limit,
     )
 
 

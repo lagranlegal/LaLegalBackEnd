@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -192,3 +193,70 @@ async def insert_cash_register(db: AsyncSession, *, company_id: UUID) -> None:
         text("insert into public.cash_register (company_id) values (:company_id)"),
         {"company_id": str(company_id)},
     )
+
+
+async def insert_subscription_event(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    subscription_id: UUID | None,
+    event_type: str,
+    previous_expires_at: date | None = None,
+    new_expires_at: date | None = None,
+    amount: Decimal | None = None,
+    notes: str | None = None,
+    created_by: UUID | None = None,
+) -> None:
+    """Historial COMERCIAL de la suscripción (00018) — distinto del
+    `audit_log`, que es el registro de seguridad y además es tenant-scoped
+    por RLS (un super-admin no puede leer el de otra empresa).
+    """
+    await db.execute(
+        text(
+            """
+            insert into public.subscription_event
+                (company_id, subscription_id, event_type, previous_expires_at,
+                 new_expires_at, amount, notes, created_by)
+            values
+                (:company_id, :subscription_id, :event_type, :previous_expires_at,
+                 :new_expires_at, :amount, :notes, :created_by)
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "subscription_id": str(subscription_id) if subscription_id else None,
+            "event_type": event_type,
+            "previous_expires_at": previous_expires_at,
+            "new_expires_at": new_expires_at,
+            "amount": amount,
+            "notes": notes,
+            "created_by": str(created_by) if created_by else None,
+        },
+    )
+
+
+async def list_subscription_events(
+    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+) -> list[Row[Any]]:
+    """Más recientes primero: el super-admin abre esto para ver "¿cuándo
+    renovó por última vez?", no para leer la historia desde el principio.
+    El cursor pagina por `created_at` descendente con desempate por `id`
+    (dos eventos del mismo instante son posibles si algo se scriptea).
+    """
+    query = """
+        select id, company_id, subscription_id, event_type, previous_expires_at,
+               new_expires_at, amount, notes, created_by, created_at
+        from public.subscription_event
+        where company_id = :company_id
+    """
+    params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
+    if cursor is not None:
+        query += """
+            and (created_at, id) < (
+                select created_at, id from public.subscription_event where id = :cursor
+            )
+        """
+        params["cursor"] = str(cursor)
+    query += " order by created_at desc, id desc limit :limit"
+    result = await db.execute(text(query), params)
+    return list(result.all())

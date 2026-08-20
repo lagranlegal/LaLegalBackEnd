@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -11,7 +12,7 @@ from app.modules.identity import integration as identity_integration
 from app.modules.identity import repository as identity_repo
 from app.modules.platform import integration as platform_integration
 from app.modules.platform import repository
-from app.modules.platform.schemas import CompanyOut, PlanOut
+from app.modules.platform.schemas import CompanyOut, PlanOut, SubscriptionEventOut
 
 # Matriz de roles semilla — literal del comentario de seed.sql (referencia
 # para create_company_defaults; el admin de cada empresa puede editarla
@@ -126,6 +127,18 @@ async def create_company_defaults(
         entity_id=company_id,
         after={"name": name, "plan_code": plan_code},
     )
+    # Primer evento del historial comercial: sin él, una empresa que nunca
+    # renovó tendría el historial vacío y no se distinguiría de una cuyos
+    # eventos se perdieron.
+    subscription = await repository.get_active_subscription(db, company_id=company_id)
+    await repository.insert_subscription_event(
+        db,
+        company_id=company_id,
+        subscription_id=subscription._mapping["id"] if subscription else None,
+        event_type="created",
+        new_expires_at=subscription_expires_at,
+        created_by=None,
+    )
 
     row = await repository.get_company(db, company_id=company_id)
     assert row is not None
@@ -166,6 +179,19 @@ async def _set_company_status(
         before={"status": current._mapping["status"]},
         after={"status": status},
     )
+    # Además del audit_log: cortar o devolver el acceso a una empresa es un
+    # hecho de la relación comercial, y el audit_log es tenant-scoped por RLS
+    # (el super-admin no puede leerlo de otra empresa). Sin fechas porque
+    # suspender no mueve el vencimiento — el historial distingue así "renovó
+    # hasta X" de "le cortaron el acceso".
+    subscription = await repository.get_active_subscription(db, company_id=company_id)
+    await repository.insert_subscription_event(
+        db,
+        company_id=company_id,
+        subscription_id=subscription._mapping["id"] if subscription else None,
+        event_type="suspended" if status == "suspended" else "activated",
+        created_by=actor_id,
+    )
     row = await repository.get_company(db, company_id=company_id)
     assert row is not None
     return _row_to_company(row)
@@ -192,6 +218,7 @@ async def extend_subscription(
     new_expires_at: date,
     notes: str | None,
     actor_id: UUID,
+    amount: Decimal | None = None,
 ) -> None:
     company = await repository.get_company(db, company_id=company_id)
     if company is None:
@@ -218,6 +245,48 @@ async def extend_subscription(
         entity_id=subscription._mapping["id"],
         before={"expires_at": str(before_expires_at)},
         after={"expires_at": str(new_expires_at)},
+    )
+    # El audit_log solo guarda `expires_at`, así que las `notes` de cada
+    # extensión —el campo donde el super-admin anota cómo pagó el cliente— se
+    # perdían: la fila de `subscription` las sobrescribe y el audit no las
+    # copia. Acá quedan, junto al monto.
+    await repository.insert_subscription_event(
+        db,
+        company_id=company_id,
+        subscription_id=subscription._mapping["id"],
+        event_type="extended",
+        previous_expires_at=before_expires_at,
+        new_expires_at=new_expires_at,
+        amount=amount,
+        notes=notes,
+        created_by=actor_id,
+    )
+
+
+async def list_subscription_events(
+    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+) -> CursorPage[SubscriptionEventOut]:
+    if await repository.get_company(db, company_id=company_id) is None:
+        raise NotFoundError("La empresa no existe.")
+    rows = await repository.list_subscription_events(
+        db, company_id=company_id, cursor=cursor, limit=limit
+    )
+    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    return CursorPage(
+        items=[
+            SubscriptionEventOut(
+                id=r._mapping["id"],
+                event_type=r._mapping["event_type"],
+                previous_expires_at=r._mapping["previous_expires_at"],
+                new_expires_at=r._mapping["new_expires_at"],
+                amount=r._mapping["amount"],
+                notes=r._mapping["notes"],
+                created_by=r._mapping["created_by"],
+                created_at=r._mapping["created_at"],
+            )
+            for r in page.items
+        ],
+        next_cursor=page.next_cursor,
     )
 
 
@@ -246,6 +315,17 @@ async def expire_overdue_subscriptions(db: AsyncSession) -> int:
                 entity_id=m["id"],
                 before={"status": "active", "expires_at": str(m["expires_at"])},
                 after={"status": "expired"},
+            )
+            # El vencimiento automático también es parte del historial: sin
+            # esto, el panel mostraría una empresa cortada sin ninguna línea
+            # que explique cuándo ni por qué dejó de estar vigente.
+            await repository.insert_subscription_event(
+                db,
+                company_id=m["company_id"],
+                subscription_id=m["id"],
+                event_type="expired",
+                previous_expires_at=m["expires_at"],
+                created_by=None,
             )
             expired += 1
     return expired
