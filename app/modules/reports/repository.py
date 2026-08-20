@@ -125,3 +125,63 @@ async def list_closings(
     query += " order by id limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
+
+
+async def profit_summary(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> Row[Any]:
+    """Utilidad BRUTA del período: ingreso por ventas menos su costo de ventas.
+
+    El costo sale de `sale_line.unit_cost` —congelado al vender (00019)— y no
+    de `inventory_item.cost`: un reporte de un período cerrado no debe cambiar
+    porque alguien corrija hoy el costo de un artículo.
+
+    Solo ventas `completed`. Una venta anulada no generó ingreso ni consumió
+    inventario (la anulación repone el stock), así que incluirla inflaría
+    ambos lados y ensuciaría el margen.
+
+    `discount_amount` se resta del ingreso: es un menor ingreso real, no un
+    gasto. Vive en `sale`, no en la línea, así que se agrega aparte y se
+    descuenta del total (por eso el subquery en vez de un join plano — un join
+    con las líneas repetiría el descuento por cada línea de la venta).
+
+    Las fechas se comparan en la zona horaria de la EMPRESA (§10
+    ARCHITECTURE.md), no en UTC: `sold_at` es timestamptz y el "hoy" del
+    negocio termina a medianoche de Bogotá, no de Londres.
+    """
+    result = await db.execute(
+        text(
+            """
+            with ventas as (
+                select id, discount_amount
+                from public.sale
+                where company_id = :company_id
+                  and status = 'completed'
+                  and (sold_at at time zone :tz)::date between :from_date and :to_date
+            ),
+            lineas as (
+                select
+                  coalesce(sum(sl.subtotal), 0)                  as bruto,
+                  coalesce(sum(sl.unit_cost * sl.quantity), 0)   as costo,
+                  coalesce(sum(sl.quantity), 0)                  as unidades
+                from public.sale_line sl
+                join ventas v on v.id = sl.sale_id
+                where sl.company_id = :company_id
+            )
+            select
+              (select count(*) from ventas)                                as sale_count,
+              (select coalesce(sum(discount_amount), 0) from ventas)       as discounts,
+              lineas.bruto                                                 as gross_revenue,
+              lineas.costo                                                 as cost_of_goods_sold,
+              lineas.unidades                                              as units_sold
+            from lineas
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "tz": tz_name,
+            "from_date": from_date,
+            "to_date": to_date,
+        },
+    )
+    return result.one()

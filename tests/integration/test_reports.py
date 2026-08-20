@@ -5,6 +5,7 @@ APIs de contracts/inventory/sales/cashbox ya probadas en pasos anteriores.
 Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
+from datetime import date
 from uuid import uuid4
 
 import pytest
@@ -311,3 +312,117 @@ def test_dashboard_and_closing_history(client: TestClient, reports_tenant: dict)
     assert audit.status_code == 200, audit.text
     audit_actions = [a["action"] for a in audit.json()["items"]]
     assert "close_session" in audit_actions
+
+
+# ---- Utilidad bruta / costo de ventas (docs/PENDIENTES_BACKEND_INFRA.md #24.1:
+# `inventory_item.cost` y `sale_line.unit_price` existían pero nada los cruzaba,
+# así que "¿cuánto gané con lo que vendí?" no tenía respuesta).
+
+
+def _profit(client: TestClient, token: str, frm: str, to: str) -> dict:
+    r = client.get(
+        "/api/v1/reports/profit",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": frm, "to_date": to},
+    )
+    assert r.status_code == 200, r.text
+    return dict(r.json())
+
+
+def test_profit_summary_crosses_cost_against_price(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Costo 100.000 + 150.000, vendidos a 200.000 y 300.000 → utilidad
+    250.000 sobre ingreso 500.000 = 50% de margen."""
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "500000.00"}
+    )
+
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "purchase",
+            "supplier_id": str(reports_tenant["supplier_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "name": "Anillo barato",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit_cost": "100000.00",
+                    "photos": ["http://example.com/a.jpg"],
+                },
+                {
+                    "name": "Anillo caro",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit_cost": "150000.00",
+                    "photos": ["http://example.com/b.jpg"],
+                },
+            ],
+        },
+    ).json()
+
+    items = {i["cost"]: i for i in entry["items"]}
+    for cost, price in (("100000.00", "200000.00"), ("150000.00", "300000.00")):
+        item = items[cost]
+        client.post(
+            f"/api/v1/inventory/items/{item['id']}/publish",
+            headers=headers,
+            json={"sale_price": price},
+        )
+        sale = client.post(
+            "/api/v1/sales",
+            headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+            json={
+                "payment_method": "cash",
+                "lines": [{"item_id": item["id"], "quantity": 1, "unit_price": price}],
+            },
+        )
+        assert sale.status_code == 201, sale.text
+        # El costo queda CONGELADO en la línea, no se lee del artículo después.
+        assert sale.json()["lines"][0]["unit_cost"] == cost
+
+    today = date.today().isoformat()
+    body = _profit(client, reports_tenant["token"], today, today)
+
+    assert body["sale_count"] == 2
+    assert body["units_sold"] == 2
+    assert float(body["gross_revenue"]) == 500000.0
+    assert float(body["cost_of_goods_sold"]) == 250000.0
+    assert float(body["gross_profit"]) == 250000.0
+    assert float(body["margin_pct"]) == 50.0
+
+
+def test_profit_summary_is_empty_outside_the_range(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Margen `null` y no 0 cuando no hubo ventas: 0% afirma "vendí sin ganar",
+    que es distinto de "no hay datos"."""
+    body = _profit(client, reports_tenant["token"], "2020-01-01", "2020-01-31")
+    assert body["sale_count"] == 0
+    assert float(body["gross_profit"]) == 0.0
+    assert body["margin_pct"] is None
+
+
+def test_profit_summary_rejects_inverted_and_huge_ranges(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    headers = {"Authorization": f"Bearer {reports_tenant['token']}"}
+    inverted = client.get(
+        "/api/v1/reports/profit",
+        headers=headers,
+        params={"from_date": "2026-08-10", "to_date": "2026-08-01"},
+    )
+    assert inverted.status_code == 400
+
+    huge = client.get(
+        "/api/v1/reports/profit",
+        headers=headers,
+        params={"from_date": "2020-01-01", "to_date": "2026-01-01"},
+    )
+    assert huge.status_code == 400

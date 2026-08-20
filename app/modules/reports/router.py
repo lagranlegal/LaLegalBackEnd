@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.reports import service
-from app.modules.reports.schemas import ClosingHistoryOut, DashboardOut
+from app.modules.reports.schemas import ClosingHistoryOut, DashboardOut, ProfitSummaryOut
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 
@@ -38,4 +38,24 @@ async def list_closings(
         limit=limit,
         from_date=from_date,
         to_date=to_date,
+    )
+
+
+@router.get("/profit", response_model=ProfitSummaryOut)
+async def get_profit_summary(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    from_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+    to_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+) -> ProfitSummaryOut:
+    """Utilidad BRUTA del período: lo que entró por ventas menos lo que
+    costó la mercancía vendida. Responde "¿cuánto gané con lo que vendí?",
+    que hasta ahora no tenía respuesta en ningún endpoint.
+
+    No descuenta gastos operativos (esos viven en caja y se reportan aparte)
+    ni cubre el módulo de empeño, cuya rentabilidad son los intereses
+    cobrados y no tiene costo de ventas asociado.
+    """
+    return await service.get_profit_summary(
+        db, company_id=user.company_id, from_date=from_date, to_date=to_date
     )

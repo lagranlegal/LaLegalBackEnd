@@ -45,6 +45,7 @@ def _row_to_line(row: Row[Any]) -> SaleLineOut:
         item_id=m["item_id"],
         quantity=m["quantity"],
         unit_price=m["unit_price"],
+        unit_cost=m["unit_cost"],
         subtotal=m["subtotal"],
     )
 
@@ -88,7 +89,11 @@ async def create_sale(
             )
         subtotal = line.unit_price * line.quantity
         subtotal_sum += subtotal
-        items.append((line, subtotal))
+        # El costo se toma del artículo ACÁ, en el momento de vender, y se
+        # congela en la línea (00019). No se lee al consultar: el costo de una
+        # venta es un hecho histórico y un reporte de un período ya cerrado no
+        # debe moverse si alguien corrige el costo del artículo después.
+        items.append((line, subtotal, m["cost"]))
 
     discount_amount = body.discount_amount or Decimal("0")
     if discount_amount > 0:
@@ -122,7 +127,7 @@ async def create_sale(
         payment_method=body.payment_method,
         idempotency_key=idempotency_key,
     )
-    for line, subtotal in items:
+    for line, subtotal, unit_cost in items:
         await repository.insert_sale_line(
             db,
             line_id=uuid4(),
@@ -131,6 +136,7 @@ async def create_sale(
             item_id=line.item_id,
             quantity=line.quantity,
             unit_price=line.unit_price,
+            unit_cost=unit_cost,
             subtotal=subtotal,
         )
         item = await inventory_repo.get_item(db, company_id=company_id, item_id=line.item_id)

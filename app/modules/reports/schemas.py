@@ -51,3 +51,30 @@ class ClosingHistoryOut(BaseModel):
     difference_reason: str | None
     closed_by: UUID
     closed_at: datetime
+
+
+class ProfitSummaryOut(BaseModel):
+    """Utilidad BRUTA (ingreso por ventas − costo de ventas). NO es la
+    utilidad neta: no descuenta gastos operativos, que viven en caja y ya se
+    reportan aparte en /reportes. Y cubre solo el módulo Tienda — la
+    rentabilidad del empeño son los intereses cobrados, que no tienen costo de
+    ventas asociado.
+    """
+
+    from_date: date
+    to_date: date
+    sale_count: int
+    units_sold: int
+    #: Suma de los subtotales de las líneas, antes de descuentos.
+    gross_revenue: Decimal
+    #: Descuentos aplicados a nivel de venta — menor ingreso, no un gasto.
+    discounts: Decimal
+    #: `gross_revenue - discounts`: lo que realmente entró por ventas.
+    net_revenue: Decimal
+    #: Costo congelado de lo vendido (`sale_line.unit_cost * quantity`).
+    cost_of_goods_sold: Decimal
+    #: `net_revenue - cost_of_goods_sold`.
+    gross_profit: Decimal
+    #: Margen sobre el ingreso neto, en %. `null` si no hubo ventas (evita
+    #: mostrar 0% cuando el dato correcto es "no aplica").
+    margin_pct: Decimal | None

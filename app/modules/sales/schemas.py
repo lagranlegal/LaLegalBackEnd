@@ -29,6 +29,10 @@ class SaleLineOut(BaseModel):
     item_id: UUID
     quantity: int
     unit_price: Decimal
+    # Costo CONGELADO al vender, no leído del artículo al consultar: el costo
+    # de una venta es un hecho histórico y un reporte de un período cerrado no
+    # debe cambiar si alguien corrige el costo del artículo hoy.
+    unit_cost: Decimal
     subtotal: Decimal
 
 

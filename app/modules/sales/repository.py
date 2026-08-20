@@ -10,7 +10,7 @@ _SALE_COLUMNS = (
     "id, number, sold_at, customer_id, discount_amount, total, payment_method, status, "
     "void_reason, created_at"
 )
-_LINE_COLUMNS = "id, item_id, quantity, unit_price, subtotal"
+_LINE_COLUMNS = "id, item_id, quantity, unit_price, unit_cost, subtotal"
 
 
 async def next_number(db: AsyncSession, *, company_id: UUID) -> int:
@@ -82,15 +82,17 @@ async def insert_sale_line(
     item_id: UUID,
     quantity: int,
     unit_price: Decimal,
+    unit_cost: Decimal,
     subtotal: Decimal,
 ) -> None:
     await db.execute(
         text(
             """
             insert into public.sale_line
-                (id, company_id, sale_id, item_id, quantity, unit_price, subtotal)
+                (id, company_id, sale_id, item_id, quantity, unit_price, unit_cost, subtotal)
             values
-                (:id, :company_id, :sale_id, :item_id, :quantity, :unit_price, :subtotal)
+                (:id, :company_id, :sale_id, :item_id, :quantity, :unit_price, :unit_cost,
+                 :subtotal)
             """
         ),
         {
@@ -100,6 +102,7 @@ async def insert_sale_line(
             "item_id": str(item_id),
             "quantity": quantity,
             "unit_price": unit_price,
+            "unit_cost": unit_cost,
             "subtotal": subtotal,
         },
     )
