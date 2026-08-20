@@ -45,6 +45,8 @@ def _row_to_item(row: Row[Any]) -> ItemOut:
         status=m["status"],
         photos=list(m["photos"] or []),
         entry_date=m["entry_date"],
+        product_id=m["product_id"],
+        lot_number=m["lot_number"],
         created_at=m["created_at"],
     )
 
@@ -95,6 +97,55 @@ async def _validate_category_chain(
         raise AppError("cat1_id/cat2_id/cat3_id deben ser, en orden, niveles 1, 2 y 3.")
     if cat2._mapping["parent_id"] != cat1_id or cat3._mapping["parent_id"] != cat2_id:
         raise AppError("La cadena de categorías no forma una rama válida del árbol.")
+
+
+async def _resolve_product(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    name: str,
+    cat1_id: UUID,
+    cat2_id: UUID,
+    cat3_id: UUID,
+    description: str | None,
+    is_unique: bool = False,
+) -> UUID:
+    """Devuelve el producto al que pertenece un lote nuevo, creándolo si es la
+    primera vez que se compra.
+
+    Reponer algo ya comprado NO crea un producto nuevo: cae en el existente y
+    suma un lote. Eso es lo que hace que la lista agrupe, que el precio se
+    cambie una sola vez y que se puedan comparar proveedores del mismo
+    producto — los cuatro síntomas de la propuesta salen de acá.
+
+    Las piezas de remate (`is_unique`) SIEMPRE crean producto propio: un
+    anillo de un contrato no es "otro lote" de nada.
+    """
+    if not is_unique:
+        existing = await repository.find_product(
+            db,
+            company_id=company_id,
+            name=name,
+            cat1_id=cat1_id,
+            cat2_id=cat2_id,
+            cat3_id=cat3_id,
+        )
+        if existing is not None:
+            return UUID(str(existing._mapping["id"]))
+
+    product_id = uuid4()
+    await repository.insert_product(
+        db,
+        product_id=product_id,
+        company_id=company_id,
+        name=name,
+        cat1_id=cat1_id,
+        cat2_id=cat2_id,
+        cat3_id=cat3_id,
+        description=description,
+        is_unique=is_unique,
+    )
+    return product_id
 
 
 async def create_entry(
@@ -204,6 +255,28 @@ async def create_entry(
             item_id=item_id,
             quantity=line.quantity,
             unit_cost=line.unit_cost,
+        )
+
+        # El lote se enlaza a su producto (00021). Si ya se compró antes lo
+        # mismo, cae en el producto existente y suma un lote; si no, se crea.
+        product_id = await _resolve_product(
+            db,
+            company_id=company_id,
+            name=line.name,
+            cat1_id=line.cat1_id,
+            cat2_id=line.cat2_id,
+            cat3_id=line.cat3_id,
+            description=line.description,
+        )
+        lot_number = await repository.next_lot_number(
+            db, company_id=company_id, product_id=product_id
+        )
+        await repository.set_item_product(
+            db,
+            company_id=company_id,
+            item_id=item_id,
+            product_id=product_id,
+            lot_number=lot_number,
         )
         item_ids.append(item_id)
 
@@ -437,13 +510,42 @@ async def publish_item(
             "No se puede emitir el código: el artículo no tiene proveedor y no es de remate."
         )
 
-    prefix = f"{cat1_letter}{cat2_letter}{cat3_letter}"
-    consecutive = await repository.next_counter(db, company_id=company_id, prefix=prefix)
-    code = rules.build_code(
-        cat1_letter=cat1_letter,
-        cat2_letter=cat2_letter,
-        cat3_letter=cat3_letter,
-        consecutive=consecutive,
+    # SKU del producto: se emite al publicar su PRIMER lote, no al crearlo.
+    # Así un producto que nació en un borrador descartado no quema un
+    # consecutivo — misma razón por la que antes el código de la pieza se
+    # emitía al publicar y no al ingresar.
+    product_id = m["product_id"]
+    if product_id is None:
+        raise AppError("El artículo no está asociado a un producto; no se puede emitir el código.")
+    product = await repository.get_product(db, company_id=company_id, product_id=product_id)
+    if product is None:
+        raise AppError("El producto del artículo no existe en esta empresa.")
+
+    product_code = product._mapping["code"]
+    if product_code is None:
+        prefix = f"{cat1_letter}{cat2_letter}{cat3_letter}"
+        consecutive = await repository.next_counter(db, company_id=company_id, prefix=prefix)
+        product_code = rules.build_product_code(
+            cat1_letter=cat1_letter,
+            cat2_letter=cat2_letter,
+            cat3_letter=cat3_letter,
+            consecutive=consecutive,
+        )
+        await repository.set_product_code(
+            db, company_id=company_id, product_id=product_id, code=product_code
+        )
+
+    # El precio va al PRODUCTO, no al lote: aplica a todos sus lotes de una
+    # vez. Se sigue escribiendo también en el ítem mientras dure la fase 2
+    # (expandir/migrar/contraer) para no romper lo que todavía lo lee de ahí;
+    # la fase 3 quita esa columna.
+    await repository.set_product_price(
+        db, company_id=company_id, product_id=product_id, sale_price=body.sale_price
+    )
+
+    code = rules.build_lot_code(
+        product_code=product_code,
+        lot_number=m["lot_number"] or 1,
         suffix_letter=suffix_letter,
     )
 

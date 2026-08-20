@@ -1,6 +1,11 @@
 from decimal import Decimal
 
-from app.modules.inventory.rules import build_code, split_cost_by_appraisal
+from app.modules.inventory.rules import (
+    build_code,
+    build_lot_code,
+    build_product_code,
+    split_cost_by_appraisal,
+)
 
 
 class TestBuildCode:
@@ -65,3 +70,34 @@ class TestSplitCostByAppraisal:
 
     def test_empty_list_returns_empty(self) -> None:
         assert split_cost_by_appraisal(Decimal("100"), []) == []
+
+
+def test_build_product_code_omits_supplier_letter() -> None:
+    """El SKU identifica QUÉ es, no a quién se le compró: el proveedor
+    pertenece al lote. Si el SKU lo llevara, el mismo producto comprado a dos
+    proveedores tendría dos SKU — que es el problema que 00021 corrige."""
+    assert (
+        build_product_code(cat1_letter="J", cat2_letter="A", cat3_letter="O", consecutive=7)
+        == "JAO0007"
+    )
+
+
+def test_build_lot_code_keeps_supplier_traceability() -> None:
+    """El lote conserva la letra del proveedor, así que no se pierde nada de
+    lo que el esquema anterior identificaba — se le suma el producto."""
+
+    def lot(n: int, letter: str) -> str:
+        return build_lot_code(product_code="JAO0007", lot_number=n, suffix_letter=letter)
+
+    assert lot(1, "I") == "JAO0007-01I"
+    assert lot(3, "M") == "JAO0007-03M"
+    # Remate: mismo formato, sufijo R.
+    assert lot(1, "R") == "JAO0007-01R"
+
+
+def test_two_lots_of_the_same_product_share_the_sku() -> None:
+    """La propiedad que hace posible agrupar: el prefijo antes del guion es
+    idéntico aunque cambien proveedor y número de lote."""
+    a = build_lot_code(product_code="JAO0007", lot_number=1, suffix_letter="I")
+    b = build_lot_code(product_code="JAO0007", lot_number=2, suffix_letter="M")
+    assert a.split("-")[0] == b.split("-")[0] == "JAO0007"

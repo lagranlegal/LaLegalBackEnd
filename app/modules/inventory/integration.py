@@ -98,6 +98,29 @@ async def create_draft_items_from_auction(
             quantity=1,
             unit_cost=cost,
         )
+
+        # Producto ÚNICO por pieza rematada (00021): ese anillo, de ese
+        # contrato, no es "otro lote" de nada. Nunca agrupa con otra pieza,
+        # ni siquiera con otra del mismo nombre.
+        product_id = uuid4()
+        await repository.insert_product(
+            db,
+            product_id=product_id,
+            company_id=company_id,
+            name=auction_item.description,
+            cat1_id=cat1_id,
+            cat2_id=cat2_id,
+            cat3_id=cat3_id,
+            description=auction_item.description,
+            is_unique=True,
+        )
+        await repository.set_item_product(
+            db,
+            company_id=company_id,
+            item_id=item_id,
+            product_id=product_id,
+            lot_number=1,
+        )
         result[auction_item.contract_item_id] = item_id
 
     return result

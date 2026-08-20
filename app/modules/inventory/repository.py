@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 _ITEM_COLUMNS = (
     "id, code, name, cat1_id, cat2_id, cat3_id, description, origin, supplier_id, "
-    "source_contract_id, cost, sale_price, quantity, status, photos, entry_date, created_at"
+    "source_contract_id, cost, sale_price, quantity, status, photos, entry_date, "
+    "product_id, lot_number, created_at"
 )
 _ENTRY_COLUMNS = (
     "id, number, origin_type, supplier_id, supplier_invoice, contract_id, total_cost, "
@@ -476,4 +477,153 @@ async def mark_entry_paid(
             """
         ),
         {"company_id": str(company_id), "id": str(entry_id), "payment_method": payment_method},
+    )
+
+
+# ---- Productos (00021) --------------------------------------------------
+
+_PRODUCT_COLUMNS = (
+    "id, code, name, cat1_id, cat2_id, cat3_id, description, sale_price, is_unique, "
+    "active, created_at"
+)
+
+
+async def find_product(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    name: str,
+    cat1_id: UUID,
+    cat2_id: UUID,
+    cat3_id: UUID,
+) -> Row[Any] | None:
+    """Busca el producto por lo que lo define comercialmente: nombre +
+    categoría. Case-insensitive y sin espacios de sobra, porque el nombre lo
+    escribe una persona y "Cadena de oro" vs "cadena de oro " no son productos
+    distintos — tratarlos así es justo lo que dispersaría el catálogo.
+
+    Excluye los `is_unique` (piezas de remate): dos anillos rematados con el
+    mismo nombre son piezas distintas y nunca deben unificarse.
+    """
+    result = await db.execute(
+        text(
+            f"""
+            select {_PRODUCT_COLUMNS} from public.product
+            where company_id = :company_id
+              and not is_unique
+              and lower(btrim(name)) = lower(btrim(:name))
+              and cat1_id = :cat1_id and cat2_id = :cat2_id and cat3_id = :cat3_id
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "name": name,
+            "cat1_id": str(cat1_id),
+            "cat2_id": str(cat2_id),
+            "cat3_id": str(cat3_id),
+        },
+    )
+    return result.first()
+
+
+async def get_product(db: AsyncSession, *, company_id: UUID, product_id: UUID) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            f"select {_PRODUCT_COLUMNS} from public.product "
+            "where company_id = :company_id and id = :id"
+        ),
+        {"company_id": str(company_id), "id": str(product_id)},
+    )
+    return result.first()
+
+
+async def insert_product(
+    db: AsyncSession,
+    *,
+    product_id: UUID,
+    company_id: UUID,
+    name: str,
+    cat1_id: UUID,
+    cat2_id: UUID,
+    cat3_id: UUID,
+    description: str | None,
+    is_unique: bool = False,
+) -> None:
+    """El producto nace SIN código: el SKU se emite al publicar su primer
+    lote, igual que antes se emitía el código de la pieza. Así un producto
+    creado en un borrador que después se descarta no quema un consecutivo.
+    """
+    await db.execute(
+        text(
+            """
+            insert into public.product
+                (id, company_id, name, cat1_id, cat2_id, cat3_id, description, is_unique)
+            values
+                (:id, :company_id, :name, :cat1_id, :cat2_id, :cat3_id, :description, :is_unique)
+            """
+        ),
+        {
+            "id": str(product_id),
+            "company_id": str(company_id),
+            "name": name,
+            "cat1_id": str(cat1_id),
+            "cat2_id": str(cat2_id),
+            "cat3_id": str(cat3_id),
+            "description": description,
+            "is_unique": is_unique,
+        },
+    )
+
+
+async def set_product_code(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID, code: str
+) -> None:
+    await db.execute(
+        text("update public.product set code = :code where company_id = :cid and id = :id"),
+        {"cid": str(company_id), "id": str(product_id), "code": code},
+    )
+
+
+async def set_product_price(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID, sale_price: Decimal
+) -> None:
+    """Precio a nivel de PRODUCTO: aplica a todos sus lotes de una vez. Las
+    ventas ya hechas no se ven afectadas — `sale_line` congela su propio
+    `unit_price` al vender.
+    """
+    await db.execute(
+        text("update public.product set sale_price = :price where company_id = :cid and id = :id"),
+        {"cid": str(company_id), "id": str(product_id), "price": sale_price},
+    )
+
+
+async def next_lot_number(db: AsyncSession, *, company_id: UUID, product_id: UUID) -> int:
+    """Consecutivo del lote DENTRO del producto. `coalesce(max)+1` y no un
+    contador aparte: los lotes de un producto son pocos y la fila del producto
+    ya está bloqueada por la transacción que lo está usando.
+    """
+    result = await db.execute(
+        text(
+            "select coalesce(max(lot_number), 0) + 1 from public.inventory_item "
+            "where company_id = :cid and product_id = :pid"
+        ),
+        {"cid": str(company_id), "pid": str(product_id)},
+    )
+    return int(result.scalar_one())
+
+
+async def set_item_product(
+    db: AsyncSession, *, company_id: UUID, item_id: UUID, product_id: UUID, lot_number: int
+) -> None:
+    await db.execute(
+        text(
+            "update public.inventory_item set product_id = :pid, lot_number = :lot "
+            "where company_id = :cid and id = :id"
+        ),
+        {
+            "cid": str(company_id),
+            "id": str(item_id),
+            "pid": str(product_id),
+            "lot": lot_number,
+        },
     )

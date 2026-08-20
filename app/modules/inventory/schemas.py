@@ -29,6 +29,11 @@ class ItemOut(BaseModel):
     status: str
     photos: list[str]
     entry_date: date
+    #: Producto al que pertenece este lote (00021). Es lo que permite agrupar
+    #: en la lista: dos lotes del mismo producto comparten este id.
+    product_id: UUID | None
+    #: Consecutivo del lote DENTRO del producto (1, 2, 3…).
+    lot_number: int | None
     created_at: datetime
 
 

@@ -434,7 +434,14 @@ def test_publish_requires_photo(client: TestClient, inventory_tenant: dict) -> N
     assert published.status_code == 200, published.text
     body = published.json()
     assert body["status"] == "available"
-    assert body["code"] == "JOC0001I"
+    # Formato nuevo desde 00021: `{SKU}-{lote}{proveedor}`. El SKU (`JOC0001`)
+    # identifica el PRODUCTO y se comparte entre todos sus lotes; el sufijo
+    # dice qué lote es y a quién se le compró. El esquema anterior
+    # (`JOC0001I`) no perdía nada de eso — simplemente no podía expresar a qué
+    # producto pertenecía la pieza, que era el problema.
+    assert body["code"] == "JOC0001-01I"
+    assert body["lot_number"] == 1
+    assert body["product_id"] is not None
 
 
 def test_cannot_edit_item_after_publish(client: TestClient, inventory_tenant: dict) -> None:
@@ -881,3 +888,88 @@ async def test_paying_without_open_session_is_rejected(
     )
     assert response.status_code == 409
     assert response.json()["code"] == "CASH_SESSION_NOT_OPEN"
+
+
+# ---- Producto + lote (00021): reponer cae en el MISMO producto ----------
+
+
+def _publish(client: TestClient, token: str, item_id: str, price: str) -> dict:
+    r = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=_headers(token),
+        json={"sale_price": price},
+    )
+    assert r.status_code == 200, r.text
+    return dict(r.json())
+
+
+def test_restocking_the_same_product_reuses_it_and_adds_a_lot(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El corazón de 00021: comprar dos veces lo mismo NO crea dos productos.
+    Cae en el mismo y suma un lote — de ahí sale que la lista agrupe, que el
+    precio se cambie una vez y que se puedan comparar proveedores."""
+    token = inventory_tenant["token"]
+
+    primera = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena repetida", photos=["https://x/1.jpg"]),
+    ).json()
+    segunda = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena repetida", photos=["https://x/2.jpg"]),
+    ).json()
+
+    lote1, lote2 = primera["items"][0], segunda["items"][0]
+
+    # Mismo producto, lotes consecutivos.
+    assert lote1["product_id"] == lote2["product_id"]
+    assert lote1["lot_number"] == 1
+    assert lote2["lot_number"] == 2
+
+    # Y los códigos comparten el SKU: es lo que hace visible en la etiqueta
+    # que son el mismo producto.
+    code1 = _publish(client, token, lote1["id"], "900000.00")["code"]
+    code2 = _publish(client, token, lote2["id"], "950000.00")["code"]
+    assert code1.split("-")[0] == code2.split("-")[0]
+    assert code1.endswith("-01I")
+    assert code2.endswith("-02I")
+
+
+def test_product_match_ignores_case_and_spacing(client: TestClient, inventory_tenant: dict) -> None:
+    """El nombre lo escribe una persona: "Cadena de oro" y "cadena de oro "
+    no son productos distintos. Tratarlos así dispersaría el catálogo y
+    rompería la agrupación justo en el caso más común."""
+    token = inventory_tenant["token"]
+    a = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena de Oro"),
+    ).json()
+    b = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "  cadena de oro  "),
+    ).json()
+
+    assert a["items"][0]["product_id"] == b["items"][0]["product_id"]
+
+
+def test_a_different_name_creates_a_different_product(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    token = inventory_tenant["token"]
+    a = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena de oro"),
+    ).json()
+    b = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Anillo de oro"),
+    ).json()
+
+    assert a["items"][0]["product_id"] != b["items"][0]["product_id"]
