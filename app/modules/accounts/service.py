@@ -27,6 +27,7 @@ def _row_to_account(row: Row[Any], balance: Decimal | None = None) -> AccountOut
         reference=m["reference"],
         is_default=m["is_default"],
         active=m["active"],
+        opening_balance=m["opening_balance"],
         balance=balance if balance is not None else m["balance"],
         created_at=m["created_at"],
     )
@@ -56,6 +57,7 @@ async def create_account(
         account_type=body.type,
         reference=body.reference,
         is_default=body.is_default,
+        opening_balance=body.opening_balance,
     )
     return await get_account(db, company_id=company_id, account_id=account_id)
 

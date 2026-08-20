@@ -24,8 +24,12 @@ class AccountOut(BaseModel):
     reference: str | None
     is_default: bool
     active: bool
-    #: Saldo calculado desde los movimientos. En una cuenta `settlement` esto
-    #: es lo que te DEBEN, no lo que tienes.
+    #: Saldo con el que la cuenta entró al sistema. Las cuentas de efectivo no
+    #: lo usan: su base viene de cada sesión de caja.
+    opening_balance: Decimal
+    #: Saldo actual. En `cash` es lo que debería haber EN EL CAJÓN ahora (base
+    #: de la sesión abierta + sus movimientos); en `bank` y `settlement` es el
+    #: inicial más todo lo movido. En una `settlement` es lo que te DEBEN.
     balance: Decimal
     created_at: datetime
 
@@ -35,6 +39,10 @@ class AccountCreateIn(BaseModel):
     type: AccountType
     reference: str | None = None
     is_default: bool = False
+    #: Lo que ya había en esa cuenta antes de empezar a usar el sistema. Sin
+    #: esto el saldo arrancaría en cero y quedaría negativo con el primer
+    #: egreso — que fue justo el bug que motivó 00025.
+    opening_balance: Decimal = Decimal("0")
 
 
 class AccountUpdateIn(BaseModel):
