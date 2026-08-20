@@ -77,20 +77,18 @@ async def get_account(db: AsyncSession, *, company_id: UUID, account_id: UUID) -
 
 
 async def account_balance(db: AsyncSession, *, company_id: UUID, account_id: UUID) -> Decimal:
-    result = await db.execute(
-        text(
-            """
-            select coalesce(
-              sum(case when direction = 'in' then amount else -amount end),
-              0::numeric(14, 2)
-            )
-            from public.cash_movement
-            where company_id = :cid and account_id = :aid
-            """
-        ),
-        {"cid": str(company_id), "aid": str(account_id)},
-    )
-    return Decimal(str(result.scalar_one()))
+    """Saldo de UNA cuenta, con el mismo criterio por tipo que `list_accounts`.
+
+    Delega en esa consulta en vez de tener la suya: dos formas de calcular el
+    mismo saldo terminan divergiendo, y eso fue exactamente este bug —
+    `list_accounts` ya sumaba el `opening_balance` y esta función no, así que
+    una cuenta recién creada reportaba 0 mientras el listado la mostraba bien.
+    """
+    rows = await list_accounts(db, company_id=company_id, include_inactive=True)
+    for row in rows:
+        if row._mapping["id"] == account_id:
+            return Decimal(str(row._mapping["balance"]))
+    return Decimal("0.00")
 
 
 async def insert_account(

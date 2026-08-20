@@ -1,0 +1,44 @@
+-- =====================================================================
+-- 00026_movement_session_optional.sql — Un movimiento que no toca el cajón
+-- no necesita que el cajón esté abierto.
+--
+-- Hoy TODA operación de dinero exige sesión de caja abierta, porque
+-- `cash_movement.session_id` es NOT NULL. Eso tiene todo el sentido para el
+-- efectivo —no puedes meter billetes a un cajón cerrado— pero ninguno para
+-- una transferencia o una venta por Sistecrédito: esas no pasan por el
+-- cajón físico. El admin que carga una transferencia a las 11 de la noche
+-- queda bloqueado por una regla que no aplica a lo que está haciendo.
+--
+-- Es el mismo problema de las 11pm que se resolvió caso por caso con las
+-- compras a proveedor (00020). Con el catálogo de cuentas se puede resolver
+-- de raíz: la sesión la exige el TIPO DE CUENTA, no la operación.
+--
+--   cuenta cash        exige sesión abierta y el movimiento le pertenece
+--   bank / settlement  no la exige; si hay una abierta el movimiento se
+--                      asocia igual, para que el acta del día siga
+--                      mostrando todo lo que pasó durante el turno
+--
+-- CONSECUENCIA CONOCIDA: un movimiento bancario registrado fuera de una
+-- sesión no aparece en ninguna acta de cierre. Es correcto — el acta
+-- documenta un turno de caja, y ese movimiento no ocurrió en ninguno. Sigue
+-- estando en el saldo de su cuenta y en los reportes por fecha, que es
+-- donde corresponde buscarlo.
+--
+-- El efectivo NO se relaja: sigue exigiendo sesión y el CHECK de abajo lo
+-- garantiza en la base, no solo en el servicio.
+-- =====================================================================
+
+alter table public.cash_movement alter column session_id drop not null;
+
+-- QUIÉN SOSTIENE LA REGLA. Un movimiento de cuenta `cash` siempre debe
+-- pertenecer a una sesión: es lo que permite que el arqueo cuadre. Esa
+-- validación NO queda en la base porque un CHECK no admite subconsultas (hay
+-- que mirar el tipo de la cuenta) y un trigger por fila sobre la tabla más
+-- escrita del sistema no se justifica para esto.
+--
+-- La sostiene `cashbox.integration.resolve_account_for_movement`, que es el
+-- único camino por el que se crean movimientos. Es el mismo criterio que el
+-- resto del proyecto: los invariantes de negocio los sostiene el servicio y
+-- RLS sostiene el aislamiento entre empresas (CLAUDE.md regla 2), igual que
+-- con el estado de un contrato, el stock o las columnas editables de una
+-- empresa.

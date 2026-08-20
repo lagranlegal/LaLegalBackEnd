@@ -17,6 +17,11 @@ class SaleLineIn(BaseModel):
 
 
 class SaleCreateIn(BaseModel):
+    #: Cuenta donde entra el dinero. Si se omite, cae en la predeterminada del
+    #: medio de pago. Elegir una cuenta `settlement` (Sistecrédito) registra la
+    #: venta sin que entre plata: queda como pendiente de cobro, que es
+    #: exactamente lo que ocurre en la realidad.
+    account_id: UUID | None = None
     customer_id: UUID | None = None
     payment_method: PaymentMethod
     lines: list[SaleLineIn] = Field(min_length=1)

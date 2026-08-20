@@ -7,7 +7,7 @@ invisible. Requiere Postgres real (se salta si no hay).
 """
 
 from collections.abc import AsyncGenerator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -268,3 +268,92 @@ def test_cannot_deactivate_the_default_account(client: TestClient, accounts_tena
         json={"active": False},
     )
     assert r.status_code == 409
+
+
+# ---- La sesión la exige el TIPO DE CUENTA, no la operación (00026) -------
+
+
+@pytest.mark.asyncio
+async def test_non_cash_movement_does_not_require_an_open_session(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """El problema de las 11 de la noche, resuelto de raíz: una venta por
+    Sistecrédito no pasa por el cajón físico, así que no tiene por qué exigir
+    que el cajón esté abierto. Antes toda operación de dinero lo exigía."""
+    from app.core.db import AsyncSessionLocal as SL
+    from app.modules.cashbox import integration as cashbox_integration
+
+    token = accounts_tenant["token"]
+    sistecredito = _create(client, token, name="Sistecrédito", type="settlement")
+
+    async with SL() as s, s.begin():
+        await s.execute(
+            text("update public.cash_session set status = 'closed' where id = :sid"),
+            {"sid": str(accounts_tenant["session_id"])},
+        )
+
+    async with SL() as s:
+        resolved = await cashbox_integration.resolve_account_for_movement(
+            s,
+            company_id=accounts_tenant["company_id"],
+            payment_method="other",
+            account_id=UUID(sistecredito["id"]),
+        )
+
+    assert resolved.account_type == "settlement"
+    # Sin sesión abierta y sin excepción: el movimiento no pertenece a ningún
+    # turno de caja, y eso es correcto.
+    assert resolved.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_cash_movement_still_requires_an_open_session(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """El efectivo NO se relaja: no se pueden meter billetes a un cajón
+    cerrado, y sin sesión el arqueo no podría cuadrar nunca."""
+    from app.core.db import AsyncSessionLocal as SL
+    from app.core.errors import CashSessionNotOpenError
+    from app.modules.cashbox import integration as cashbox_integration
+
+    token = accounts_tenant["token"]
+    caja = next(a for a in _accounts(client, token) if a["type"] == "cash")
+
+    async with SL() as s, s.begin():
+        await s.execute(
+            text("update public.cash_session set status = 'closed' where id = :sid"),
+            {"sid": str(accounts_tenant["session_id"])},
+        )
+
+    with pytest.raises(CashSessionNotOpenError):
+        async with SL() as s:
+            await cashbox_integration.resolve_account_for_movement(
+                s,
+                company_id=accounts_tenant["company_id"],
+                payment_method="cash",
+                account_id=UUID(caja["id"]),
+            )
+
+
+def test_cash_balance_is_what_should_be_in_the_drawer(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Regresión del bug encontrado sembrando datos reales: el saldo de una
+    cuenta de efectivo NO es el neto histórico de movimientos —eso daba
+    negativo porque la base de apertura no es un movimiento— sino la base de
+    la sesión abierta más lo movido en ella."""
+    caja = next(a for a in _accounts(client, accounts_tenant["token"]) if a["type"] == "cash")
+    # El fixture abre la sesión con base 0 y no registra movimientos.
+    assert caja["balance"] == "0.00"
+
+
+def test_bank_balance_starts_from_its_opening_balance(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """La otra mitad del mismo bug: una cuenta bancaria ya tenía plata antes
+    de que el sistema existiera, así que sin `opening_balance` el primer
+    egreso la dejaba en negativo."""
+    token = accounts_tenant["token"]
+    cuenta = _create(client, token, name="Bancolombia", type="bank", opening_balance="3000000.00")
+    assert cuenta["opening_balance"] == "3000000.00"
+    assert cuenta["balance"] == "3000000.00"

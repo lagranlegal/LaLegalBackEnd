@@ -108,9 +108,15 @@ async def create_sale(
     if total < 0:
         raise AppError("El total de la venta no puede ser negativo.")
 
-    session = await cashbox_integration.get_open_session(db, company_id=company_id)
-    if session is None:
-        raise CashSessionNotOpenError("No hay una sesión de caja abierta para vender.")
+    # La sesión la exige el TIPO DE CUENTA, no la venta: cobrar en efectivo
+    # necesita el cajón abierto, pero una venta por Sistecrédito o
+    # transferencia no pasa por él. La regla vive en el resolvedor, no acá.
+    resolved = await cashbox_integration.resolve_account_for_movement(
+        db,
+        company_id=company_id,
+        payment_method=body.payment_method,
+        account_id=body.account_id,
+    )
 
     sale_id = uuid4()
     number = await repository.next_number(db, company_id=company_id)
@@ -152,7 +158,7 @@ async def create_sale(
 
     await cashbox_integration.record_movement(
         db,
-        session_id=session._mapping["id"],
+        session_id=resolved.session_id,
         company_id=company_id,
         module="store",
         direction="in",
@@ -162,6 +168,7 @@ async def create_sale(
         reference_type="sale",
         reference_id=sale_id,
         created_by=user.id,
+        account_id=resolved.account_id,
     )
     if discount_amount > 0:
         await identity_repo.insert_audit_log(

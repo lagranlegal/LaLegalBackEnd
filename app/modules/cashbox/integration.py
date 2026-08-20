@@ -4,6 +4,7 @@
 ver docs/ARCHITECTURE.md.
 """
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,6 +12,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.errors import CashSessionNotOpenError, NotFoundError
 
 
 async def get_open_session(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
@@ -33,7 +36,7 @@ async def get_open_session(db: AsyncSession, *, company_id: UUID) -> Row[Any] | 
 async def record_movement(
     db: AsyncSession,
     *,
-    session_id: UUID,
+    session_id: UUID | None,
     company_id: UUID,
     module: str,
     direction: str,
@@ -71,7 +74,7 @@ async def record_movement(
         {
             "id": str(movement_id),
             "company_id": str(company_id),
-            "session_id": str(session_id),
+            "session_id": str(session_id) if session_id else None,
             "module": module,
             "direction": direction,
             "concept": concept,
@@ -107,3 +110,72 @@ async def _default_account_for(
     )
     row = result.first()
     return UUID(str(row[0])) if row else None
+
+
+@dataclass(frozen=True)
+class ResolvedAccount:
+    """Cuenta resuelta para un movimiento, con la sesión que le corresponde."""
+
+    account_id: UUID | None
+    account_type: str | None
+    #: `None` cuando la cuenta no es de efectivo y no hay sesión abierta. El
+    #: movimiento se registra igual: no pertenece a ningún turno de caja.
+    session_id: UUID | None
+
+
+async def resolve_account_for_movement(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    payment_method: str,
+    account_id: UUID | None = None,
+) -> ResolvedAccount:
+    """Resuelve la cuenta de un movimiento y decide si exige sesión de caja.
+
+    ES EL ÚNICO LUGAR donde vive esta regla, a propósito: antes cada servicio
+    repetía "si no hay sesión abierta, rechaza", lo que hacía que una
+    transferencia a las 11 de la noche quedara bloqueada por una regla
+    pensada para el cajón físico.
+
+    La sesión la exige el TIPO DE CUENTA, no la operación:
+
+      cash               exige sesión abierta. No se pueden meter billetes a
+                         un cajón cerrado, y sin sesión el arqueo no podría
+                         cuadrar nunca.
+      bank / settlement  no la exige. Una transferencia o una venta por
+                         Sistecrédito no pasan por el cajón. Si hay una
+                         sesión abierta el movimiento se asocia igual, para
+                         que el acta del turno siga mostrando todo lo que
+                         ocurrió durante él.
+    """
+    if account_id is None:
+        account_id = await _default_account_for(
+            db, company_id=company_id, payment_method=payment_method
+        )
+
+    account_type: str | None = None
+    if account_id is not None:
+        result = await db.execute(
+            text("select type from public.account where company_id = :cid and id = :id"),
+            {"cid": str(company_id), "id": str(account_id)},
+        )
+        row = result.first()
+        if row is None:
+            raise NotFoundError("La cuenta indicada no existe en esta empresa.")
+        account_type = str(row[0])
+
+    session = await get_open_session(db, company_id=company_id)
+
+    # Sin cuenta resuelta se mantiene el comportamiento anterior (exigir
+    # sesión): es lo conservador mientras queden caminos que aún no eligen
+    # cuenta, y evita que un movimiento se escape del arqueo por accidente.
+    if account_type in (None, "cash") and session is None:
+        raise CashSessionNotOpenError(
+            "No hay una sesión de caja abierta para registrar un movimiento en efectivo."
+        )
+
+    return ResolvedAccount(
+        account_id=account_id,
+        account_type=account_type,
+        session_id=session._mapping["id"] if session is not None else None,
+    )
