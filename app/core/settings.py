@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     # coma-separados — se completa por ambiente vía `fly secrets set`, nunca
     # hardcodeado (el dominio de prod cambia por cliente/proyecto).
     cors_allow_origins: str = ""
+    # URL base del front de ESTE ambiente. La usa la invitación para armar el
+    # `redirect_to` del correo de Supabase.
+    #
+    # Sin esto, Supabase redirige a su "Site URL" por defecto y el link del
+    # correo muere en "This site can't be reached": el usuario queda confirmado
+    # en `auth.users` pero nunca llega a `/auth/callback`, así que jamás crea
+    # su contraseña ni pasa de `invited` a `active` en `app_user`. Bug real,
+    # confirmado en vivo (un invitado con `confirmed_at` y `last_sign_in_at`
+    # poblados y `app_user.status` todavía en `invited`).
+    frontend_url: str = ""
 
     @model_validator(mode="after")
     def _resolve_jwks_url(self) -> "Settings":

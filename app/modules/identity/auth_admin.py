@@ -26,7 +26,19 @@ async def invite_user(email: str, full_name: str) -> UUID:
         "apikey": settings.supabase_service_role_key,
         "Authorization": f"Bearer {settings.supabase_service_role_key}",
     }
-    payload = {"email": email, "data": {"full_name": full_name}}
+    payload: dict[str, object] = {"email": email, "data": {"full_name": full_name}}
+
+    # Sin `redirect_to`, Supabase manda al usuario a su "Site URL" por defecto
+    # y el link del correo muere. El destino es la pantalla donde el invitado
+    # crea su contraseña; `detectSessionInUrl` del cliente de Supabase procesa
+    # ahí el token que viene en el fragmento de la URL.
+    #
+    # OJO: la URL debe estar además en la lista de "Redirect URLs" permitidas
+    # del proyecto Supabase (Authentication → URL Configuration). Si no está,
+    # Supabase la IGNORA en silencio y vuelve a caer en la Site URL — o sea,
+    # el mismo síntoma. Ver docs/DEPLOY.md.
+    if settings.frontend_url:
+        payload["redirect_to"] = f"{settings.frontend_url.rstrip('/')}/auth/callback"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(url, headers=headers, json=payload)
