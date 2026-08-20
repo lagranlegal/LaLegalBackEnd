@@ -426,3 +426,127 @@ def test_profit_summary_rejects_inverted_and_huge_ranges(
         params={"from_date": "2020-01-01", "to_date": "2026-01-01"},
     )
     assert huge.status_code == 400
+
+
+# ---- Rentabilidad del empeño (docs/PENDIENTES_BACKEND_INFRA.md #24.1, parte
+# que quedó abierta tras el costo de ventas: el empeño no tiene costo de
+# ventas, su rentabilidad son los intereses sobre el capital prestado).
+
+
+async def _owe_one_month(contract_id: str) -> None:
+    """Un contrato recién creado debe 0 meses, así que no admite abono de
+    interés. Se retrocede `interest_paid_until` un mes y un día para que deba
+    exactamente uno: el límite EXACTO de un mes cuenta como 0 adeudados
+    (comportamiento confirmado del backend, ver PENDIENTES #10)."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "update public.contract "
+                "set interest_paid_until = current_date - interval '1 month 1 day' "
+                "where id = :id"
+            ),
+            {"id": contract_id},
+        )
+
+
+def _pawn(client: TestClient, token: str, frm: str, to: str) -> dict:
+    r = client.get(
+        "/api/v1/reports/pawn-performance",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": frm, "to_date": to},
+    )
+    assert r.status_code == 200, r.text
+    return dict(r.json())
+
+
+@pytest.mark.asyncio
+async def test_pawn_performance_reports_interest_over_portfolio(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Préstamo de 1.000.000 al 5%: un abono de 1 mes cobra 50.000 de interés
+    y 200.000 a capital → cartera 800.000 y rendimiento 50.000/800.000 = 6.25%.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "5000000.00"}
+    )
+
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(reports_tenant["customer_id"]),
+            "principal": "1000000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [{"category_id": str(reports_tenant["category_id"]), "description": "Cadena"}],
+        },
+    )
+    assert contract.status_code == 201, contract.text
+    await _owe_one_month(contract.json()["id"])
+
+    payment = client.post(
+        f"/api/v1/contracts/{contract.json()['id']}/payments",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 1, "capital_amount": "200000.00", "payment_method": "cash"},
+    )
+    assert payment.status_code == 201, payment.text
+
+    today = date.today().isoformat()
+    body = _pawn(client, reports_tenant["token"], today, today)
+
+    assert float(body["interest_collected"]) == 50000.0
+    assert float(body["capital_recovered"]) == 200000.0
+    assert float(body["capital_disbursed"]) == 1000000.0
+    assert float(body["capital_outstanding"]) == 800000.0
+    assert body["payment_count"] == 1
+    assert body["contracts_opened"] == 1
+    assert body["open_contracts"] == 1
+    assert float(body["yield_on_current_portfolio_pct"]) == 6.25
+
+
+@pytest.mark.asyncio
+async def test_pawn_interest_comes_from_documents_not_closed_cash_sessions(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """El motivo de leer `contract_payment` y no el desglose de caja: ese solo
+    cubre sesiones CERRADAS, así que un abono de hoy —con la caja todavía
+    abierta— no aparecería. Acá la sesión nunca se cierra y el interés se
+    reporta igual."""
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "5000000.00"}
+    )
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(reports_tenant["customer_id"]),
+            "principal": "500000.00",
+            "interest_rate_pct": "10",
+            "payment_method": "cash",
+            "items": [{"category_id": str(reports_tenant["category_id"]), "description": "Anillo"}],
+        },
+    ).json()
+    await _owe_one_month(contract["id"])
+    paid = client.post(
+        f"/api/v1/contracts/{contract['id']}/payments",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 1, "payment_method": "cash"},
+    )
+    assert paid.status_code == 201, paid.text
+
+    today = date.today().isoformat()
+    body = _pawn(client, reports_tenant["token"], today, today)
+    assert float(body["interest_collected"]) == 50000.0
+
+
+def test_pawn_performance_empty_period_has_null_yield(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Sin cartera abierta el rendimiento es `null`, no 0: un 0% afirmaría
+    "presté y no rindió", distinto de "no hay capital contra el cual medir"."""
+    body = _pawn(client, reports_tenant["token"], "2020-01-01", "2020-01-31")
+    assert float(body["interest_collected"]) == 0.0
+    assert body["contracts_opened"] == 0
+    assert body["yield_on_current_portfolio_pct"] is None

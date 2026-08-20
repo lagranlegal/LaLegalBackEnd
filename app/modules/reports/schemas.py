@@ -78,3 +78,35 @@ class ProfitSummaryOut(BaseModel):
     #: Margen sobre el ingreso neto, en %. `null` si no hubo ventas (evita
     #: mostrar 0% cuando el dato correcto es "no aplica").
     margin_pct: Decimal | None
+
+
+class PawnPerformanceOut(BaseModel):
+    """Rentabilidad del EMPEÑO. Es una pregunta distinta a la de tienda: no hay
+    costo de ventas, la rentabilidad son los intereses cobrados sobre el
+    capital prestado — rendimiento sobre capital, no margen sobre costo.
+    """
+
+    from_date: date
+    to_date: date
+    #: Intereses efectivamente cobrados en el rango (`contract_payment`, el
+    #: documento — no el movimiento de caja, que solo cubre sesiones cerradas).
+    interest_collected: Decimal
+    #: Descuentos de interés otorgados (permiso especial). Erosionan el
+    #: rendimiento: son interés que se dejó de cobrar.
+    interest_discounts: Decimal
+    #: Capital recuperado vía abonos — reduce cartera, NO es ingreso.
+    capital_recovered: Decimal
+    #: Capital entregado en contratos nuevos del rango — NO es gasto.
+    capital_disbursed: Decimal
+    payment_count: int
+    contracts_opened: int
+    #: Cartera al corte de HOY, no del final del rango: el esquema no guarda
+    #: `closed_at` ni histórico de saldos, así que no hay forma exacta de
+    #: saber cuánta cartera había en una fecha pasada.
+    capital_outstanding: Decimal
+    open_contracts: int
+    #: `interest_collected / capital_outstanding * 100` — rendimiento del
+    #: período sobre la cartera ACTUAL. `null` si no hay cartera abierta.
+    #: Es una referencia útil cuando el rango termina hoy (el caso normal);
+    #: para rangos históricos la cartera de referencia ya no es la de entonces.
+    yield_on_current_portfolio_pct: Decimal | None

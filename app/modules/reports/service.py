@@ -17,6 +17,7 @@ from app.modules.reports.schemas import (
     ContractKpisOut,
     DashboardOut,
     InventoryKpisOut,
+    PawnPerformanceOut,
     ProfitSummaryOut,
     SalesKpisOut,
 )
@@ -146,4 +147,44 @@ async def get_profit_summary(
         cost_of_goods_sold=cogs,
         gross_profit=gross_profit,
         margin_pct=margin_pct,
+    )
+
+
+async def get_pawn_performance(
+    db: AsyncSession, *, company_id: UUID, from_date: date, to_date: date
+) -> PawnPerformanceOut:
+    if from_date > to_date:
+        raise AppError("`from_date` no puede ser posterior a `to_date`.")
+    if (to_date - from_date).days > _MAX_PROFIT_RANGE_DAYS:
+        raise AppError(
+            f"El rango no puede superar {_MAX_PROFIT_RANGE_DAYS} días.",
+            details={"from_date": str(from_date), "to_date": str(to_date)},
+        )
+
+    tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
+    row = await repository.pawn_performance(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
+    m = row._mapping
+
+    interest: Decimal = m["interest_collected"]
+    outstanding: Decimal = m["capital_outstanding"]
+    # `None` y no 0 sin cartera abierta: 0% afirmaría "presté y no rindió",
+    # distinto de "no hay capital prestado contra el cual medir".
+    yield_pct = (
+        (interest / outstanding * 100).quantize(Decimal("0.01")) if outstanding > 0 else None
+    )
+
+    return PawnPerformanceOut(
+        from_date=from_date,
+        to_date=to_date,
+        interest_collected=interest,
+        interest_discounts=m["interest_discounts"],
+        capital_recovered=m["capital_recovered"],
+        capital_disbursed=m["capital_disbursed"],
+        payment_count=m["payment_count"],
+        contracts_opened=m["contracts_opened"],
+        capital_outstanding=outstanding,
+        open_contracts=m["open_contracts"],
+        yield_on_current_portfolio_pct=yield_pct,
     )

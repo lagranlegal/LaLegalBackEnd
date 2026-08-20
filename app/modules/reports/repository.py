@@ -185,3 +185,75 @@ async def profit_summary(
         },
     )
     return result.one()
+
+
+async def pawn_performance(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> Row[Any]:
+    """Rentabilidad del empeño. A diferencia de la tienda, acá NO hay costo de
+    ventas: la rentabilidad son los intereses cobrados sobre el capital
+    prestado — rendimiento sobre capital, no margen sobre costo.
+
+    Los intereses salen de `contract_payment`, el documento, y NO de los
+    movimientos de caja como hace `/reportes` hoy. Dos motivos: el desglose de
+    caja solo cubre sesiones CERRADAS (los abonos de hoy no aparecerían) y
+    agrupa por concepto sin separar el descuento de interés, que sí importa
+    acá porque erosiona el rendimiento y es una acción con permiso especial.
+
+    `capital_outstanding` es el corte de HOY, no del final del rango: el
+    esquema no guarda `closed_at` en `contract` ni un histórico de saldos, así
+    que no hay forma exacta de saber cuánta cartera había en una fecha pasada.
+    Se devuelve tal cual, y el llamador lo rotula como corte actual en vez de
+    fabricar una reconstrucción aproximada — un número financiero inventado es
+    peor que uno ausente.
+    """
+    result = await db.execute(
+        text(
+            """
+            with pagos as (
+                select
+                  coalesce(sum(interest_amount), 0) as interest_collected,
+                  coalesce(sum(capital_amount), 0)  as capital_recovered,
+                  coalesce(sum(discount_amount), 0) as interest_discounts,
+                  count(*)                          as payment_count
+                from public.contract_payment
+                where company_id = :company_id
+                  and (paid_at at time zone :tz)::date between :from_date and :to_date
+            ),
+            nuevos as (
+                select
+                  coalesce(sum(principal), 0) as capital_disbursed,
+                  count(*)                    as contracts_opened
+                from public.contract
+                where company_id = :company_id
+                  and start_date between :from_date and :to_date
+            ),
+            cartera as (
+                select
+                  coalesce(
+                    sum(capital_balance) filter (
+                      where status in ('active', 'in_arrears', 'in_extension')
+                    ), 0
+                  ) as capital_outstanding,
+                  count(*) filter (
+                    where status in ('active', 'in_arrears', 'in_extension')
+                  ) as open_contracts
+                from public.contract
+                where company_id = :company_id
+            )
+            select
+              pagos.interest_collected, pagos.capital_recovered,
+              pagos.interest_discounts, pagos.payment_count,
+              nuevos.capital_disbursed, nuevos.contracts_opened,
+              cartera.capital_outstanding, cartera.open_contracts
+            from pagos, nuevos, cartera
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "tz": tz_name,
+            "from_date": from_date,
+            "to_date": to_date,
+        },
+    )
+    return result.one()

@@ -7,7 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.reports import service
-from app.modules.reports.schemas import ClosingHistoryOut, DashboardOut, ProfitSummaryOut
+from app.modules.reports.schemas import (
+    ClosingHistoryOut,
+    DashboardOut,
+    PawnPerformanceOut,
+    ProfitSummaryOut,
+)
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 
@@ -57,5 +62,29 @@ async def get_profit_summary(
     cobrados y no tiene costo de ventas asociado.
     """
     return await service.get_profit_summary(
+        db, company_id=user.company_id, from_date=from_date, to_date=to_date
+    )
+
+
+@router.get("/pawn-performance", response_model=PawnPerformanceOut)
+async def get_pawn_performance(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    from_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+    to_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+) -> PawnPerformanceOut:
+    """Rentabilidad del empeño: intereses cobrados sobre el capital prestado.
+
+    Complementa `/reports/profit`, que cubre la tienda. Son preguntas
+    distintas: la tienda tiene costo de ventas y se mide por margen; el
+    empeño no tiene costo de ventas y se mide por rendimiento sobre el
+    capital inmovilizado en la cartera.
+
+    Los intereses salen de `contract_payment` (el documento) y no de los
+    movimientos de caja: el desglose de caja solo cubre sesiones cerradas y
+    no separa el descuento de interés, que acá importa porque erosiona el
+    rendimiento.
+    """
+    return await service.get_pawn_performance(
         db, company_id=user.company_id, from_date=from_date, to_date=to_date
     )
