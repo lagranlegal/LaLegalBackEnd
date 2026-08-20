@@ -1,8 +1,10 @@
 """Integración de inventory (paso 7): ingresos crean ítems en draft,
 publicar exige foto+precio y emite código inmutable, egresos descuentan
-stock. Requiere Postgres real (se salta si no hay)."""
+stock, y la compra a proveedor sale por caja (concepto `purchase`).
+Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -30,7 +32,10 @@ async def _require_postgres() -> None:
 
 
 def _headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+    # `POST /entries` exige Idempotency-Key desde 00014 (una compra es una
+    # operación de dinero). Cada llamada lleva una key nueva salvo que el test
+    # quiera probar el reintento a propósito.
+    return {"Authorization": f"Bearer {token}", "Idempotency-Key": str(uuid4())}
 
 
 @pytest_asyncio.fixture
@@ -45,6 +50,8 @@ async def inventory_tenant(
     user_id = uuid4()
     cat1, cat2, cat3 = uuid4(), uuid4(), uuid4()
     supplier_id = uuid4()
+    register_id = uuid4()
+    session_id = uuid4()
     codes = ("inventory.view", "inventory.create", "inventory.exit")
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -112,6 +119,29 @@ async def inventory_tenant(
             ),
             {"id": str(supplier_id), "cid": str(company_id)},
         )
+        # Caja abierta: desde 00014 una compra a proveedor la exige (entrega
+        # plata, igual que una venta o un abono). Los tests de ingreso 'other'
+        # y de egreso no dependen de ella.
+        await session.execute(
+            text(
+                "insert into public.cash_register (id, company_id, name) "
+                "values (:id, :cid, 'Caja principal')"
+            ),
+            {"id": str(register_id), "cid": str(company_id)},
+        )
+        await session.execute(
+            text(
+                "insert into public.cash_session "
+                "(id, company_id, register_id, opened_by, opening_balance, status) "
+                "values (:id, :cid, :rid, :uid, 1000000.00, 'open')"
+            ),
+            {
+                "id": str(session_id),
+                "cid": str(company_id),
+                "rid": str(register_id),
+                "uid": str(user_id),
+            },
+        )
 
     token = make_token(
         private_pem, sub=str(user_id), company_id=str(company_id), role_id=str(role_id)
@@ -123,6 +153,8 @@ async def inventory_tenant(
         "cat2": cat2,
         "cat3": cat3,
         "supplier_id": supplier_id,
+        "register_id": register_id,
+        "session_id": session_id,
         "token": token,
     }
 
@@ -133,6 +165,11 @@ async def inventory_tenant(
         except Exception:
             pass
 
+    # cash_movement -> cash_session -> cash_register, y el movimiento
+    # referencia el inventory_entry: se borra antes que ambos.
+    await _try_delete("delete from public.cash_movement where company_id = :cid")
+    await _try_delete("delete from public.cash_session where company_id = :cid")
+    await _try_delete("delete from public.cash_register where company_id = :cid")
     await _try_delete("delete from public.inventory_entry_line where company_id = :cid")
     await _try_delete("delete from public.inventory_exit_line where company_id = :cid")
     await _try_delete("delete from public.inventory_entry where company_id = :cid")
@@ -157,6 +194,7 @@ def _entry_payload(tenant: dict, **overrides: object) -> dict:
     base = {
         "origin_type": "purchase",
         "supplier_id": str(tenant["supplier_id"]),
+        "payment_method": "cash",
         "lines": [
             {
                 "name": "Cadena de oro 10g",
@@ -197,6 +235,160 @@ def test_purchase_entry_without_supplier_is_rejected(
         "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=payload
     )
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_purchase_records_cash_movement(client: TestClient, inventory_tenant: dict) -> None:
+    """El hueco que arregla 00014: la plata entregada al proveedor tiene que
+    salir por caja. Sin esto `expected_cash` ignoraba la compra y el cierre
+    descuadraba por el monto exacto de la mercancía comprada.
+    """
+    response = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(inventory_tenant["token"]),
+        json=_entry_payload(inventory_tenant),
+    )
+    assert response.status_code == 201, response.text
+    entry = response.json()
+    assert entry["payment_method"] == "cash"
+
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                text(
+                    "select module, direction, concept, amount, payment_method, session_id "
+                    "from public.cash_movement "
+                    "where company_id = :cid and reference_type = 'inventory_entry' "
+                    "and reference_id = :eid"
+                ),
+                {"cid": str(inventory_tenant["company_id"]), "eid": entry["id"]},
+            )
+        ).one()
+
+    assert row.module == "store"
+    assert row.direction == "out"
+    assert row.concept == "purchase"
+    assert row.amount == Decimal("500000.00")
+    assert row.payment_method == "cash"
+    # Cae en la sesión abierta de la empresa, no en una cualquiera.
+    assert row.session_id == inventory_tenant["session_id"]
+
+
+def test_purchase_without_payment_method_is_rejected(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    payload = _entry_payload(inventory_tenant)
+    del payload["payment_method"]
+    response = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=payload
+    )
+    assert response.status_code == 400
+
+
+def test_entry_requires_idempotency_key(client: TestClient, inventory_tenant: dict) -> None:
+    """CLAUDE.md regla 4 — antes de 00014 un doble click duplicaba el ingreso,
+    el stock y el costo, sin DELETE con el cual deshacerlo."""
+    response = client.post(
+        "/api/v1/inventory/entries",
+        headers={"Authorization": f"Bearer {inventory_tenant['token']}"},
+        json=_entry_payload(inventory_tenant),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_repeated_idempotency_key_does_not_duplicate_entry(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El doble click devuelve el MISMO ingreso, no uno nuevo — y sobre todo
+    no saca la plata de la caja dos veces."""
+    headers = _headers(inventory_tenant["token"])  # misma key en los dos POST
+    first = client.post(
+        "/api/v1/inventory/entries", headers=headers, json=_entry_payload(inventory_tenant)
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        "/api/v1/inventory/entries", headers=headers, json=_entry_payload(inventory_tenant)
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["number"] == first.json()["number"]
+
+    async with AsyncSessionLocal() as session:
+        movements = (
+            await session.execute(
+                text(
+                    "select count(*) from public.cash_movement "
+                    "where company_id = :cid and concept = 'purchase'"
+                ),
+                {"cid": str(inventory_tenant["company_id"])},
+            )
+        ).scalar_one()
+        items = (
+            await session.execute(
+                text("select count(*) from public.inventory_item where company_id = :cid"),
+                {"cid": str(inventory_tenant["company_id"])},
+            )
+        ).scalar_one()
+    assert movements == 1
+    assert items == 1
+
+
+@pytest.mark.asyncio
+async def test_purchase_without_open_session_is_rejected(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Misma regla que ya tenían ventas y abonos: sin caja abierta no hay
+    operación de dinero. Un ingreso de compra ahora cuenta como tal."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.cash_session set status = 'closed' where id = :sid"),
+            {"sid": str(inventory_tenant["session_id"])},
+        )
+
+    response = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(inventory_tenant["token"]),
+        json=_entry_payload(inventory_tenant),
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "CASH_SESSION_NOT_OPEN"
+
+
+@pytest.mark.asyncio
+async def test_non_purchase_entry_does_not_touch_cashbox(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Un ingreso 'other' (ajuste, sobrante) no entrega plata a nadie: no
+    exige caja abierta ni genera movimiento — el mismo criterio por el que un
+    remate tampoco lo hace (ahí el capital ya salió como préstamo)."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.cash_session set status = 'closed' where id = :sid"),
+            {"sid": str(inventory_tenant["session_id"])},
+        )
+
+    payload = _entry_payload(inventory_tenant, origin_type="other")
+    del payload["supplier_id"]
+    del payload["payment_method"]
+    response = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=payload
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["payment_method"] is None
+
+    async with AsyncSessionLocal() as session:
+        count = (
+            await session.execute(
+                text(
+                    "select count(*) from public.cash_movement "
+                    "where company_id = :cid and reference_type = 'inventory_entry'"
+                ),
+                {"cid": str(inventory_tenant["company_id"])},
+            )
+        ).scalar_one()
+    assert count == 0
 
 
 def test_publish_requires_photo(client: TestClient, inventory_tenant: dict) -> None:
@@ -402,3 +594,142 @@ def test_exit_insufficient_stock_is_rejected(client: TestClient, inventory_tenan
         },
     )
     assert response.status_code == 400
+
+
+# ---- Búsqueda y filtros de artículos (docs/PENDIENTES_BACKEND_INFRA.md #2 del
+# lado de inventario: el mostrador busca por el código impreso en la etiqueta).
+
+
+def _entry_with(tenant: dict, name: str, **line_overrides: object) -> dict:
+    return _entry_payload(
+        tenant,
+        lines=[
+            {
+                "name": name,
+                "cat1_id": str(tenant["cat1"]),
+                "cat2_id": str(tenant["cat2"]),
+                "cat3_id": str(tenant["cat3"]),
+                "unit_cost": "500000.00",
+                "quantity": 1,
+                **line_overrides,
+            }
+        ],
+    )
+
+
+def _search(client: TestClient, token: str, **params: object) -> list[dict]:
+    response = client.get(
+        "/api/v1/inventory/items",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+    )
+    assert response.status_code == 200, response.text
+    return list(response.json()["items"])
+
+
+def test_search_items_by_name_fulltext(client: TestClient, inventory_tenant: dict) -> None:
+    token = inventory_tenant["token"]
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena de oro 18k"),
+    )
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Anillo de plata"),
+    )
+
+    # Fragmento suelto y sin tilde: el full-text en español lo resuelve.
+    names = [i["name"] for i in _search(client, token, q="cadena")]
+    assert names == ["Cadena de oro 18k"]
+
+    assert [i["name"] for i in _search(client, token, q="anillo")] == ["Anillo de plata"]
+
+
+def test_search_items_by_code_prefix_case_insensitive(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El caso real del mostrador: el vendedor lee el código de la etiqueta."""
+    token = inventory_tenant["token"]
+    headers = _headers(token)
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=headers,
+        json=_entry_with(inventory_tenant, "Cadena publicable", photos=["https://x/f.jpg"]),
+    ).json()
+    published = client.post(
+        f"/api/v1/inventory/items/{entry['items'][0]['id']}/publish",
+        headers=headers,
+        json={"sale_price": "900000.00"},
+    ).json()
+    code = published["code"]
+    assert code
+
+    assert [i["id"] for i in _search(client, token, q=code)] == [published["id"]]
+    assert [i["id"] for i in _search(client, token, q=code.lower())] == [published["id"]]
+    # Prefijo parcial, como cuando se tipea a medias.
+    assert published["id"] in [i["id"] for i in _search(client, token, q=code[:4])]
+
+
+def test_search_finds_drafts_by_name_even_though_code_is_null(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Regresión: `code` es NULL hasta que se publica, y `like` sobre NULL da
+    NULL (no false). Sin el `coalesce` del repositorio, la condición completa
+    se anulaba y un borrador NUNCA aparecía al buscar por nombre."""
+    token = inventory_tenant["token"]
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Reloj sin publicar"),
+    )
+
+    found = _search(client, token, q="reloj")
+    assert len(found) == 1
+    assert found[0]["code"] is None
+    assert found[0]["status"] == "draft"
+
+
+def test_blank_query_does_not_filter_everything_out(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Un `?q=` con solo espacios (al borrar el texto del buscador) tiene que
+    comportarse como sin filtro, no como una búsqueda que no matchea nada."""
+    token = inventory_tenant["token"]
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Pulsera"),
+    )
+
+    assert len(_search(client, token, q="   ")) == 1
+    assert len(_search(client, token)) == 1
+
+
+def test_filter_items_by_category_and_supplier(client: TestClient, inventory_tenant: dict) -> None:
+    token = inventory_tenant["token"]
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena filtrable"),
+    )
+
+    assert len(_search(client, token, cat3_id=str(inventory_tenant["cat3"]))) == 1
+    assert len(_search(client, token, supplier_id=str(inventory_tenant["supplier_id"]))) == 1
+    assert len(_search(client, token, origin="supplier")) == 1
+    # Un origen que no tiene ningún artículo de esta empresa.
+    assert len(_search(client, token, origin="auction")) == 0
+    assert len(_search(client, token, cat3_id=str(uuid4()))) == 0
+
+
+def test_search_combines_with_status_filter(client: TestClient, inventory_tenant: dict) -> None:
+    token = inventory_tenant["token"]
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena en borrador"),
+    )
+
+    assert len(_search(client, token, q="cadena", status="draft")) == 1
+    assert len(_search(client, token, q="cadena", status="available")) == 0

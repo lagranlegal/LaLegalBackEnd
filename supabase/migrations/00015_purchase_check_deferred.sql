@@ -1,0 +1,33 @@
+-- =====================================================================
+-- 00015_purchase_check_deferred.sql — Quita (temporalmente) el CHECK que
+-- introdujo 00014, para desacoplar el cambio de esquema del despliegue del
+-- código.
+--
+-- POR QUÉ EXISTE ESTA MIGRACIÓN: 00014 se aplicó a dev asumiendo que el
+-- deploy del backend iría inmediatamente después, pero `fly deploy` falló
+-- (401 Unauthorized contra registry.fly.io) y dev quedó con el esquema nuevo
+-- corriendo el código viejo. En ese estado el CHECK
+-- `origin_type='purchase' => payment_method not null` rechaza TODA compra:
+-- el backend viejo no manda `payment_method` porque no sabe que existe.
+--
+-- Las dos columnas de 00014 (`payment_method`, `idempotency_key`) son
+-- inofensivas para el código viejo — nullable, sin default, nadie las
+-- referencia — así que se quedan. Solo el CHECK necesitaba irse.
+--
+-- Esto convierte el cambio en el patrón estándar de despliegue sin downtime,
+-- que es como debió plantearse desde el principio:
+--
+--   00014  columnas nullable      -> compatible con el código viejo
+--   00015  quitar el CHECK        -> (este archivo, por el deploy fallido)
+--          fly deploy             -> el código nuevo ya manda payment_method
+--   00016  volver a poner el CHECK -> cuando ya nada inserta sin el campo
+--
+-- El CHECK NO es opcional a futuro: es lo que impide que exista un remate con
+-- medio de pago (que nadie sabría interpretar en el acta de cierre) o una
+-- compra sin él (que volvería a descuadrar la caja, el bug original). Se
+-- restituye en 00016 apenas el deploy quede arriba — hasta entonces la regla
+-- la sostiene solo `inventory.service.create_entry`.
+-- =====================================================================
+
+alter table public.inventory_entry
+  drop constraint if exists inventory_entry_payment_method_matches_origin;

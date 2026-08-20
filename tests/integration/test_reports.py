@@ -217,10 +217,11 @@ def test_dashboard_and_closing_history(client: TestClient, reports_tenant: dict)
 
     entry = client.post(
         "/api/v1/inventory/entries",
-        headers=headers,
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
         json={
             "origin_type": "purchase",
             "supplier_id": str(reports_tenant["supplier_id"]),
+            "payment_method": "cash",
             "lines": [
                 {
                     "name": "Anillo A",
@@ -242,10 +243,16 @@ def test_dashboard_and_closing_history(client: TestClient, reports_tenant: dict)
         },
     )
     assert entry.status_code == 201, entry.text
-    items = entry.json()["items"]
+    # Se identifican por su COSTO, no por su posición en la lista: el orden en
+    # que vuelven los ítems de un ingreso no es parte del contrato de la API
+    # (todos comparten `created_at` — se insertan en la misma transacción).
+    # Antes este test asumía el orden y fallaba o pasaba según qué otro test
+    # hubiera corrido antes.
+    items = {item["cost"]: item for item in entry.json()["items"]}
     assert len(items) == 2
+    cheap, expensive = items["100000.00"], items["150000.00"]
 
-    for item, price in zip(items, ("200000.00", "300000.00"), strict=True):
+    for item, price in ((cheap, "200000.00"), (expensive, "300000.00")):
         publish = client.post(
             f"/api/v1/inventory/items/{item['id']}/publish",
             headers=headers,
@@ -253,12 +260,13 @@ def test_dashboard_and_closing_history(client: TestClient, reports_tenant: dict)
         )
         assert publish.status_code == 200, publish.text
 
+    # Se vende el barato (costo 100.000) → queda disponible el de 150.000.
     sale = client.post(
         "/api/v1/sales",
         headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
         json={
             "payment_method": "cash",
-            "lines": [{"item_id": items[0]["id"], "quantity": 1, "unit_price": "200000.00"}],
+            "lines": [{"item_id": cheap["id"], "quantity": 1, "unit_price": "200000.00"}],
         },
     )
     assert sale.status_code == 201, sale.text

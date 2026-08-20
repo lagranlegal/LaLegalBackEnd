@@ -9,6 +9,7 @@ from app.common.money import Money
 
 EntryOriginType = Literal["purchase", "other"]
 ExitType = Literal["adjustment", "damage", "supplier_return", "internal_use"]
+PaymentMethod = Literal["cash", "transfer", "other"]
 
 
 class ItemOut(BaseModel):
@@ -64,6 +65,10 @@ class EntryCreateIn(BaseModel):
     supplier_id: UUID | None = None
     supplier_invoice: str | None = None
     notes: str | None = None
+    # Obligatorio cuando origin_type='purchase' (lo valida el servicio): una
+    # compra entrega plata al proveedor, y el medio es lo que decide si baja
+    # el efectivo esperado del cierre o se concilia por otro medio.
+    payment_method: PaymentMethod | None = None
     lines: list[EntryLineIn] = Field(min_length=1)
 
 
@@ -76,6 +81,7 @@ class EntryOut(BaseModel):
     contract_id: UUID | None
     total_cost: Decimal
     notes: str | None
+    payment_method: str | None
     created_at: datetime
     items: list[ItemOut]
 

@@ -6,7 +6,8 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
-from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.errors import AppError, CashSessionNotOpenError, ConflictError, NotFoundError
+from app.modules.cashbox import integration as cashbox_integration
 from app.modules.catalogs import repository as catalogs_repo
 from app.modules.identity import repository as identity_repo
 from app.modules.inventory import repository, rules
@@ -57,6 +58,7 @@ def _row_to_entry(row: Row[Any], items: list[ItemOut]) -> EntryOut:
         contract_id=m["contract_id"],
         total_cost=m["total_cost"],
         notes=m["notes"],
+        payment_method=m["payment_method"],
         created_at=m["created_at"],
         items=items,
     )
@@ -92,16 +94,43 @@ async def _validate_category_chain(
 
 
 async def create_entry(
-    db: AsyncSession, *, company_id: UUID, body: EntryCreateIn, registered_by: UUID
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: EntryCreateIn,
+    registered_by: UUID,
+    idempotency_key: str,
 ) -> EntryOut:
-    if body.origin_type == "purchase" and body.supplier_id is None:
+    # Reintento del mismo ingreso: devuelve el que ya existe sin duplicar
+    # stock ni volver a sacar plata de la caja.
+    existing = await repository.find_entry_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if existing is not None:
+        return await get_entry(db, company_id=company_id, entry_id=existing._mapping["id"])
+
+    is_purchase = body.origin_type == "purchase"
+    if is_purchase and body.supplier_id is None:
         raise AppError("Un ingreso de compra requiere `supplier_id`.")
+    if is_purchase and body.payment_method is None:
+        raise AppError("Un ingreso de compra requiere `payment_method`.")
 
     total_cost = sum((line.unit_cost * line.quantity for line in body.lines), start=Decimal("0"))
 
+    # Una compra entrega plata al proveedor, así que es una operación de caja
+    # como la venta o el abono: sin sesión abierta no puede ocurrir. Un
+    # ingreso 'other' (ajuste, sobrante) no mueve dinero y no la exige.
+    session = None
+    if is_purchase:
+        session = await cashbox_integration.get_open_session(db, company_id=company_id)
+        if session is None:
+            raise CashSessionNotOpenError(
+                "No hay una sesión de caja abierta para registrar una compra."
+            )
+
     entry_id = uuid4()
     number = await repository.next_counter(db, company_id=company_id, prefix="INV_ENTRY")
-    item_origin = "supplier" if body.origin_type == "purchase" else "other"
+    item_origin = "supplier" if is_purchase else "other"
 
     # La entrada se inserta ANTES que sus líneas (FK inventory_entry_line ->
     # inventory_entry); total_cost ya está calculado arriba.
@@ -117,6 +146,8 @@ async def create_entry(
         total_cost=total_cost,
         notes=body.notes,
         registered_by=registered_by,
+        payment_method=body.payment_method if is_purchase else None,
+        idempotency_key=idempotency_key,
     )
 
     item_ids: list[UUID] = []
@@ -156,6 +187,26 @@ async def create_entry(
             unit_cost=line.unit_cost,
         )
         item_ids.append(item_id)
+
+    # El movimiento de caja va en la MISMA transacción que el ingreso y sus
+    # líneas (CLAUDE.md regla 4: "una operación de negocio = UNA transacción").
+    # Concepto `purchase`, que el enum `cash_concept` ya contemplaba desde
+    # 00007 y hasta ahora nunca se emitía — ese era el hueco que hacía
+    # descuadrar el cierre todos los días que se compraba mercancía.
+    if session is not None and body.payment_method is not None:
+        await cashbox_integration.record_movement(
+            db,
+            session_id=session._mapping["id"],
+            company_id=company_id,
+            module="store",
+            direction="out",
+            concept="purchase",
+            amount=total_cost,
+            payment_method=body.payment_method,
+            reference_type="inventory_entry",
+            reference_id=entry_id,
+            created_by=registered_by,
+        )
 
     return await get_entry(db, company_id=company_id, entry_id=entry_id)
 
@@ -261,9 +312,28 @@ async def list_items(
     cursor: UUID | None,
     limit: int,
     status_filter: str | None,
+    q: str | None = None,
+    cat1_id: UUID | None = None,
+    cat2_id: UUID | None = None,
+    cat3_id: UUID | None = None,
+    supplier_id: UUID | None = None,
+    origin: str | None = None,
 ) -> CursorPage[ItemOut]:
     rows = await repository.list_items(
-        db, company_id=company_id, cursor=cursor, limit=limit, status_filter=status_filter
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        status_filter=status_filter,
+        # Se normaliza acá y no en el repositorio: un `?q=` con solo espacios
+        # llega como string no vacío y armaría un `plainto_tsquery('')` que no
+        # matchea nada — el usuario vería "sin resultados" al borrar el texto.
+        q=q.strip() or None if q else None,
+        cat1_id=cat1_id,
+        cat2_id=cat2_id,
+        cat3_id=cat3_id,
+        supplier_id=supplier_id,
+        origin=origin,
     )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     return CursorPage(items=[_row_to_item(r) for r in page.items], next_cursor=page.next_cursor)

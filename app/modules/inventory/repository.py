@@ -13,7 +13,7 @@ _ITEM_COLUMNS = (
 )
 _ENTRY_COLUMNS = (
     "id, number, origin_type, supplier_id, supplier_invoice, contract_id, total_cost, "
-    "notes, created_at"
+    "notes, payment_method, created_at"
 )
 _EXIT_COLUMNS = "id, number, exit_type, reason, created_at"
 
@@ -93,12 +93,48 @@ async def list_items(
     cursor: UUID | None,
     limit: int,
     status_filter: str | None,
+    q: str | None = None,
+    cat1_id: UUID | None = None,
+    cat2_id: UUID | None = None,
+    cat3_id: UUID | None = None,
+    supplier_id: UUID | None = None,
+    origin: str | None = None,
 ) -> list[Row[Any]]:
     query = f"select {_ITEM_COLUMNS} from public.inventory_item where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if status_filter:
         query += " and status = :status"
         params["status"] = status_filter
+    if q:
+        # Código: prefijo case-insensitive. Es la búsqueda del mostrador — el
+        # vendedor tiene el código impreso en la etiqueta de la vitrina
+        # (`JAO0003R`) y lo tipea completo o casi. No necesita full-text, y sí
+        # necesita tolerar minúsculas.
+        #
+        # Nombre: full-text en español (fragmentos, tildes, orden de palabras),
+        # mismo criterio que `customer.full_name`.
+        #
+        # `code` es NULL mientras el artículo está en borrador (se emite al
+        # publicar), y `like` sobre NULL da NULL, no false — por eso el
+        # `coalesce`: sin él, buscar por nombre nunca encontraría un borrador.
+        query += (
+            " and (coalesce(code, '') ilike :code_prefix"
+            " or to_tsvector('spanish', name) @@ plainto_tsquery('spanish', :q))"
+        )
+        params["q"] = q
+        params["code_prefix"] = f"{q}%"
+    for column, value in (
+        ("cat1_id", cat1_id),
+        ("cat2_id", cat2_id),
+        ("cat3_id", cat3_id),
+        ("supplier_id", supplier_id),
+    ):
+        if value is not None:
+            query += f" and {column} = :{column}"
+            params[column] = str(value)
+    if origin:
+        query += " and origin = :origin"
+        params["origin"] = origin
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)
@@ -165,16 +201,23 @@ async def insert_entry(
     total_cost: Decimal,
     notes: str | None,
     registered_by: UUID | None,
+    # Solo los ingresos origin_type='purchase' los llevan (00014 lo hace
+    # cumplir con un CHECK): un remate no mueve caja ni necesita dedupe de
+    # dinero — lo dispara `contracts.auction`, que ya es idempotente.
+    payment_method: str | None = None,
+    idempotency_key: str | None = None,
 ) -> None:
     await db.execute(
         text(
             """
             insert into public.inventory_entry
                 (id, company_id, number, origin_type, supplier_id, supplier_invoice,
-                 contract_id, total_cost, notes, registered_by)
+                 contract_id, total_cost, notes, registered_by, payment_method,
+                 idempotency_key)
             values
                 (:id, :company_id, :number, :origin_type, :supplier_id, :supplier_invoice,
-                 :contract_id, :total_cost, :notes, :registered_by)
+                 :contract_id, :total_cost, :notes, :registered_by, :payment_method,
+                 :idempotency_key)
             """
         ),
         {
@@ -188,8 +231,27 @@ async def insert_entry(
             "total_cost": total_cost,
             "notes": notes,
             "registered_by": str(registered_by) if registered_by else None,
+            "payment_method": payment_method,
+            "idempotency_key": idempotency_key,
         },
     )
+
+
+async def find_entry_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    """Reintento de red del mismo ingreso: se devuelve el que ya existe en vez
+    de crear un duplicado (mismo patrón que `sales.find_by_idempotency_key` y
+    `contracts.find_contract_by_idempotency_key`).
+    """
+    result = await db.execute(
+        text(
+            f"select {_ENTRY_COLUMNS} from public.inventory_entry "
+            "where company_id = :company_id and idempotency_key = :idempotency_key"
+        ),
+        {"company_id": str(company_id), "idempotency_key": idempotency_key},
+    )
+    return result.first()
 
 
 async def insert_entry_line(
@@ -249,6 +311,21 @@ async def list_entries(
 async def list_items_for_entry(
     db: AsyncSession, *, company_id: UUID, entry_id: UUID
 ) -> list[Row[Any]]:
+    """Orden determinista: `created_at` SOLO empata acá, siempre. Todos los
+    ítems de un ingreso se insertan en la misma transacción y `now()` en
+    Postgres devuelve el instante de INICIO de la transacción — o sea el mismo
+    valor para todas las filas (verificado: `count(distinct ts) = 1`). Con un
+    `order by created_at` pelado el orden quedaba a merced del plan de
+    ejecución, así que `POST /inventory/entries` podía devolver los artículos
+    en cualquier orden entre dos llamadas idénticas. Se encontró por un test
+    que empezó a fallar según qué otro test corriera antes.
+
+    El desempate por `id` da estabilidad, no el orden en que el usuario
+    escribió las líneas: `inventory_entry_line` no guarda su posición y el `id`
+    es un UUID aleatorio. Para devolverlos en el orden capturado haría falta
+    una columna de posición en la línea — anotado como pendiente, hoy ninguna
+    pantalla depende de eso.
+    """
     result = await db.execute(
         text(
             f"""
@@ -257,7 +334,7 @@ async def list_items_for_entry(
                 select item_id from public.inventory_entry_line
                 where company_id = :company_id and entry_id = :entry_id
             )
-            order by created_at
+            order by created_at, id
             """
         ),
         {"company_id": str(company_id), "entry_id": str(entry_id)},

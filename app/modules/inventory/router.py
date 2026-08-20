@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.idempotency import require_idempotency_key
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.inventory import service
@@ -29,9 +30,14 @@ async def create_entry(
     body: EntryCreateIn,
     user: Annotated[CurrentUser, Depends(_create)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
 ) -> EntryOut:
     return await service.create_entry(
-        db, company_id=user.company_id, body=body, registered_by=user.id
+        db,
+        company_id=user.company_id,
+        body=body,
+        registered_by=user.id,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -92,6 +98,15 @@ async def list_items(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     status: str | None = Query(default=None),
+    q: Annotated[
+        str | None,
+        Query(description="Código (prefijo, sin mayúsculas) o nombre (full-text español)."),
+    ] = None,
+    cat1_id: Annotated[UUID | None, Query()] = None,
+    cat2_id: Annotated[UUID | None, Query()] = None,
+    cat3_id: Annotated[UUID | None, Query()] = None,
+    supplier_id: Annotated[UUID | None, Query()] = None,
+    origin: Annotated[str | None, Query(description="supplier | auction | other")] = None,
 ) -> CursorPage[ItemOut]:
     return await service.list_items(
         db,
@@ -99,6 +114,12 @@ async def list_items(
         cursor=decode_cursor(cursor) if cursor else None,
         limit=limit,
         status_filter=status,
+        q=q,
+        cat1_id=cat1_id,
+        cat2_id=cat2_id,
+        cat3_id=cat3_id,
+        supplier_id=supplier_id,
+        origin=origin,
     )
 
 
