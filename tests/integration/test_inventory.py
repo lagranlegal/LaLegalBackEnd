@@ -973,3 +973,106 @@ def test_a_different_name_creates_a_different_product(
     ).json()
 
     assert a["items"][0]["product_id"] != b["items"][0]["product_id"]
+
+
+def _products(client: TestClient, token: str, **params: object) -> list[dict]:
+    r = client.get("/api/v1/inventory/products", headers=_headers(token), params=params)
+    assert r.status_code == 200, r.text
+    return list(r.json()["items"])
+
+
+def test_products_list_groups_lots_and_sums_available(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """La vista que resuelve el síntoma original: dos compras de lo mismo son
+    UN producto con dos lotes, y el vendedor ve el total sin sumar a mano."""
+    token = inventory_tenant["token"]
+    for costo in ("100000.00", "150000.00"):
+        entry = client.post(
+            "/api/v1/inventory/entries",
+            headers=_headers(token),
+            json=_entry_with(
+                inventory_tenant,
+                "Cadena agrupable",
+                unit_cost=costo,
+                quantity=3,
+                photos=["https://x/f.jpg"],
+            ),
+        ).json()
+        _publish(client, token, entry["items"][0]["id"], "300000.00")
+
+    productos = _products(client, token, q="cadena")
+    assert len(productos) == 1
+    p = productos[0]
+    assert p["lot_count"] == 2
+    assert p["available_quantity"] == 6
+    # El rango de costos es informativo: los costos NO se promedian.
+    assert p["min_cost"] == "100000.00"
+    assert p["max_cost"] == "150000.00"
+
+
+def test_updating_the_price_applies_to_every_lot(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El problema concreto que se venía arrastrando: antes había que entrar a
+    cada lote y cambiar su precio, con el riesgo de dejar uno barato por
+    olvido. Ahora es una sola acción."""
+    token = inventory_tenant["token"]
+    entry_a = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena con precio", photos=["https://x/a.jpg"]),
+    ).json()
+    entry_b = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena con precio", photos=["https://x/b.jpg"]),
+    ).json()
+    _publish(client, token, entry_a["items"][0]["id"], "200000.00")
+    _publish(client, token, entry_b["items"][0]["id"], "200000.00")
+
+    product_id = entry_a["items"][0]["product_id"]
+    assert entry_b["items"][0]["product_id"] == product_id
+
+    subida = client.patch(
+        f"/api/v1/inventory/products/{product_id}",
+        headers=_headers(token),
+        json={"sale_price": "250000.00"},
+    )
+    assert subida.status_code == 200, subida.text
+    assert subida.json()["sale_price"] == "250000.00"
+
+    # Un solo PATCH y el producto entero quedó al precio nuevo.
+    productos = _products(client, token, q="cadena con precio")
+    assert productos[0]["sale_price"] == "250000.00"
+    assert productos[0]["lot_count"] == 2
+
+
+def test_product_lots_are_listed_oldest_first(client: TestClient, inventory_tenant: dict) -> None:
+    """Orden FIFO: el lote más antiguo primero, que es el que conviene vender
+    antes para que no envejezca el inventario."""
+    token = inventory_tenant["token"]
+    for _ in range(2):
+        client.post(
+            "/api/v1/inventory/entries",
+            headers=_headers(token),
+            json=_entry_with(inventory_tenant, "Cadena FIFO"),
+        )
+    product_id = _products(client, token, q="fifo")[0]["id"]
+
+    r = client.get(f"/api/v1/inventory/products/{product_id}/lots", headers=_headers(token))
+    assert r.status_code == 200, r.text
+    lotes = r.json()
+    assert [lote["lot_number"] for lote in lotes] == [1, 2]
+
+
+def test_unique_products_are_hidden_from_the_grouped_list(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Las piezas de remate son productos de un solo lote: si aparecieran,
+    llenarían la lista de grupos de uno sin aportar nada."""
+    token = inventory_tenant["token"]
+    todos = _products(client, token, include_unique=True)
+    agrupables = _products(client, token)
+    assert all(not p["is_unique"] for p in agrupables)
+    assert len(todos) >= len(agrupables)

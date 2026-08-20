@@ -17,6 +17,8 @@ from app.modules.inventory.schemas import (
     ItemOut,
     ItemPublishIn,
     ItemUpdateIn,
+    ProductOut,
+    ProductUpdateIn,
 )
 
 router = APIRouter(prefix="/api/v1/inventory", tags=["inventory"])
@@ -172,3 +174,62 @@ async def publish_item(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> ItemOut:
     return await service.publish_item(db, company_id=user.company_id, item_id=item_id, body=body)
+
+
+# ---- Productos (00021) --------------------------------------------------
+
+
+@router.get("/products", response_model=CursorPage[ProductOut])
+async def list_products(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    q: Annotated[
+        str | None, Query(description="SKU (prefijo) o nombre (full-text español).")
+    ] = None,
+    include_unique: Annotated[
+        bool, Query(description="Incluir piezas de remate, que son productos de un solo lote.")
+    ] = False,
+) -> CursorPage[ProductOut]:
+    """Inventario agrupado por producto, con el resumen de sus lotes.
+
+    Es la vista que responde "¿cuántas tengo para vender?" sin que el usuario
+    tenga que sumar lotes mentalmente. El detalle por lote —con su costo y su
+    proveedor— sale de `GET /products/{id}/lots`.
+    """
+    return await service.list_products(
+        db,
+        company_id=user.company_id,
+        cursor=decode_cursor(cursor) if cursor else None,
+        limit=limit,
+        q=q,
+        include_unique=include_unique,
+    )
+
+
+@router.get("/products/{product_id}/lots", response_model=list[ItemOut])
+async def list_product_lots(
+    product_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> list[ItemOut]:
+    """Lotes de un producto, del más antiguo al más nuevo — que es el orden en
+    que conviene venderlos (FIFO)."""
+    return await service.list_product_lots(db, company_id=user.company_id, product_id=product_id)
+
+
+@router.patch("/products/{product_id}", response_model=ProductOut)
+async def update_product(
+    product_id: UUID,
+    body: ProductUpdateIn,
+    user: Annotated[CurrentUser, Depends(_create)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> ProductOut:
+    """Cambiar el precio acá lo cambia para TODOS los lotes de una vez — antes
+    había que editar cada lote por separado, con el riesgo real de dejar uno
+    barato por olvido. Las ventas ya hechas no se ven afectadas.
+    """
+    return await service.update_product(
+        db, company_id=user.company_id, product_id=product_id, body=body
+    )

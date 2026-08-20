@@ -124,3 +124,43 @@ class ExitOut(BaseModel):
     exit_type: str
     reason: str
     created_at: datetime
+
+
+class ProductOut(BaseModel):
+    """Un producto con el resumen de sus lotes — la vista agrupada del
+    inventario. El PRECIO vive acá (aplica a todos los lotes); el COSTO no
+    sube nunca a este nivel: cada lote conserva el suyo (identificación
+    específica, NIIF) y por eso acá solo se expone el RANGO, como lectura
+    informativa y jamás como valor de costeo.
+    """
+
+    id: UUID
+    code: str | None
+    name: str
+    cat1_id: UUID
+    cat2_id: UUID
+    cat3_id: UUID
+    description: str | None
+    sale_price: Decimal | None
+    is_unique: bool
+    active: bool
+    #: Lotes vivos (sin contar los dados de baja).
+    lot_count: int
+    #: Unidades listas para vender — el número que busca el vendedor.
+    available_quantity: int
+    #: Rango de costos entre lotes. Una dispersión grande es señal de que el
+    #: precio de compra se movió: vale la pena revisar el precio de venta.
+    min_cost: Decimal | None
+    max_cost: Decimal | None
+    created_at: datetime
+
+
+class ProductUpdateIn(BaseModel):
+    """Editar el producto afecta a TODOS sus lotes a la vez — ese es el punto.
+    El costo no está acá y nunca lo estará: pertenece al lote.
+    """
+
+    name: str | None = None
+    description: str | None = None
+    sale_price: Money | None = None
+    active: bool | None = None

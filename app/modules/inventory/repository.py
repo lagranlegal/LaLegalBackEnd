@@ -627,3 +627,91 @@ async def set_item_product(
             "lot": lot_number,
         },
     )
+
+
+async def list_products(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    q: str | None = None,
+    include_unique: bool = False,
+) -> list[Row[Any]]:
+    """Productos con los agregados de sus lotes — alimenta la vista agrupada.
+
+    `available_quantity` cuenta SOLO los lotes disponibles: es el número que
+    el vendedor necesita ("¿cuántas tengo para vender?"). `lot_count` y el
+    rango de costos cuentan todos los lotes vivos, porque sirven para leer
+    compras, no ventas.
+
+    Los `is_unique` (piezas de remate) se excluyen por defecto: cada una es su
+    propio producto de un solo lote y llenarían la lista de grupos de uno.
+    """
+    query = """
+        select
+          p.id, p.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description,
+          p.sale_price, p.is_unique, p.active, p.created_at,
+          coalesce(count(i.id) filter (where i.status <> 'written_off'), 0) as lot_count,
+          coalesce(sum(i.quantity) filter (where i.status = 'available'), 0)
+            as available_quantity,
+          min(i.cost) filter (where i.status <> 'written_off') as min_cost,
+          max(i.cost) filter (where i.status <> 'written_off') as max_cost
+        from public.product p
+        left join public.inventory_item i
+          on i.product_id = p.id and i.company_id = p.company_id
+        where p.company_id = :company_id
+    """
+    params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
+    if not include_unique:
+        query += " and not p.is_unique"
+    if q:
+        query += (
+            " and (coalesce(p.code, '') ilike :code_prefix"
+            " or to_tsvector('spanish', p.name) @@ plainto_tsquery('spanish', :q))"
+        )
+        params["q"] = q
+        params["code_prefix"] = f"{q}%"
+    if cursor is not None:
+        query += " and p.id > :cursor"
+        params["cursor"] = str(cursor)
+    query += " group by p.id order by p.id limit :limit"
+    result = await db.execute(text(query), params)
+    return list(result.all())
+
+
+async def list_lots_for_product(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID
+) -> list[Row[Any]]:
+    """Lotes de un producto, del más antiguo al más nuevo — ese es el orden en
+    que conviene venderlos (FIFO) y por tanto el orden en que leerlos.
+    """
+    result = await db.execute(
+        text(
+            f"""
+            select {_ITEM_COLUMNS} from public.inventory_item
+            where company_id = :company_id and product_id = :product_id
+            order by lot_number, entry_date, id
+            """
+        ),
+        {"company_id": str(company_id), "product_id": str(product_id)},
+    )
+    return list(result.all())
+
+
+async def update_product_fields(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID, fields: dict[str, Any]
+) -> None:
+    """`fields` viene de `ProductUpdateIn.model_dump(exclude_unset=True)` —
+    claves fijas y conocidas, nunca texto del usuario como nombre de columna.
+    """
+    if not fields:
+        return
+    assignments = ", ".join(f"{key} = :{key}" for key in fields)
+    params = {**fields, "company_id": str(company_id), "id": str(product_id)}
+    await db.execute(
+        text(
+            f"update public.product set {assignments} where company_id = :company_id and id = :id"
+        ),
+        params,
+    )

@@ -20,6 +20,8 @@ from app.modules.inventory.schemas import (
     ItemOut,
     ItemPublishIn,
     ItemUpdateIn,
+    ProductOut,
+    ProductUpdateIn,
 )
 from app.modules.platform import integration as platform_integration
 
@@ -599,3 +601,82 @@ async def pay_entry(
         created_by=registered_by,
     )
     return await get_entry(db, company_id=company_id, entry_id=entry_id)
+
+
+def _row_to_product(row: Row[Any]) -> ProductOut:
+    m = row._mapping
+    return ProductOut(
+        id=m["id"],
+        code=m["code"],
+        name=m["name"],
+        cat1_id=m["cat1_id"],
+        cat2_id=m["cat2_id"],
+        cat3_id=m["cat3_id"],
+        description=m["description"],
+        sale_price=m["sale_price"],
+        is_unique=m["is_unique"],
+        active=m["active"],
+        lot_count=m["lot_count"],
+        available_quantity=m["available_quantity"],
+        min_cost=m["min_cost"],
+        max_cost=m["max_cost"],
+        created_at=m["created_at"],
+    )
+
+
+async def list_products(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    q: str | None = None,
+    include_unique: bool = False,
+) -> CursorPage[ProductOut]:
+    rows = await repository.list_products(
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        q=q.strip() or None if q else None,
+        include_unique=include_unique,
+    )
+    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    return CursorPage(items=[_row_to_product(r) for r in page.items], next_cursor=page.next_cursor)
+
+
+async def list_product_lots(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID
+) -> list[ItemOut]:
+    if await repository.get_product(db, company_id=company_id, product_id=product_id) is None:
+        raise NotFoundError("El producto no existe en esta empresa.")
+    rows = await repository.list_lots_for_product(db, company_id=company_id, product_id=product_id)
+    return [_row_to_item(r) for r in rows]
+
+
+async def update_product(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID, body: ProductUpdateIn
+) -> ProductOut:
+    """Cambiar el precio acá lo cambia para TODOS los lotes de una vez — que
+    es el comportamiento correcto: el cliente no sabe qué lote le tocó, y dos
+    piezas idénticas a precios distintos en la misma vitrina no son una
+    estrategia sino un descuido.
+
+    Las ventas ya hechas NO se ven afectadas: `sale_line` congela su propio
+    `unit_price` al vender, igual que el costo.
+    """
+    if await repository.get_product(db, company_id=company_id, product_id=product_id) is None:
+        raise NotFoundError("El producto no existe en esta empresa.")
+
+    fields = body.model_dump(exclude_unset=True)
+    await repository.update_product_fields(
+        db, company_id=company_id, product_id=product_id, fields=fields
+    )
+
+    rows = await repository.list_products(
+        db, company_id=company_id, cursor=None, limit=1000, include_unique=True
+    )
+    for row in rows:
+        if row._mapping["id"] == product_id:
+            return _row_to_product(row)
+    raise NotFoundError("El producto no existe en esta empresa.")
