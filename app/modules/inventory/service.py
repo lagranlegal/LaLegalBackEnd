@@ -673,6 +673,19 @@ async def update_product(
         db, company_id=company_id, product_id=product_id, fields=fields
     )
 
+    # El precio nuevo tiene que llegar a los lotes: el POS arma la venta con
+    # `inventory_item.sale_price`, así que sin esto cambiar el precio desde la
+    # vista de productos no afectaría lo que se cobra en caja. Es la doble
+    # fuente de verdad de la fase 2, sincronizada a propósito hasta que la
+    # fase 3 elimine la columna duplicada.
+    if fields.get("sale_price") is not None:
+        await repository.sync_lot_prices(
+            db,
+            company_id=company_id,
+            product_id=product_id,
+            sale_price=fields["sale_price"],
+        )
+
     rows = await repository.list_products(
         db, company_id=company_id, cursor=None, limit=1000, include_unique=True
     )

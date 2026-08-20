@@ -1076,3 +1076,35 @@ def test_unique_products_are_hidden_from_the_grouped_list(
     agrupables = _products(client, token)
     assert all(not p["is_unique"] for p in agrupables)
     assert len(todos) >= len(agrupables)
+
+
+def test_changing_the_product_price_reaches_the_lots_that_the_pos_reads(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Regresión de un bug real introducido al mover el precio al producto: el
+    POS arma la venta con `inventory_item.sale_price`, así que si el PATCH del
+    producto no propagaba a los lotes, cambiar el precio NO cambiaba lo que se
+    cobraba en caja. Doble fuente de verdad = bug de dinero.
+
+    Esta sincronización existe solo mientras dure la fase 2; la fase 3 elimina
+    la columna duplicada y con ella la necesidad.
+    """
+    token = inventory_tenant["token"]
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena sincronizada", photos=["https://x/s.jpg"]),
+    ).json()
+    item_id = entry["items"][0]["id"]
+    _publish(client, token, item_id, "200000.00")
+
+    product_id = entry["items"][0]["product_id"]
+    client.patch(
+        f"/api/v1/inventory/products/{product_id}",
+        headers=_headers(token),
+        json={"sale_price": "260000.00"},
+    )
+
+    # Lo que el POS va a leer y cobrar.
+    item = client.get(f"/api/v1/inventory/items/{item_id}", headers=_headers(token)).json()
+    assert item["sale_price"] == "260000.00"

@@ -715,3 +715,32 @@ async def update_product_fields(
         ),
         params,
     )
+
+
+async def sync_lot_prices(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID, sale_price: Decimal
+) -> None:
+    """Propaga el precio del producto a todos sus lotes.
+
+    Existe SOLO mientras dure la fase 2 (expandir/migrar/contraer): el precio
+    ya vive en `product`, pero `inventory_item.sale_price` sigue siendo lo que
+    lee el POS al armar la venta. Sin esta propagación, cambiar el precio
+    desde la vista de productos no afectaría lo que se cobra en caja — la
+    doble fuente de verdad se convertiría en un bug de dinero.
+
+    La fase 3 borra `inventory_item.sale_price` y esta función se va con ella.
+
+    No toca los lotes vendidos ni dados de baja: su precio ya es historia y
+    `sale_line` congeló el suyo al vender de todos modos.
+    """
+    await db.execute(
+        text(
+            """
+            update public.inventory_item
+            set sale_price = :price
+            where company_id = :cid and product_id = :pid
+              and status not in ('sold', 'written_off')
+            """
+        ),
+        {"cid": str(company_id), "pid": str(product_id), "price": sale_price},
+    )
