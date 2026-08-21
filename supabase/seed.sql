@@ -21,12 +21,14 @@ insert into public.permission (code, module, action, is_special, description) va
   ('customers.view',   'customers', 'view',   false, 'Ver clientes e historial cruzado'),
   ('customers.create', 'customers', 'create', false, 'Crear y editar clientes'),
   -- Catálogos
+  ('catalogs.view',   'catalogs', 'view',   false, 'Ver categorías y proveedores'),
   ('catalogs.manage', 'catalogs', 'manage', false, 'Gestionar categorías y proveedores'),
   -- Inventario
   ('inventory.view',   'inventory', 'view',   false, 'Ver artículos y stock'),
   ('inventory.create', 'inventory', 'create', false, 'Crear artículos e ingresos de mercancía'),
   ('inventory.exit',   'inventory', 'exit',   true,  'Egresos de inventario (ajuste, daño, devolución)'),
   -- Ventas
+  ('sales.view',   'sales', 'view',   false, 'Ver ventas y su detalle'),
   ('sales.create',         'sales', 'create',   false, 'Registrar ventas'),
   ('sales.void',           'sales', 'void',     true,  'Anular venta (repone stock)'),
   ('sales.apply_discount', 'sales', 'discount', true,  'Aplicar descuento en venta'),
@@ -67,7 +69,8 @@ on conflict (code) do nothing;
 --               sales.apply_discount, audit.view, company.configure,
 --               contracts.import.
 --   Asesor:     contracts.view/create, payments.create, customers.*,
---               inventory.view, sales.create, cashbox.view, accounts.view.
---   Bodega:     inventory.view/create, catalogs.manage (proveedores),
+--               inventory.view, sales.view/create, catalogs.view,
+--               cashbox.view, accounts.view.
+--   Bodega:     inventory.view/create, catalogs.view/manage (proveedores),
 --               customers.view.
 -- =====================================================================

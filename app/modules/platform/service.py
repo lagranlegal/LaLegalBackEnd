@@ -25,6 +25,10 @@ _ASESOR_CODES = {
     "customers.create",
     "inventory.view",
     "sales.create",
+    "sales.view",
+    # Leer categorías es indispensable para crear un contrato: el asesor
+    # elige la categoría de la prenda. Sin esto no puede trabajar.
+    "catalogs.view",
     "cashbox.view",
     # Un asesor que cobra necesita ver a qué cuenta está mandando la plata,
     # aunque no pueda administrar el catálogo ni liquidar convenios.
@@ -34,6 +38,7 @@ _BODEGA_CODES = {
     "inventory.view",
     "inventory.create",
     "catalogs.manage",
+    "catalogs.view",
     "customers.view",
 }
 _MODERADOR_EXCLUDED_CODES = {

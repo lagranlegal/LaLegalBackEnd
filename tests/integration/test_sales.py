@@ -54,8 +54,10 @@ async def sales_tenant(
     product_id = uuid4()
     register_id = uuid4()
 
-    full_codes = ("sales.create", "sales.void", "sales.apply_discount")
-    limited_codes = ("sales.create",)
+    # `sales.view` es propio desde 00030: antes listar ventas exigía
+    # `sales.create`, o sea que no se podía tener a alguien que solo revisara.
+    full_codes = ("sales.view", "sales.create", "sales.void", "sales.apply_discount")
+    limited_codes = ("sales.view", "sales.create")
 
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(

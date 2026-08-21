@@ -106,12 +106,17 @@ def test_root_categories_with_same_code_letter_is_conflict(
     assert second.json()["code"] == "CONFLICT"
 
 
-async def test_categories_readable_without_catalogs_manage_permission(
+async def test_categories_readable_with_view_but_without_manage(
     client: TestClient, tenant: dict
 ) -> None:
-    """Cualquier usuario autenticado y activo puede LEER categorías (no
-    requiere catalogs.manage) — lo necesitan contracts/inventory/sales para
-    operar. Solo mutar (POST/PATCH) requiere el permiso.
+    """Leer categorías necesita `catalogs.view`, NO `catalogs.manage` — lo
+    necesitan contracts/inventory/sales para operar, y un asesor no puede
+    crear un contrato sin elegir la categoría de la prenda.
+
+    Antes de 00030 estos GET no exigían ningún permiso, lo que violaba la
+    regla 3 de CLAUDE.md. El permiso nuevo conserva el acceso (la migración
+    se lo otorga a todos los roles existentes) pero lo hace quitable a
+    conciencia desde la matriz.
     """
     role_id = uuid4()
     user_id = uuid4()
@@ -121,6 +126,13 @@ async def test_categories_readable_without_catalogs_manage_permission(
                 "insert into public.role (id, company_id, name) values (:id, :cid, 'SinPermisos')"
             ),
             {"id": str(role_id), "cid": str(tenant["company_id"])},
+        )
+        await session.execute(
+            text(
+                "insert into public.role_permission (role_id, permission_id) "
+                "select :role_id, id from public.permission where code = 'catalogs.view'"
+            ),
+            {"role_id": str(role_id)},
         )
         await session.execute(
             text(
@@ -147,9 +159,20 @@ async def test_categories_readable_without_catalogs_manage_permission(
     response = client.get("/api/v1/catalogs/categories", headers=_headers(token))
     assert response.status_code == 200
 
+    # …pero crear sigue exigiendo `catalogs.manage`.
+    crear = client.post(
+        "/api/v1/catalogs/categories",
+        headers=_headers(token),
+        json={"name": "No debería crearse", "level": 1, "parent_id": None},
+    )
+    assert crear.status_code == 403
+
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
             text("delete from public.app_user where id = :id"), {"id": str(user_id)}
+        )
+        await session.execute(
+            text("delete from public.role_permission where role_id = :id"), {"id": str(role_id)}
         )
         await session.execute(text("delete from public.role where id = :id"), {"id": str(role_id)})
 

@@ -12,6 +12,7 @@ from app.modules.sales.schemas import SaleCreateIn, SaleOut, VoidSaleIn
 
 router = APIRouter(prefix="/api/v1/sales", tags=["sales"])
 
+_view = require_permission("sales.view")
 _create = require_permission("sales.create")
 _void = require_permission("sales.void")
 
@@ -30,7 +31,7 @@ async def create_sale(
 
 @router.get("", response_model=CursorPage[SaleOut])
 async def list_sales(
-    user: Annotated[CurrentUser, Depends(_create)],
+    user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -50,7 +51,7 @@ async def list_sales(
 @router.get("/{sale_id}", response_model=SaleOut)
 async def get_sale(
     sale_id: UUID,
-    user: Annotated[CurrentUser, Depends(_create)],
+    user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> SaleOut:
     return await service.get_sale(db, company_id=user.company_id, sale_id=sale_id)

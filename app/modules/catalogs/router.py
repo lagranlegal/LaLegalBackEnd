@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, decode_cursor
-from app.core.security import CurrentUser, get_current_user, get_tenant_db, require_permission
+from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.catalogs import service
 from app.modules.catalogs.schemas import (
     CategoryCreateIn,
@@ -19,6 +19,12 @@ from app.modules.catalogs.schemas import (
 router = APIRouter(prefix="/api/v1/catalogs", tags=["catalogs"])
 
 _manage = require_permission("catalogs.manage")
+# Los cuatro GET no exigían permiso (`get_current_user` pelado), lo que viola
+# la regla 3 de CLAUDE.md y hacía legible el catálogo para cualquier usuario
+# autenticado. 00030 crea el permiso y se lo otorga a todos los roles
+# existentes, así que esto no le quita el acceso a nadie hoy — lo que gana es
+# que a partir de ahora se pueda quitar a conciencia.
+_view = require_permission("catalogs.view")
 
 # Lectura de categorías/proveedores: cualquier usuario autenticado y activo de
 # la empresa (no requiere catalogs.manage) — son datos de referencia que
@@ -28,7 +34,7 @@ _manage = require_permission("catalogs.manage")
 
 @router.get("/categories", response_model=list[CategoryOut])
 async def list_categories(
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> list[CategoryOut]:
     return await service.list_categories(db, company_id=user.company_id)
@@ -46,7 +52,7 @@ async def create_category(
 @router.get("/categories/{category_id}", response_model=CategoryOut)
 async def get_category(
     category_id: UUID,
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> CategoryOut:
     return await service.get_category(db, company_id=user.company_id, category_id=category_id)
@@ -66,7 +72,7 @@ async def update_category(
 
 @router.get("/suppliers", response_model=CursorPage[SupplierOut])
 async def list_suppliers(
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -91,7 +97,7 @@ async def create_supplier(
 @router.get("/suppliers/{supplier_id}", response_model=SupplierOut)
 async def get_supplier(
     supplier_id: UUID,
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> SupplierOut:
     return await service.get_supplier(db, company_id=user.company_id, supplier_id=supplier_id)

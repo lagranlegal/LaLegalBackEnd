@@ -27,7 +27,7 @@ def client() -> Generator[TestClient, None, None]:
 async def tenant(
     monkeypatch: pytest.MonkeyPatch, rsa_keypair: tuple[str, object]
 ) -> AsyncGenerator[dict, None]:
-    """Empresa + 1 rol con customers.view/create y catalogs.manage + 1 usuario
+    """Empresa + 1 rol con customers.view/create y catalogs.view/manage + 1 usuario
     activo. Fixture genérica para módulos que no necesitan la matriz completa
     de identity (ver tests/integration/test_identity.py para esa).
     """
@@ -51,7 +51,8 @@ async def tenant(
             text(
                 "insert into public.role_permission (role_id, permission_id) "
                 "select :role_id, id from public.permission "
-                "where code in ('customers.view', 'customers.create', 'catalogs.manage')"
+                "where code in ('customers.view', 'customers.create', "
+                "'catalogs.view', 'catalogs.manage')"
             ),
             {"role_id": str(role_id)},
         )
