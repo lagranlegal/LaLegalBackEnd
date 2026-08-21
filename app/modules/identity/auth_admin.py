@@ -36,7 +36,10 @@ async def invite_user(email: str, full_name: str) -> UUID:
     # OJO: la URL debe estar además en la lista de "Redirect URLs" permitidas
     # del proyecto Supabase (Authentication → URL Configuration). Si no está,
     # Supabase la IGNORA en silencio y vuelve a caer en la Site URL — o sea,
-    # el mismo síntoma. Ver docs/DEPLOY.md.
+    # el mismo síntoma. Configurado en dev el 21/08/2026 (junto con el Site
+    # URL, que estaba en localhost:3000 y era la otra mitad del problema);
+    # el procedimiento y por qué NO se usa `supabase config push` están en
+    # `frontend-starter/docs/DEPLOY.md`.
     if settings.frontend_url:
         payload["redirect_to"] = f"{settings.frontend_url.rstrip('/')}/auth/callback"
 
