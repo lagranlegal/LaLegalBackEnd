@@ -17,9 +17,15 @@ from app.modules.reports.schemas import (
     ContractKpisOut,
     DashboardOut,
     InventoryKpisOut,
+    InventoryValuationCategoryOut,
+    InventoryValuationOut,
     PawnPerformanceOut,
+    PayablesOut,
     ProfitSummaryOut,
     SalesKpisOut,
+    StaleInventoryOut,
+    StaleItemOut,
+    SupplierPayableOut,
 )
 
 
@@ -187,4 +193,105 @@ async def get_pawn_performance(
         capital_outstanding=outstanding,
         open_contracts=m["open_contracts"],
         yield_on_current_portfolio_pct=yield_pct,
+    )
+
+
+def _dec(value: Any) -> Decimal:
+    """`sum(...) filter (...)` devuelve NULL cuando ningún registro cae en el
+    tramo, y un tramo vacío es CERO, no "sin dato" — en un reporte de dinero un
+    hueco se lee como error del sistema."""
+    return Decimal(str(value)) if value is not None else Decimal("0.00")
+
+
+async def get_payables(db: AsyncSession, *, company_id: UUID) -> PayablesOut:
+    """Cuentas por pagar con antigüedad.
+
+    "¿Cuánto debo, a quién, y desde hace cuánto?" — la pregunta que el sistema
+    ya podía responder fila por fila y ninguna pantalla sumaba.
+    """
+    as_of = await platform_integration.get_company_today(db, company_id=company_id)
+    rows = await repository.payables_by_supplier(db, company_id=company_id, as_of=as_of)
+
+    by_supplier = [
+        SupplierPayableOut(
+            supplier_id=r._mapping["supplier_id"],
+            supplier_name=r._mapping["supplier_name"],
+            entry_count=r._mapping["entry_count"],
+            total=_dec(r._mapping["total"]),
+            days_0_30=_dec(r._mapping["days_0_30"]),
+            days_31_60=_dec(r._mapping["days_31_60"]),
+            days_over_60=_dec(r._mapping["days_over_60"]),
+            oldest_entry_date=r._mapping["oldest_entry_date"],
+        )
+        for r in rows
+    ]
+    return PayablesOut(
+        as_of=as_of,
+        total=sum((s.total for s in by_supplier), start=Decimal("0.00")),
+        entry_count=sum(s.entry_count for s in by_supplier),
+        days_0_30=sum((s.days_0_30 for s in by_supplier), start=Decimal("0.00")),
+        days_31_60=sum((s.days_31_60 for s in by_supplier), start=Decimal("0.00")),
+        days_over_60=sum((s.days_over_60 for s in by_supplier), start=Decimal("0.00")),
+        by_supplier=by_supplier,
+    )
+
+
+async def get_inventory_valuation(db: AsyncSession, *, company_id: UUID) -> InventoryValuationOut:
+    as_of = await platform_integration.get_company_today(db, company_id=company_id)
+    rows = await repository.inventory_valuation(db, company_id=company_id)
+
+    by_category = [
+        InventoryValuationCategoryOut(
+            cat1_id=r._mapping["cat1_id"],
+            cat1_name=r._mapping["cat1_name"],
+            units=r._mapping["units"] or 0,
+            cost_value=_dec(r._mapping["cost_value"]),
+            retail_value=_dec(r._mapping["retail_value"]),
+        )
+        for r in rows
+    ]
+    cost_value = sum((c.cost_value for c in by_category), start=Decimal("0.00"))
+    retail_value = sum((c.retail_value for c in by_category), start=Decimal("0.00"))
+    return InventoryValuationOut(
+        as_of=as_of,
+        units=sum(c.units for c in by_category),
+        lot_count=sum(r._mapping["lot_count"] for r in rows),
+        cost_value=cost_value,
+        retail_value=retail_value,
+        # Puede ser NEGATIVA y eso es información, no un error: significa que
+        # hay mercancía cuyo precio de venta quedó por debajo del costo. Vale
+        # más verlo que esconderlo detrás de un max(0).
+        potential_profit=retail_value - cost_value,
+        by_category=by_category,
+    )
+
+
+async def get_stale_inventory(
+    db: AsyncSession, *, company_id: UUID, threshold_days: int, limit: int
+) -> StaleInventoryOut:
+    as_of = await platform_integration.get_company_today(db, company_id=company_id)
+    rows = await repository.stale_inventory(
+        db,
+        company_id=company_id,
+        as_of=as_of,
+        threshold_days=threshold_days,
+        limit=limit,
+    )
+    items = [
+        StaleItemOut(
+            product_id=r._mapping["product_id"],
+            product_code=r._mapping["product_code"],
+            product_name=r._mapping["product_name"],
+            units=r._mapping["units"] or 0,
+            cost_value=_dec(r._mapping["cost_value"]),
+            days_in_stock=r._mapping["days_in_stock"] or 0,
+        )
+        for r in rows
+    ]
+    return StaleInventoryOut(
+        as_of=as_of,
+        threshold_days=threshold_days,
+        product_count=len(items),
+        total_cost_value=sum((i.cost_value for i in items), start=Decimal("0.00")),
+        items=items,
     )

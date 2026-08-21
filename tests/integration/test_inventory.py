@@ -53,7 +53,18 @@ async def inventory_tenant(
     supplier_id = uuid4()
     register_id = uuid4()
     session_id = uuid4()
-    codes = ("inventory.view", "inventory.create", "inventory.exit")
+    codes = (
+        "inventory.view",
+        "inventory.create",
+        "inventory.exit",
+        # Los reportes de inventario (valorización, sin rotación) y el de
+        # cuentas por pagar viven en `reports` pero se prueban acá, donde está
+        # la mercancía que los alimenta.
+        "reports.view",
+        # La ficha del proveedor vive en `catalogs` por la misma razón: sus
+        # números salen de las compras, que se crean acá.
+        "catalogs.view",
+    )
 
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
@@ -1439,3 +1450,213 @@ def test_exits_filter_by_type(client: TestClient, inventory_tenant: dict) -> Non
         params={"exit_type": "damage"},
     ).json()["items"]
     assert all(e["exit_type"] == "damage" for e in danos)
+
+
+def test_payables_report_groups_by_supplier_with_aging(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """ "¿Cuánto debo, a quién, y desde hace cuánto?" — el primer reporte que
+    pediría un contador, y que no existía aunque cada compra ya supiera si
+    estaba pagada."""
+    token = inventory_tenant["token"]
+    hoy = date.today()
+
+    reciente = _entry_payload(inventory_tenant)
+    del reciente["payment_method"]
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=reciente)
+
+    vieja = _entry_payload(inventory_tenant)
+    del vieja["payment_method"]
+    vieja["entry_date"] = str(hoy - timedelta(days=75))
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=vieja)
+
+    # Una PAGADA no debe aparecer: ya no se debe.
+    client.post(
+        "/api/v1/inventory/entries", headers=_headers(token), json=_entry_payload(inventory_tenant)
+    )
+
+    r = client.get("/api/v1/reports/payables", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["entry_count"] == 2, "solo las pendientes"
+    assert Decimal(body["days_over_60"]) > 0, "la de hace 75 días cae en +60"
+    assert Decimal(body["days_0_30"]) > 0, "la de hoy cae en 0-30"
+    # Los tramos tienen que sumar EXACTAMENTE el total: un peso que no cae en
+    # ningún tramo es un peso que el reporte esconde.
+    tramos = (
+        Decimal(body["days_0_30"]) + Decimal(body["days_31_60"]) + Decimal(body["days_over_60"])
+    )
+    assert tramos == Decimal(body["total"])
+
+    proveedor = body["by_supplier"][0]
+    assert proveedor["supplier_id"] == str(inventory_tenant["supplier_id"])
+    assert proveedor["oldest_entry_date"] == str(hoy - timedelta(days=75))
+
+
+def test_inventory_valuation_counts_only_available(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El activo más grande del negocio, valorado AL COSTO.
+
+    Solo cuenta lo disponible: un borrador no se puede vender —y ni siquiera
+    tiene precio— así que incluirlo inflaría el activo con mercancía que
+    todavía no lo es.
+    """
+    token = inventory_tenant["token"]
+    publicado = _entry_with(
+        inventory_tenant,
+        "Cadena valorable",
+        unit_cost="100000.00",
+        quantity=2,
+        photos=["v.jpg"],
+        sale_price="180000.00",
+    )
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=publicado)
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena en borrador", unit_cost="999999.00"),
+    )
+
+    r = client.get(
+        "/api/v1/reports/inventory-valuation", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert Decimal(body["cost_value"]) == Decimal("200000.00"), "2 × 100.000, sin el borrador"
+    assert Decimal(body["retail_value"]) == Decimal("360000.00"), "2 × 180.000"
+    # La utilidad potencial es la diferencia — lo que se ganaría vendiendo todo
+    # hoy. NO forma parte del valor del inventario.
+    assert Decimal(body["potential_profit"]) == Decimal("160000.00")
+    assert body["units"] == 2
+    assert body["by_category"], "desglosado por categoría de primer nivel"
+
+
+def test_item_inherits_the_entry_date_of_its_purchase(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El lote hereda la fecha del INGRESO, no la de hoy.
+
+    Bug encontrado construyendo el reporte de mercancía sin rotación: 00020
+    agregó `entry_date` al ingreso y nunca lo propagó al lote, que se quedaba
+    con el `current_date` por defecto de 00006. Una compra cargada con fecha
+    de la semana pasada guardaba esa fecha en el ingreso y "hoy" en cada uno
+    de sus lotes — así que la ficha del lote mostraba una fecha falsa y
+    cualquier medida de antigüedad de inventario contaba desde el día de la
+    digitación en vez del día en que la mercancía llegó.
+    """
+    token = inventory_tenant["token"]
+    hace_un_mes = str(date.today() - timedelta(days=30))
+    payload = _entry_payload(inventory_tenant)
+    del payload["payment_method"]
+    payload["entry_date"] = hace_un_mes
+
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).json()
+    assert entry["entry_date"] == hace_un_mes
+    assert entry["items"][0]["entry_date"] == hace_un_mes, "el lote entró cuando entró la mercancía"
+
+
+def test_stale_inventory_uses_the_oldest_lot(client: TestClient, inventory_tenant: dict) -> None:
+    """Se mide sobre el lote más ANTIGUO todavía disponible.
+
+    Si algo entró hace un año y se repuso ayer, lo congelado es la pieza
+    vieja — usar la fecha del lote nuevo la escondería justo cuando más
+    importa verla.
+    """
+    token = inventory_tenant["token"]
+    viejo = _entry_with(inventory_tenant, "Cadena dormida", photos=["d.jpg"], sale_price="90000.00")
+    viejo["entry_date"] = str(date.today() - timedelta(days=200))
+    del viejo["payment_method"]
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=viejo)
+
+    # Reposición de HOY del MISMO producto.
+    nuevo = _entry_with(inventory_tenant, "Cadena dormida", photos=["e.jpg"])
+    del nuevo["payment_method"]
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=nuevo)
+
+    r = client.get(
+        "/api/v1/reports/stale-inventory",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"threshold_days": 90},
+    )
+    assert r.status_code == 200, r.text
+    dormidos = {p["product_name"]: p for p in r.json()["items"]}
+    assert "Cadena dormida" in dormidos, "la reposición de hoy no debe esconder la pieza vieja"
+    assert dormidos["Cadena dormida"]["days_in_stock"] >= 200
+
+
+def test_product_purchase_history_compares_suppliers_and_costs(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """ "¿Cómo se movió el costo?" y "¿a quién le compro más barato?".
+
+    La lista de productos ya insinuaba esto mostrando el rango de costos entre
+    lotes, pero no dejaba abrirlo: se veía que el costo se movió y no por qué.
+    """
+    token = inventory_tenant["token"]
+    for costo in ("100000.00", "130000.00"):
+        client.post(
+            "/api/v1/inventory/entries",
+            headers=_headers(token),
+            json=_entry_with(inventory_tenant, "Cadena con historia", unit_cost=costo),
+        )
+
+    productos = _products(client, token, q="historia")
+    assert productos
+    product_id = productos[0]["id"]
+
+    r = client.get(
+        f"/api/v1/inventory/products/{product_id}/purchases",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    compras = r.json()
+    assert len(compras) == 2
+    assert {c["unit_cost"] for c in compras} == {"100000.00", "130000.00"}
+    assert all(c["supplier_name"] == "Proveedor Uno" for c in compras)
+
+
+def test_supplier_summary_and_purchase_history(client: TestClient, inventory_tenant: dict) -> None:
+    """La ficha del proveedor: qué le compré y cuánto le debo.
+
+    El CLIENTE tiene su ficha con historial cruzado desde el paso 4; el
+    proveedor tenía un formulario de creación y nada más, así que "¿cuánto le
+    he comprado?" no tenía respuesta aunque el dato estuviera completo.
+    """
+    token = inventory_tenant["token"]
+    supplier_id = str(inventory_tenant["supplier_id"])
+
+    pagada = _entry_with(inventory_tenant, "Cadena pagada", unit_cost="200000.00")
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=pagada)
+
+    pendiente = _entry_with(inventory_tenant, "Cadena a crédito", unit_cost="300000.00")
+    del pendiente["payment_method"]
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=pendiente)
+
+    r = client.get(
+        f"/api/v1/catalogs/suppliers/{supplier_id}/summary",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    ficha = r.json()
+
+    assert ficha["purchase_count"] == 2
+    assert Decimal(ficha["total_purchased"]) == Decimal("500000.00")
+    # Lo pendiente es un subconjunto de lo comprado, no otra cosa.
+    assert ficha["pending_count"] == 1
+    assert Decimal(ficha["pending_total"]) == Decimal("300000.00")
+    assert ficha["product_count"] == 2, "dos productos distintos"
+    assert ficha["last_purchase_date"] is not None
+
+    compras = client.get(
+        f"/api/v1/catalogs/suppliers/{supplier_id}/purchases",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert compras.status_code == 200, compras.text
+    items = compras.json()["items"]
+    assert len(items) == 2
+    assert {i["item_count"] for i in items} == {1}
+    # Una pagada y una no: es lo que distingue la deuda del histórico.
+    assert sorted(i["paid_at"] is None for i in items) == [False, True]

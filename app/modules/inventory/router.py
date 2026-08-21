@@ -19,6 +19,7 @@ from app.modules.inventory.schemas import (
     ItemPublishIn,
     ItemUpdateIn,
     ProductOut,
+    ProductPurchaseOut,
     ProductUpdateIn,
 )
 
@@ -281,4 +282,21 @@ async def update_product(
     """
     return await service.update_product(
         db, company_id=user.company_id, product_id=product_id, body=body
+    )
+
+
+@router.get("/products/{product_id}/purchases", response_model=list[ProductPurchaseOut])
+async def list_product_purchases(
+    product_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> list[ProductPurchaseOut]:
+    """Historial de compras de este producto: cuándo, a quién y a cuánto.
+
+    Responde "¿cómo se movió el costo?" y "¿a quién conviene comprarle?". La
+    lista de productos ya insinuaba esto con el RANGO de costos entre lotes,
+    pero no dejaba abrirlo: se veía que el costo se movió y no por qué.
+    """
+    return await service.list_product_purchases(
+        db, company_id=user.company_id, product_id=product_id
     )

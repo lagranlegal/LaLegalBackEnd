@@ -270,3 +270,70 @@ async def update_supplier(
         ),
         params,
     )
+
+
+async def supplier_summary(db: AsyncSession, *, company_id: UUID, supplier_id: UUID) -> Row[Any]:
+    """Agregados de un proveedor: qué se le compró y qué se le debe.
+
+    `origin_type = 'purchase'` en los totales de compra: un inventario inicial
+    que conserve el proveedor original no es una compra que se le haya hecho,
+    y contarla inflaría lo que se le ha comprado de verdad.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              count(*)                                        as purchase_count,
+              coalesce(sum(e.total_cost), 0)                   as total_purchased,
+              count(*) filter (where e.paid_at is null)        as pending_count,
+              coalesce(sum(e.total_cost)
+                filter (where e.paid_at is null), 0)           as pending_total,
+              min(e.entry_date)                                as first_purchase_date,
+              max(e.entry_date)                                as last_purchase_date
+            from public.inventory_entry e
+            where e.company_id = :cid
+              and e.supplier_id = :sid
+              and e.origin_type = 'purchase'
+            """
+        ),
+        {"cid": str(company_id), "sid": str(supplier_id)},
+    )
+    row = result.first()
+    assert row is not None  # los agregados siempre devuelven una fila
+    return row
+
+
+async def supplier_product_count(db: AsyncSession, *, company_id: UUID, supplier_id: UUID) -> int:
+    """Productos DISTINTOS comprados a este proveedor. Va aparte del resto de
+    agregados porque se cuenta sobre lotes, no sobre ingresos: un solo ingreso
+    puede traer varios productos."""
+    result = await db.execute(
+        text(
+            "select count(distinct i.product_id) from public.inventory_item i "
+            "where i.company_id = :cid and i.supplier_id = :sid"
+        ),
+        {"cid": str(company_id), "sid": str(supplier_id)},
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def supplier_purchases(
+    db: AsyncSession, *, company_id: UUID, supplier_id: UUID, cursor: UUID | None, limit: int
+) -> list[Row[Any]]:
+    query = """
+        select
+          e.id as entry_id, e.number, e.entry_date, e.supplier_invoice,
+          e.total_cost, e.paid_at,
+          (select count(*) from public.inventory_entry_line l
+             where l.entry_id = e.id and l.company_id = e.company_id) as item_count
+        from public.inventory_entry e
+        where e.company_id = :cid and e.supplier_id = :sid
+          and e.origin_type = 'purchase'
+    """
+    params: dict[str, Any] = {"cid": str(company_id), "sid": str(supplier_id), "limit": limit + 1}
+    if cursor is not None:
+        query += " and e.id > :cursor"
+        params["cursor"] = str(cursor)
+    query += " order by e.id limit :limit"
+    result = await db.execute(text(query), params)
+    return list(result.all())

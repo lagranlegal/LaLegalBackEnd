@@ -22,6 +22,7 @@ from app.modules.inventory.schemas import (
     ItemPublishIn,
     ItemUpdateIn,
     ProductOut,
+    ProductPurchaseOut,
     ProductUpdateIn,
 )
 from app.modules.platform import integration as platform_integration
@@ -282,6 +283,9 @@ async def create_entry(
             quantity=line.quantity,
             photos=line.photos,
             created_by=registered_by,
+            # La fecha del INGRESO, no la de hoy: una compra cargada con fecha
+            # de la semana pasada tiene que decir que entró la semana pasada.
+            entry_date=entry_date,
         )
         await repository.insert_entry_line(
             db,
@@ -779,3 +783,32 @@ async def update_product(
         if row._mapping["id"] == product_id:
             return _row_to_product(row)
     raise NotFoundError("El producto no existe en esta empresa.")
+
+
+async def list_product_purchases(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID
+) -> list[ProductPurchaseOut]:
+    """Cómo se movió el costo de este producto y a quién se le ha comprado.
+
+    La lista de productos ya insinuaba esto mostrando el RANGO de costos entre
+    lotes (`min_cost`/`max_cost`), pero no dejaba abrirlo: se veía que el costo
+    se movió y no por qué ni con quién.
+    """
+    if await repository.get_product(db, company_id=company_id, product_id=product_id) is None:
+        raise NotFoundError("El producto no existe en esta empresa.")
+    rows = await repository.product_purchases(db, company_id=company_id, product_id=product_id)
+    return [
+        ProductPurchaseOut(
+            entry_id=r._mapping["entry_id"],
+            entry_number=r._mapping["entry_number"],
+            entry_date=r._mapping["entry_date"],
+            supplier_id=r._mapping["supplier_id"],
+            supplier_name=r._mapping["supplier_name"],
+            quantity=r._mapping["quantity"],
+            unit_cost=r._mapping["unit_cost"],
+            total_cost=r._mapping["total_cost"],
+            lot_code=r._mapping["lot_code"],
+            paid_at=r._mapping["paid_at"],
+        )
+        for r in rows
+    ]

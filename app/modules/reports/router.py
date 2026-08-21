@@ -10,8 +10,11 @@ from app.modules.reports import service
 from app.modules.reports.schemas import (
     ClosingHistoryOut,
     DashboardOut,
+    InventoryValuationOut,
     PawnPerformanceOut,
+    PayablesOut,
     ProfitSummaryOut,
+    StaleInventoryOut,
 )
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
@@ -104,4 +107,55 @@ async def get_pawn_performance(
     """
     return await service.get_pawn_performance(
         db, company_id=user.company_id, from_date=from_date, to_date=to_date
+    )
+
+
+@router.get("/payables", response_model=PayablesOut)
+async def get_payables(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> PayablesOut:
+    """Cuentas por pagar a proveedores, con antigüedad (0-30 / 31-60 / +60).
+
+    Responde "¿cuánto debo, a quién, y desde hace cuánto?". Cada compra ya
+    sabía si estaba pagada desde 00020, pero ninguna pantalla lo sumaba: el
+    dato estaba guardado y la pregunta no tenía respuesta.
+
+    La antigüedad se mide desde `entry_date` (cuándo entró la mercancía), que
+    es la fecha desde la que el proveedor cuenta el plazo — cargar hoy una
+    factura de hace dos meses no la vuelve reciente.
+    """
+    return await service.get_payables(db, company_id=user.company_id)
+
+
+@router.get("/inventory-valuation", response_model=InventoryValuationOut)
+async def get_inventory_valuation(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> InventoryValuationOut:
+    """ "¿Cuánta plata tengo en mercancía?" — el activo más grande del negocio.
+
+    Valorado **al costo**, que es lo correcto contablemente y lo que sale de la
+    identificación específica. `retail_value` se expone aparte como referencia
+    (qué se cobraría si se vendiera todo hoy) y NO es el valor del inventario:
+    contar la utilidad antes de venderla es el error clásico.
+    """
+    return await service.get_inventory_valuation(db, company_id=user.company_id)
+
+
+@router.get("/stale-inventory", response_model=StaleInventoryOut)
+async def get_stale_inventory(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    threshold_days: Annotated[int, Query(ge=1, le=3650)] = 90,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> StaleInventoryOut:
+    """Mercancía disponible sin rotación — plata congelada en la vitrina.
+
+    Se mide sobre el lote disponible más ANTIGUO de cada producto: si algo
+    entró hace un año y se repuso ayer, lo congelado es la pieza vieja, y usar
+    la fecha nueva la escondería justo cuando más importa verla.
+    """
+    return await service.get_stale_inventory(
+        db, company_id=user.company_id, threshold_days=threshold_days, limit=limit
     )

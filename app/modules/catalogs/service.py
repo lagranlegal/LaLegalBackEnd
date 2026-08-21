@@ -13,6 +13,8 @@ from app.modules.catalogs.schemas import (
     CategoryUpdateIn,
     SupplierCreateIn,
     SupplierOut,
+    SupplierPurchaseOut,
+    SupplierSummaryOut,
     SupplierUpdateIn,
 )
 
@@ -213,3 +215,56 @@ async def update_supplier(
     row = await repository.get_supplier(db, company_id=company_id, supplier_id=supplier_id)
     assert row is not None
     return _row_to_supplier(row)
+
+
+async def get_supplier_summary(
+    db: AsyncSession, *, company_id: UUID, supplier_id: UUID
+) -> SupplierSummaryOut:
+    """Ficha del proveedor. El cliente ya tenía la suya desde el paso 4; el
+    proveedor era el hermano pobre — un formulario de creación y nada más."""
+    supplier = await repository.get_supplier(db, company_id=company_id, supplier_id=supplier_id)
+    if supplier is None:
+        raise NotFoundError("El proveedor no existe en esta empresa.")
+
+    agg = await repository.supplier_summary(db, company_id=company_id, supplier_id=supplier_id)
+    m = agg._mapping
+    return SupplierSummaryOut(
+        supplier_id=supplier_id,
+        name=supplier._mapping["name"],
+        code_letter=supplier._mapping["code_letter"],
+        purchase_count=m["purchase_count"] or 0,
+        total_purchased=m["total_purchased"],
+        pending_count=m["pending_count"] or 0,
+        pending_total=m["pending_total"],
+        first_purchase_date=m["first_purchase_date"],
+        last_purchase_date=m["last_purchase_date"],
+        product_count=await repository.supplier_product_count(
+            db, company_id=company_id, supplier_id=supplier_id
+        ),
+    )
+
+
+async def list_supplier_purchases(
+    db: AsyncSession, *, company_id: UUID, supplier_id: UUID, cursor: UUID | None, limit: int
+) -> CursorPage[SupplierPurchaseOut]:
+    if await repository.get_supplier(db, company_id=company_id, supplier_id=supplier_id) is None:
+        raise NotFoundError("El proveedor no existe en esta empresa.")
+    rows = await repository.supplier_purchases(
+        db, company_id=company_id, supplier_id=supplier_id, cursor=cursor, limit=limit
+    )
+    page = make_page(rows, limit, lambda r: r._mapping["entry_id"])
+    return CursorPage(
+        items=[
+            SupplierPurchaseOut(
+                entry_id=r._mapping["entry_id"],
+                number=r._mapping["number"],
+                entry_date=r._mapping["entry_date"],
+                supplier_invoice=r._mapping["supplier_invoice"],
+                total_cost=r._mapping["total_cost"],
+                item_count=r._mapping["item_count"] or 0,
+                paid_at=r._mapping["paid_at"],
+            )
+            for r in page.items
+        ],
+        next_cursor=page.next_cursor,
+    )

@@ -54,21 +54,31 @@ async def insert_item(
     quantity: int,
     photos: list[str],
     created_by: UUID | None,
+    entry_date: date | None = None,
 ) -> None:
     """Un lote. Desde 00022 no lleva nombre ni categoría ni precio: eso es del
     producto, y por eso `product_id` es obligatorio al insertar — un lote sin
     producto no tendría cómo llamarse.
+
+    `entry_date` viene del INGRESO. Sin esto el lote se quedaba con el
+    `current_date` por defecto de 00006, así que una compra registrada con
+    fecha de la semana pasada guardaba esa fecha en el ingreso y "hoy" en cada
+    uno de sus lotes. La ficha del lote mostraba una fecha de entrada falsa, y
+    cualquier reporte que midiera antigüedad de inventario —cuánto lleva algo
+    sin venderse— contaba desde el día de la digitación en vez del día en que
+    la mercancía llegó. 00020 agregó la fecha al ingreso y nunca la propagó.
     """
     await db.execute(
         text(
             """
             insert into public.inventory_item
                 (id, company_id, product_id, lot_number, origin,
-                 supplier_id, source_contract_id, cost, quantity, photos, created_by)
+                 supplier_id, source_contract_id, cost, quantity, photos, created_by,
+                 entry_date)
             values
                 (:id, :company_id, :product_id, :lot_number, :origin,
                  :supplier_id, :source_contract_id, :cost, :quantity, cast(:photos as jsonb),
-                 :created_by)
+                 :created_by, coalesce(:entry_date, current_date))
             """
         ),
         {
@@ -83,6 +93,7 @@ async def insert_item(
             "quantity": quantity,
             "photos": json.dumps(photos),
             "created_by": str(created_by) if created_by else None,
+            "entry_date": entry_date,
         },
     )
 
@@ -815,3 +826,39 @@ async def update_product_fields(
         ),
         params,
     )
+
+
+async def product_purchases(
+    db: AsyncSession, *, company_id: UUID, product_id: UUID
+) -> list[Row[Any]]:
+    """Historial de compras de un producto, de la más reciente a la más vieja.
+
+    Sale de `inventory_entry_line` y no de `inventory_item`: la línea guarda el
+    `unit_cost` de ESA compra, que es el dato que interesa comparar. Se listan
+    todos los orígenes —no solo `purchase`— porque un inventario inicial o un
+    sobrante también explican de dónde salió el stock; el `supplier_name` en
+    `null` los distingue.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              e.id as entry_id, e.number as entry_number, e.entry_date,
+              e.supplier_id, s.name as supplier_name, e.paid_at,
+              l.quantity, l.unit_cost,
+              (l.unit_cost * l.quantity) as total_cost,
+              i.code as lot_code
+            from public.inventory_entry_line l
+            join public.inventory_entry e
+              on e.id = l.entry_id and e.company_id = l.company_id
+            join public.inventory_item i
+              on i.id = l.item_id and i.company_id = l.company_id
+            left join public.supplier s
+              on s.id = e.supplier_id and s.company_id = e.company_id
+            where l.company_id = :cid and i.product_id = :pid
+            order by e.entry_date desc, e.number desc
+            """
+        ),
+        {"cid": str(company_id), "pid": str(product_id)},
+    )
+    return list(result.all())

@@ -194,3 +194,24 @@ class ProductUpdateIn(BaseModel):
     description: str | None = None
     sale_price: Money | None = None
     active: bool | None = None
+
+
+class ProductPurchaseOut(BaseModel):
+    """Una compra de ESTE producto: cuándo, a quién y a cuánto.
+
+    Responde las dos preguntas que la lista de productos solo insinúa al
+    mostrar el rango de costos entre lotes: **cómo se movió el costo** y **a
+    quién conviene comprarle**. El dato estaba completo en la base y no había
+    forma de abrirlo.
+    """
+
+    entry_id: UUID
+    entry_number: int
+    entry_date: date
+    supplier_id: UUID | None
+    supplier_name: str | None
+    quantity: int
+    unit_cost: Decimal
+    total_cost: Decimal
+    lot_code: str | None
+    paid_at: datetime | None

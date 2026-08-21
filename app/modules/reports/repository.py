@@ -257,3 +257,125 @@ async def pawn_performance(
         },
     )
     return result.one()
+
+
+async def payables_by_supplier(
+    db: AsyncSession, *, company_id: UUID, as_of: date
+) -> list[Row[Any]]:
+    """Compras pendientes de pago, agrupadas por proveedor y por antigüedad.
+
+    Solo `origin_type = 'purchase'`: los demás orígenes no le entregan plata a
+    nadie, así que "sin pagar" no significa nada en ellos y contarlos inflaría
+    la deuda con proveedores.
+
+    La antigüedad se mide contra `entry_date` —cuándo entró la mercancía— y no
+    contra `created_at`: cargar hoy una factura de hace dos meses no la vuelve
+    reciente, y es la fecha desde la que el proveedor cuenta el plazo.
+
+    El proveedor se saca por LEFT JOIN: `supplier_id` es opcional en el
+    esquema, y una deuda sin proveedor asignado tiene que seguir apareciendo
+    (esconderla sería el peor resultado posible en un reporte de deudas).
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              e.supplier_id,
+              coalesce(s.name, 'Sin proveedor asignado') as supplier_name,
+              count(*)                                   as entry_count,
+              sum(e.total_cost)                          as total,
+              sum(e.total_cost) filter (
+                where :as_of - e.entry_date <= 30)       as days_0_30,
+              sum(e.total_cost) filter (
+                where :as_of - e.entry_date between 31 and 60) as days_31_60,
+              sum(e.total_cost) filter (
+                where :as_of - e.entry_date > 60)        as days_over_60,
+              min(e.entry_date)                          as oldest_entry_date
+            from public.inventory_entry e
+            left join public.supplier s
+              on s.id = e.supplier_id and s.company_id = e.company_id
+            where e.company_id = :cid
+              and e.origin_type = 'purchase'
+              and e.paid_at is null
+            group by e.supplier_id, s.name
+            order by sum(e.total_cost) desc
+            """
+        ),
+        {"cid": str(company_id), "as_of": as_of},
+    )
+    return list(result.all())
+
+
+async def inventory_valuation(db: AsyncSession, *, company_id: UUID) -> list[Row[Any]]:
+    """Valor del inventario disponible, por categoría de primer nivel.
+
+    Cuenta SOLO `status = 'available'`: un borrador no se puede vender y un
+    dado de baja ya no existe. Incluir borradores inflaría el activo con
+    mercancía que ni siquiera tiene precio.
+
+    El costo sale del LOTE (identificación específica, nunca promediado); el
+    precio sale del PRODUCTO, que es donde vive desde 00022.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              p.cat1_id,
+              coalesce(c.name, 'Sin categoría')          as cat1_name,
+              sum(i.quantity)                            as units,
+              count(*)                                   as lot_count,
+              sum(i.cost * i.quantity)                   as cost_value,
+              sum(coalesce(p.sale_price, 0) * i.quantity) as retail_value
+            from public.inventory_item i
+            join public.product p
+              on p.id = i.product_id and p.company_id = i.company_id
+            left join public.category c
+              on c.id = p.cat1_id and c.company_id = p.company_id
+            where i.company_id = :cid and i.status = 'available'
+            group by p.cat1_id, c.name
+            order by sum(i.cost * i.quantity) desc
+            """
+        ),
+        {"cid": str(company_id)},
+    )
+    return list(result.all())
+
+
+async def stale_inventory(
+    db: AsyncSession, *, company_id: UUID, as_of: date, threshold_days: int, limit: int
+) -> list[Row[Any]]:
+    """Productos disponibles cuyo lote más antiguo lleva más de N días.
+
+    Se mide sobre el lote MÁS ANTIGUO todavía disponible y no sobre el más
+    reciente: si algo entró hace un año y se repuso ayer, lo que está
+    congelado es la pieza vieja, y usar la fecha nueva la escondería justo
+    cuando más importa verla.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              p.id                       as product_id,
+              p.code                     as product_code,
+              p.name                     as product_name,
+              sum(i.quantity)            as units,
+              sum(i.cost * i.quantity)   as cost_value,
+              (:as_of - min(i.entry_date)) as days_in_stock
+            from public.inventory_item i
+            join public.product p
+              on p.id = i.product_id and p.company_id = i.company_id
+            where i.company_id = :cid and i.status = 'available'
+            group by p.id, p.code, p.name
+            having (:as_of - min(i.entry_date)) >= :threshold
+            order by (:as_of - min(i.entry_date)) desc
+            limit :limit
+            """
+        ),
+        {
+            "cid": str(company_id),
+            "as_of": as_of,
+            "threshold": threshold_days,
+            "limit": limit,
+        },
+    )
+    return list(result.all())

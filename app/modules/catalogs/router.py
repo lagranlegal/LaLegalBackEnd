@@ -13,6 +13,8 @@ from app.modules.catalogs.schemas import (
     CategoryUpdateIn,
     SupplierCreateIn,
     SupplierOut,
+    SupplierPurchaseOut,
+    SupplierSummaryOut,
     SupplierUpdateIn,
 )
 
@@ -112,4 +114,40 @@ async def update_supplier(
 ) -> SupplierOut:
     return await service.update_supplier(
         db, company_id=user.company_id, supplier_id=supplier_id, body=body
+    )
+
+
+@router.get("/suppliers/{supplier_id}/summary", response_model=SupplierSummaryOut)
+async def get_supplier_summary(
+    supplier_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> SupplierSummaryOut:
+    """Ficha del proveedor: cuánto se le ha comprado, cuánto se le debe, desde
+    cuándo y cuántos productos distintos.
+
+    El CLIENTE tiene su ficha con historial cruzado desde el paso 4; el
+    proveedor tenía solo un formulario de creación, así que "¿cuánto le he
+    comprado?" no tenía respuesta aunque el dato estuviera completo.
+    """
+    return await service.get_supplier_summary(
+        db, company_id=user.company_id, supplier_id=supplier_id
+    )
+
+
+@router.get("/suppliers/{supplier_id}/purchases", response_model=CursorPage[SupplierPurchaseOut])
+async def list_supplier_purchases(
+    supplier_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> CursorPage[SupplierPurchaseOut]:
+    """Historial de compras a este proveedor."""
+    return await service.list_supplier_purchases(
+        db,
+        company_id=user.company_id,
+        supplier_id=supplier_id,
+        cursor=decode_cursor(cursor) if cursor else None,
+        limit=limit,
     )
