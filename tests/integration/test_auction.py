@@ -50,7 +50,17 @@ async def auction_tenant(
     customer_id = uuid4()
     cat1, cat2, cat3 = uuid4(), uuid4(), uuid4()
     register_id = uuid4()
-    codes = ("contracts.view", "contracts.create", "contracts.auction", "payments.create")
+    codes = (
+        "contracts.view",
+        "contracts.create",
+        "contracts.auction",
+        "payments.create",
+        # El remate DESEMBOCA en inventario, así que el rol del remate tiene que
+        # poder mirar y publicar lo que acaba de crear — si no, el flujo se
+        # corta justo donde deja de ser un contrato y pasa a ser mercancía.
+        "inventory.view",
+        "inventory.create",
+    )
 
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
@@ -290,3 +300,58 @@ async def test_auction_splits_cost_proportional_to_appraisal(
     assert entry is not None
     assert entry[0] == "auction"
     assert {str(row[0]) for row in linked} == {item["inventory_item_id"] for item in body["items"]}
+
+
+@pytest.mark.asyncio
+async def test_auction_inherits_contract_item_photos(
+    client: TestClient, auction_tenant: dict
+) -> None:
+    """Las fotos de la prenda viajan del contrato al artículo de inventario.
+
+    Publicar un artículo exige al menos una foto. Hasta ahora el remate creaba
+    el borrador con `photos=[]`, así que toda pieza rematada nacía bloqueada a
+    la espera de que alguien volviera a fotografiar una prenda que YA estaba
+    fotografiada desde que se firmó el contrato. Era trabajo rehecho, y en una
+    compraventa los rematados son buena parte del inventario.
+    """
+    headers = _headers(auction_tenant["token"], idempotency_key=str(uuid4()))
+    fotos = ["inventory/cadena-frente.jpg", "inventory/cadena-sello.jpg"]
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=headers,
+        json={
+            "customer_id": str(auction_tenant["customer_id"]),
+            "principal": "500000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [
+                {
+                    "category_id": str(auction_tenant["category_id"]),
+                    "description": "Cadena con foto",
+                    "item_appraisal": "700000.00",
+                    "photos": fotos,
+                }
+            ],
+        },
+    ).json()
+
+    await _backdate_and_expire_extension(
+        company_id=auction_tenant["company_id"], contract_id=contract["id"], months=8
+    )
+    response = client.post(f"/api/v1/contracts/{contract['id']}/auction", headers=headers)
+    assert response.status_code == 200, response.text
+
+    inventory_item_id = response.json()["items"][0]["inventory_item_id"]
+    item = client.get(f"/api/v1/inventory/items/{inventory_item_id}", headers=headers).json()
+
+    assert item["photos"] == fotos, "el artículo rematado debe heredar las fotos de la prenda"
+    # Y con foto heredada el borrador ya es publicable sin subir nada: eso es
+    # lo que la corrección venía a desbloquear.
+    assert item["status"] == "draft"
+    published = client.post(
+        f"/api/v1/inventory/items/{inventory_item_id}/publish",
+        headers=_headers(auction_tenant["token"]),
+        json={"sale_price": "900000.00"},
+    )
+    assert published.status_code == 200, published.text
+    assert published.json()["code"].endswith("R")

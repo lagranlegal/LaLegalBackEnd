@@ -56,6 +56,11 @@ async def accounts_tenant(
         "accounts.view",
         "accounts.manage",
         "accounts.settle",
+        # Para probar que una cuenta POR COBRAR no puede financiar una salida:
+        # el gasto es la salida más simple de montar (no necesita proveedor ni
+        # mercancía) y pasa por el mismo `resolve_account_for_movement` que las
+        # compras y los desembolsos.
+        "cashbox.expense",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -448,3 +453,60 @@ def test_ver_cuentas_no_alcanza_para_crearlas(client: TestClient, solo_lectura_t
         json={"name": "No debería crearse", "type": "bank"},
     )
     assert respuesta.status_code == 403
+
+
+def test_settlement_account_cannot_fund_a_payment(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Una cuenta por cobrar no puede pagar.
+
+    El bug que motiva esto salió en uso real: al registrar una compra a
+    proveedor, el selector de cuenta ofrecía Sistecrédito. Filtraba solo por
+    medio de pago ("otro") sin mirar la dirección del movimiento, así que
+    dejaba elegir "pagarle al proveedor con Sistecrédito" — una operación que
+    no existe: esa plata todavía te la deben, no la tienes.
+
+    El front ya no la ofrece, pero la UI oculta y no protege (CLAUDE.md regla
+    7): la autoridad es esta validación.
+    """
+    headers = _headers(accounts_tenant["token"])
+    sistecredito = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"name": "Sistecrédito", "type": "settlement"},
+    )
+    assert sistecredito.status_code == 201, sistecredito.text
+    account_id = sistecredito.json()["id"]
+
+    category_id = str(uuid4())
+    client.post(
+        "/api/v1/cashbox/expense-categories",
+        headers=_headers(accounts_tenant["token"]),
+        json={"name": f"Servicios {category_id[:8]}"},
+    )
+    categories = client.get(
+        "/api/v1/cashbox/expense-categories", headers=_headers(accounts_tenant["token"])
+    ).json()
+    assert categories, "el gasto necesita una categoría para poder registrarse"
+
+    rechazado = client.post(
+        "/api/v1/cashbox/expenses",
+        headers=_headers(accounts_tenant["token"]),
+        json={
+            "account_id": account_id,
+            "category_id": categories[0]["id"],
+            "description": "Pago de arriendo",
+            "amount": "150000.00",
+            "payment_method": "other",
+        },
+    )
+    assert rechazado.status_code == 400, rechazado.text
+    assert rechazado.json()["code"] == "ACCOUNT_CANNOT_FUND_PAYMENT"
+
+    # Y la contraparte: COBRAR a esa misma cuenta sigue siendo válido, que es
+    # justamente para lo que existe. Si esto se rompiera, el arreglo habría
+    # inutilizado el módulo en vez de corregirlo.
+    banco = next(
+        a for a in client.get("/api/v1/accounts", headers=headers).json() if a["type"] == "bank"
+    )
+    assert banco is not None

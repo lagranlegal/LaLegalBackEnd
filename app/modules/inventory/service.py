@@ -195,12 +195,15 @@ async def create_entry(
         # verificador de tipos, que no puede deducirlo de la variable booleana.
         assert body.payment_method is not None
         # La sesión la exige el tipo de cuenta: pagar en efectivo necesita el
-        # cajón abierto, pero pagar por transferencia no.
+        # cajón abierto, pero pagar por transferencia no. `direction='out'`
+        # descarta las cuentas por cobrar: a un proveedor no se le paga con
+        # Sistecrédito.
         resolved = await cashbox_integration.resolve_account_for_movement(
             db,
             company_id=company_id,
             payment_method=body.payment_method,
             account_id=body.account_id,
+            direction="out",
         )
 
     entry_id = uuid4()
@@ -567,6 +570,7 @@ async def pay_entry(
         company_id=company_id,
         payment_method=body.payment_method,
         account_id=body.account_id,
+        direction="out",
     )
 
     await repository.mark_entry_paid(

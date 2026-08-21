@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import CashSessionNotOpenError, NotFoundError
+from app.core.errors import AppError, CashSessionNotOpenError, NotFoundError
 
 
 async def get_open_session(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
@@ -150,6 +150,7 @@ async def resolve_account_for_movement(
     company_id: UUID,
     payment_method: str,
     account_id: UUID | None = None,
+    direction: str = "in",
 ) -> ResolvedAccount:
     """Resuelve la cuenta de un movimiento y decide si exige sesión de caja.
 
@@ -168,6 +169,9 @@ async def resolve_account_for_movement(
                          sesión abierta el movimiento se asocia igual, para
                          que el acta del turno siga mostrando todo lo que
                          ocurrió durante él.
+
+    `direction` (`in` | `out`) existe por una sola razón: una cuenta
+    `settlement` NO PUEDE FINANCIAR UNA SALIDA. Ver abajo.
     """
     if account_id is None:
         account_id = await _default_account_for(
@@ -184,6 +188,28 @@ async def resolve_account_for_movement(
         if row is None:
             raise NotFoundError("La cuenta indicada no existe en esta empresa.")
         account_type = str(row[0])
+
+    # Una cuenta `settlement` es una cuenta POR COBRAR: representa plata que
+    # alguien todavía te debe (Sistecrédito, el datáfono). No es un saldo
+    # disponible, así que no puede ser el origen de un pago — pagarle a un
+    # proveedor "con Sistecrédito" no existe como operación en la realidad.
+    #
+    # Hasta ahora el selector del front la ofrecía en compras y gastos, porque
+    # filtraba solo por medio de pago ("otro") sin mirar la dirección. Se
+    # arregla en los dos lados: allá deja de ofrecerse, acá deja de aceptarse.
+    # La UI oculta, el backend es la autoridad (CLAUDE.md regla 7).
+    #
+    # La única salida legítima de una cuenta por cobrar es su LIQUIDACIÓN, que
+    # tiene su propio endpoint (`POST /accounts/{id}/settle`) y no pasa por
+    # acá: registra sus dos movimientos directamente.
+    if direction == "out" and account_type == "settlement":
+        raise AppError(
+            "Una cuenta por cobrar no puede pagar: representa plata que todavía "
+            "te deben, no un saldo disponible. Elige la cuenta de la que sale "
+            "realmente el dinero.",
+            details={"account_id": str(account_id), "account_type": account_type},
+            code="ACCOUNT_CANNOT_FUND_PAYMENT",
+        )
 
     session = await get_open_session(db, company_id=company_id)
 

@@ -164,12 +164,15 @@ async def create_contract(
             )
 
     # El desembolso sale por la cuenta elegida; la sesión la exige el tipo de
-    # cuenta (efectivo sí, banco no), no la operación.
+    # cuenta (efectivo sí, banco no), no la operación. `direction='out'`
+    # descarta las cuentas por cobrar: no se le presta al cliente con plata
+    # que todavía no ha llegado.
     resolved = await cashbox_integration.resolve_account_for_movement(
         db,
         company_id=company_id,
         payment_method=body.payment_method,
         account_id=body.account_id,
+        direction="out",
     )
 
     start_date = await platform_integration.get_company_today(db, company_id=company_id)
@@ -742,6 +745,11 @@ async def auction_contract(
             category_id=r._mapping["category_id"],
             description=r._mapping["description"],
             appraisal=r._mapping["item_appraisal"],
+            # Las fotos de la prenda viajan al inventario. Publicar un artículo
+            # exige al menos una foto, y hasta ahora el remate creaba el
+            # borrador vacío: había que volver a fotografiar una pieza que ya
+            # estaba fotografiada desde que se firmó el contrato.
+            photos=list(r._mapping["photos"] or []),
         )
         for r in item_rows
     ]

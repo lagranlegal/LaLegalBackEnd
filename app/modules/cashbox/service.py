@@ -308,11 +308,13 @@ async def create_expense(
         receipt_url=body.receipt_url,
         registered_by=registered_by,
     )
+    # Un gasto SALE: no puede financiarse desde una cuenta por cobrar.
     resolved = await integration.resolve_account_for_movement(
         db,
         company_id=company_id,
         payment_method=body.payment_method,
         account_id=body.account_id,
+        direction="out",
     )
     await integration.record_movement(
         db,

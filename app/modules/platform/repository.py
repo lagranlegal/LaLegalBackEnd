@@ -263,21 +263,34 @@ async def list_subscription_events(
 
 
 async def insert_default_accounts(db: AsyncSession, *, company_id: UUID) -> None:
-    """Cuentas iniciales de una empresa nueva.
+    """Cuenta inicial de una empresa nueva: SOLO la de efectivo.
 
-    Van acá junto a los roles semilla y la caja principal porque son parte del
+    Va acá junto a los roles semilla y la caja principal porque es parte del
     mismo alta: una empresa sin cuenta de efectivo no puede registrar un solo
-    cobro. La migración 00024 las creó para las empresas que ya existían; esto
-    cubre a las que nazcan de aquí en adelante.
+    cobro.
+
+    POR QUÉ YA NO SE SIEMBRAN "Transferencias" NI "Otros medios": eran un
+    artefacto de la migración 00024, que tenía que mapear el enum viejo de
+    medios de pago (cash | transfer | other) a cuentas reales para no perder
+    el histórico de las empresas que ya existían. Ahí tenían todo el sentido.
+
+    Para una empresa NUEVA no lo tienen: no hay historia que mapear, y el
+    módulo de cuentas existe justamente para responder DÓNDE ESTÁ LA PLATA.
+    Una cuenta llamada "Transferencias" no responde eso — "Bancolombia
+    ahorros 1234" sí. Sembrar nombres genéricos invita a dejarlos así, que es
+    volver al enum de tres valores con otro disfraz.
+
+    Las cuentas bancarias las crea el dueño, con el nombre de su banco. Si
+    alguien registra una transferencia antes de haber creado ninguna,
+    `cashbox.integration._default_account_for` la crea al vuelo como red de
+    seguridad: perder el registro de un movimiento de dinero sería mucho peor
+    que crear una cuenta implícita.
     """
     await db.execute(
         text(
             """
             insert into public.account (company_id, name, type, is_default)
-            values
-              (:cid, 'Caja principal', 'cash', true),
-              (:cid, 'Transferencias', 'bank', true),
-              (:cid, 'Otros medios', 'bank', false)
+            values (:cid, 'Caja principal', 'cash', true)
             on conflict (company_id, name) do nothing
             """
         ),

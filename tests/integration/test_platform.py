@@ -193,10 +193,19 @@ async def test_create_company_defaults_creates_seed_roles_and_cash_register(
         ).scalar_one()
         assert register_count == 1
 
-        # Una empresa sin cuentas no puede registrar un solo cobro: desde
-        # 00027 `cash_movement.account_id` es NOT NULL. Se verifica acá junto
-        # al resto del alta porque el hueco original fue exactamente este —
-        # el alta creaba la caja pero no las cuentas.
+        # Una empresa sin cuenta de efectivo no puede registrar un solo cobro:
+        # desde 00027 `cash_movement.account_id` es NOT NULL. Se verifica acá
+        # junto al resto del alta porque el hueco original fue exactamente
+        # este — el alta creaba la caja pero no las cuentas.
+        #
+        # SOLO la de efectivo, a propósito. Antes se sembraban también
+        # "Transferencias" y "Otros medios", que eran un artefacto de la
+        # migración 00024: existían para mapear el enum viejo de medios de pago
+        # al catálogo de cuentas y no perder el histórico de las empresas que
+        # ya estaban. Una empresa nueva no tiene historia que mapear, y el
+        # módulo de cuentas existe para responder DÓNDE está la plata — cosa
+        # que un nombre como "Transferencias" no hace. Las bancarias las crea
+        # el dueño con el nombre de su banco.
         accounts = (
             await session.execute(
                 text(
@@ -206,11 +215,7 @@ async def test_create_company_defaults_creates_seed_roles_and_cash_register(
                 {"id": str(company_id)},
             )
         ).all()
-        assert [(a[0], a[1], a[2]) for a in accounts] == [
-            ("Caja principal", "cash", True),
-            ("Otros medios", "bank", False),
-            ("Transferencias", "bank", True),
-        ]
+        assert [(a[0], a[1], a[2]) for a in accounts] == [("Caja principal", "cash", True)]
 
         invited_user = (
             await session.execute(

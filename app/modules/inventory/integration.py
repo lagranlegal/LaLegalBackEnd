@@ -19,6 +19,11 @@ class AuctionItemInput:
     category_id: UUID  # nivel 3 (lo único que guarda contract_item)
     description: str
     appraisal: Decimal | None
+    #: Fotos de la prenda, tomadas al CREAR el contrato. Se copian al artículo
+    #: de inventario en vez de exigir que se vuelvan a subir: es la misma
+    #: pieza física, ya fotografiada, y publicar exige al menos una foto. Sin
+    #: esto, todo remate nacía bloqueado a la espera de un trabajo ya hecho.
+    photos: list[str]
 
 
 async def create_draft_items_from_auction(
@@ -98,7 +103,8 @@ async def create_draft_items_from_auction(
             source_contract_id=source_contract_id,
             cost=cost,
             quantity=1,
-            photos=[],
+            # Heredadas del contrato: la prenda ya se fotografió al empeñarla.
+            photos=list(auction_item.photos),
             created_by=created_by,
         )
         await repository.insert_entry_line(
