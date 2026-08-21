@@ -116,14 +116,25 @@ async def list_sessions(
 async def movement_breakdown(
     db: AsyncSession, *, company_id: UUID, session_id: UUID
 ) -> list[Row[Any]]:
+    """Desglose del acta: module × concepto × medio × CUENTA.
+
+    La cuenta entra al desglose porque el medio de pago dejó de alcanzar para
+    conciliar. Con un convenio como Sistecrédito, tres cobros distintos caen
+    todos en `payment_method = 'other'` y el acta los mostraba como una sola
+    línea indistinguible; agrupando también por cuenta se ve cuánto quedó en
+    cada lado y cuánto es plata que todavía te deben.
+    """
     result = await db.execute(
         text(
             """
-            select module, direction, concept, payment_method, sum(amount) as total
-            from public.cash_movement
-            where company_id = :company_id and session_id = :session_id
-            group by module, direction, concept, payment_method
-            order by module, direction, concept, payment_method
+            select m.module, m.direction, m.concept, m.payment_method,
+                   a.id as account_id, a.name as account_name, a.type as account_type,
+                   sum(m.amount) as total
+            from public.cash_movement m
+            join public.account a on a.id = m.account_id
+            where m.company_id = :company_id and m.session_id = :session_id
+            group by m.module, m.direction, m.concept, m.payment_method, a.id, a.name, a.type
+            order by a.type, a.name, m.module, m.direction, m.concept
             """
         ),
         {"company_id": str(company_id), "session_id": str(session_id)},

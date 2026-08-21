@@ -294,6 +294,49 @@ def test_expense_reduces_expected_cash_and_shows_in_report(
     assert expense_lines[0]["direction"] == "out"
 
 
+def test_expense_paid_from_a_bank_account_does_not_touch_expected_cash(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """Un gasto pagado por transferencia no sale del cajón.
+
+    Antes de 00027 el esperado se calculaba por `payment_method`, así que
+    esta plata se restaba del cajón y el arqueo salía descuadrado buscando
+    unos billetes que nunca estuvieron ahí. La autoridad es el TIPO DE
+    CUENTA: la transferencia salió del banco, el cajón no se enteró.
+    """
+    headers = _headers(cashbox_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "100000.00"}
+    )
+    current = client.get("/api/v1/cashbox/sessions/current", headers=headers).json()
+    category = client.post(
+        "/api/v1/cashbox/expense-categories", headers=headers, json={"name": "Arriendo"}
+    ).json()
+
+    expense = client.post(
+        "/api/v1/cashbox/expenses",
+        headers=headers,
+        json={
+            "category_id": category["id"],
+            "description": "Arriendo del local",
+            "amount": "30000.00",
+            "payment_method": "transfer",
+        },
+    )
+    assert expense.status_code == 201, expense.text
+
+    report = client.get(f"/api/v1/cashbox/sessions/{current['id']}/report", headers=headers).json()
+    assert report["expected_cash"] == "100000.00"
+
+    # Sigue apareciendo en el acta —el gasto existe y hay que rendirlo—,
+    # pero identificado contra la cuenta de la que salió.
+    lines = [line for line in report["lines"] if line["concept"] == "expense"]
+    assert len(lines) == 1
+    assert lines[0]["account_type"] == "bank"
+    assert lines[0]["account_name"] == "Transferencias"
+    assert lines[0]["total"] == "30000.00"
+
+
 def test_duplicate_expense_category_name_is_conflict(
     client: TestClient, cashbox_tenant: dict
 ) -> None:

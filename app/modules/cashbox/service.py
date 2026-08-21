@@ -121,10 +121,16 @@ async def _expected_cash(
     db: AsyncSession, *, company_id: UUID, session_id: UUID, opening_balance: Decimal
 ) -> tuple[Decimal, list[Row[Any]]]:
     lines = await repository.movement_breakdown(db, company_id=company_id, session_id=session_id)
+    # Lo que debería haber EN EL CAJÓN sale del TIPO DE CUENTA, no del medio
+    # de pago. Desde 00027 la cuenta es la autoridad sobre dónde quedó la
+    # plata: un cobro marcado "efectivo" pero asignado a una cuenta bancaria
+    # no está en el cajón, y contarlo dejaría el cierre descuadrado contra un
+    # arqueo que nunca lo va a encontrar. Es el mismo criterio que usa
+    # `accounts.list_accounts` para el saldo de una cuenta `cash`.
     cash_net = Decimal("0")
     for line in lines:
         m = line._mapping
-        if m["payment_method"] != "cash":
+        if m["account_type"] != "cash":
             continue
         cash_net += m["total"] if m["direction"] == "in" else -m["total"]
     return opening_balance + cash_net, lines
@@ -149,6 +155,9 @@ async def get_report(db: AsyncSession, *, company_id: UUID, session_id: UUID) ->
                 direction=line_row._mapping["direction"],
                 concept=line_row._mapping["concept"],
                 payment_method=line_row._mapping["payment_method"],
+                account_id=line_row._mapping["account_id"],
+                account_name=line_row._mapping["account_name"],
+                account_type=line_row._mapping["account_type"],
                 total=line_row._mapping["total"],
             )
             for line_row in lines

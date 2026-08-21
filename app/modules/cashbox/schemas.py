@@ -44,7 +44,12 @@ class BreakdownLineOut(BaseModel):
     module: str
     direction: str
     concept: str
-    payment_method: str
+    # Opcional desde 00027: una liquidación mueve plata entre cuentas sin
+    # cobrarse por ningún medio — solo cambia de contenedor.
+    payment_method: str | None
+    account_id: UUID
+    account_name: str
+    account_type: str
     total: Decimal
 
 
