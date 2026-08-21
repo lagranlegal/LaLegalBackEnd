@@ -189,3 +189,31 @@ Regla del proyecto desde entonces: ninguna regla de negocio con fecha usa `date.
 2. `platform.service.expire_overdue_subscriptions(db)` — marca `expired` las suscripciones cuyo `expires_at` ya pasó (según el "hoy" de esa empresa) y audita el cambio. Esto es lo que de verdad bloquea acceso: `security.get_current_user` rechaza con `402 SUBSCRIPTION_EXPIRED` en cuanto `subscription.status` deja de ser `active` — sin este job, una suscripción vencida seguiría dando acceso indefinidamente porque el chequeo en cada request compara contra el `status` persistido, no recalcula `expires_at` al vuelo.
 
 Se invoca con `python -m app.jobs.nightly` (usa `app/core/logging.py`, mismo formato JSON que la API). Decisión de infraestructura (elegida explícitamente sobre pg_cron): un **Fly Machine programada**, no un cron dentro de Postgres — así la lógica de negocio sigue viviendo en un solo lugar (Python, reusando `contracts.service`/`platform.service` tal cual, sin portarla a SQL/PL-pgSQL). Deliberadamente NO va como un `[processes]` en `fly.toml` — eso obligaría a `fly deploy` a mantener una máquina "nightly" corriendo 24/7 por un job que debe correr una vez al día. En cambio, cada ambiente tiene su propia Fly Machine programada, independiente del fleet que gestiona `fly deploy`, apuntando a la imagen ya construida (comando exacto comentado en `fly.dev.toml`/`fly.prod.toml`, con `--schedule daily`).
+
+## 12. La CUENTA es dónde está la plata; el MEDIO es cómo se cobró
+
+Hasta la migración 00024 el sistema solo sabía `payment_method` (`cash` | `transfer` | `other`), un dato que vivía repetido en cinco tablas. Eso alcanza para decir "entró en efectivo", pero no para decir **a dónde** entró ni **cuánto hay** en cada lado. El caso que lo destapó fue Sistecrédito: el cliente sale con el artículo, Sistecrédito asume el riesgo y le paga a la compraventa **después**, menos una comisión. Con `payment_method` solo, esa venta cae en `other` — indistinguible de un cobro por Nequi o de cualquier otra cosa. No es plata que entró: es plata que te **deben**.
+
+De ahí el catálogo de cuentas (`public.account`, tres tipos):
+
+| tipo | qué es | saldo |
+|---|---|---|
+| `cash` | el cajón físico | base de la sesión abierta + movimientos de esa sesión |
+| `bank` | una cuenta bancaria, Nequi, Daviplata | `opening_balance` + acumulado histórico |
+| `settlement` | un convenio que te debe (Sistecrédito) | lo que te deben; baja al liquidar |
+
+**El saldo se DERIVA, nunca se guarda.** Un saldo almacenado hay que mantenerlo sincronizado con cada operación, y en cuanto una falle o alguien inserte a mano queda mintiendo. Derivarlo no puede desincronizarse. Por el mismo motivo `account_balance()` **delega** en `list_accounts()` en vez de tener su propia consulta: dos formas de calcular el mismo saldo terminan divergiendo, y eso fue literalmente un bug (una cuenta recién creada reportaba 0 mientras el listado la mostraba bien, porque una sumaba el `opening_balance` y la otra no).
+
+**El saldo de una `cash` se calcula distinto a propósito.** Es lo que debería haber en el cajón *ahora mismo*: la base con la que se abrió la sesión más los movimientos de esa sesión. Sumar el histórico completo daría un número negativo y sin sentido, porque los préstamos desembolsados superan lo cobrado — la base de apertura **no es un movimiento**. Sin sesión abierta el cajón está cuadrado y cerrado: no hay saldo vivo que reportar.
+
+**`payment_method` se conservó, y es una decisión, no una omisión.** Es el dato del *documento*: una venta se cobró "en efectivo" y eso sigue siendo cierto aunque después la cuenta se renombre o se desactive. El comprobante impreso lo muestra; derivarlo de la cuenta actual haría que un comprobante viejo cambiara de texto porque alguien renombró una cuenta hoy — el mismo problema que ya se evitó congelando el costo en la línea de venta (00019) y la tasa en el snapshot del contrato.
+
+**Quién exige la sesión de caja.** No la operación, sino el **tipo de cuenta**. Cobrar en efectivo necesita el cajón abierto; una venta por Sistecrédito o una transferencia no pasa por él y no tiene por qué quedar bloqueada porque nadie abrió caja. La regla vive en un solo lugar, `cashbox.integration.resolve_account_for_movement()`, que además completa la cuenta predeterminada cuando la operación no la eligió. Postgres no admite subconsultas en un `CHECK`, así que la restricción "movimiento de cuenta `cash` ⇒ tiene sesión" es del servicio, no del esquema (regla 2 de CLAUDE.md).
+
+**El esperado del cierre también sale del tipo de cuenta**, por lo mismo: un gasto pagado por transferencia no salió del cajón, y restarlo dejaba el arqueo buscando billetes que nunca estuvieron ahí.
+
+**Liquidar un convenio** (`POST /accounts/{id}/settle`) mueve el saldo de la `settlement` a la cuenta que recibió la plata. La comisión se **deriva** (`amount_settled − amount_received`) y no genera movimiento propio: no es plata que salió, es plata que nunca llegó.
+
+**Alta de empresa.** `platform.create_company_defaults` crea las tres cuentas iniciales junto a los roles semilla y la caja principal — son parte del mismo alta. Que no lo hiciera fue un bug real, invisible mientras `payment_method` fue la fuente de verdad y destapado recién al derivar el saldo por cuenta: aparecieron cientos de movimientos sin cuenta, todos de empresas nacidas después del backfill de 00024.
+
+Migraciones: **00024** (catálogo + `account_id` en las cinco tablas + backfill), **00025** (`opening_balance`), **00026** (`session_id` opcional), **00027** (`account_id` NOT NULL, con auto-reparación previa).

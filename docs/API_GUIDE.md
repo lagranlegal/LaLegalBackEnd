@@ -200,7 +200,7 @@ No existe `sales.view` en el catálogo de permisos (seed.sql solo trae `sales.cr
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `POST` | `/api/v1/sales` | `sales.create` (+`sales.apply_discount` si trae descuento) | Header **`Idempotency-Key` obligatorio**. Body: `{customer_id?, payment_method, lines: [{item_id, quantity, unit_price}], discount_amount?, discount_reason?}`. Cada ítem debe estar `available` con `quantity` suficiente. Descuenta stock (a 0 → `sold`); `cash_movement(concept='sale', direction='in', module='store')`; exige sesión de caja abierta (`409 CASH_SESSION_NOT_OPEN` si no). Reenviar la misma `Idempotency-Key` devuelve la misma venta (no duplica ni vuelve a descontar stock). |
+| `POST` | `/api/v1/sales` | `sales.create` (+`sales.apply_discount` si trae descuento) | Header **`Idempotency-Key` obligatorio**. Body: `{customer_id?, payment_method, lines: [{item_id, quantity, unit_price}], discount_amount?, discount_reason?}`. Cada ítem debe estar `available` con `quantity` suficiente. Descuenta stock (a 0 → `sold`); `cash_movement(concept='sale', direction='in', module='store')`. Acepta `account_id` opcional (§13); **solo exige sesión de caja abierta si el cobro cae en una cuenta `cash`** (`409 CASH_SESSION_NOT_OPEN`) — una venta por Sistecrédito o transferencia no pasa por el cajón. Reenviar la misma `Idempotency-Key` devuelve la misma venta (no duplica ni vuelve a descontar stock). |
 | `GET` | `/api/v1/sales`, `/{id}` | `sales.create` | `GET /sales` acepta `?customer_id=` y `?status=completed\|voided` (mismos filtros que `contracts`, para el historial de un cliente y para listar solo anuladas sin traer todo y filtrar en el front). |
 | `POST` | `/api/v1/sales/{id}/void` | `sales.void` | Body `{reason}` (obligatorio). Repone stock de cada línea, `cash_movement` contrario (`direction='out'`), auditado. `409` si la venta ya estaba anulada. |
 
@@ -221,7 +221,27 @@ Solo lectura, agrega datos que ya existen en otros módulos — no muta nada. `G
 | `GET` | `/api/v1/reports/dashboard` | `reports.view` | KPIs de un vistazo: `contracts` (conteo por estado `active`/`in_arrears`/`in_extension`/`auctioned`, `ready_for_auction_count` = en prórroga y ya vencida, `capital_outstanding` = suma de `capital_balance` de los contratos vivos), `sales` (`today_total`/`today_count`/`month_total`, solo ventas `completed`), `inventory` (`available_count`/`available_value` = costo×cantidad de lo `available`, `draft_count`), `cashbox` (si hay sesión `open` ahora mismo, y sus datos básicos). Refleja el `status` persistido de cada contrato (recalculado on-read en cada `GET /contracts/{id}` y por el job nocturno — no vuelve a recalcular todo el libro en cada llamada al dashboard). |
 | `GET` | `/api/v1/reports/closings` | `reports.view` | Histórico de cierres de caja (`status='closed'`), paginado por cursor. `?from_date=`/`?to_date=` filtran por `session_date`. Trae `{session_id, session_date, opening_balance, expected_cash, counted_cash, difference, difference_reason, closed_by, closed_at}` — el mismo desglose módulo×concepto×medio de una sesión puntual sigue viviendo en `GET /cashbox/sessions/{id}/report` (éste es el listado, aquél el detalle). |
 
-## 13. Esquema completo y tipos para el front
+## 13. Módulo `accounts` (catálogo de cuentas)
+
+Dónde está la plata, separado de **cómo** se cobró (`payment_method`). Ver `docs/ARCHITECTURE.md` §12 para el porqué del modelo. Tres tipos: `cash` (el cajón), `bank` (banco/Nequi/Daviplata) y `settlement` (un convenio que te debe — Sistecrédito).
+
+El **saldo se deriva** de `cash_movement`, nunca se guarda, y se calcula distinto según el tipo: una `cash` reporta lo que debería haber en el cajón *ahora* (base de la sesión abierta + movimientos de esa sesión, `0.00` si no hay sesión); una `bank` o `settlement` reporta `opening_balance` + el acumulado histórico.
+
+| Método | Path | Permiso | Descripción |
+|---|---|---|---|
+| `GET` | `/api/v1/accounts` | `cashbox.view` | Lista con saldo. `?include_inactive=true` para ver también las desactivadas. |
+| `POST` | `/api/v1/accounts` | `company.configure` | Body `{name, type, reference?, is_default?, opening_balance?}`. Marcar `is_default` desmarca la anterior de ese tipo (hay un índice único parcial). |
+| `PATCH` | `/api/v1/accounts/{id}` | `company.configure` | Renombrar, cambiar `reference`, `is_default` o `active`. El **tipo no se edita**: cambiarlo reinterpretaría todos los movimientos históricos de la cuenta. |
+| `POST` | `/api/v1/accounts/{id}/settle` | `cashbox.view` + `Idempotency-Key` | Liquidar un convenio. Body `{to_account_id, amount_settled, amount_received, notes?}`. Devuelve `{settled, received, commission, commission_pct, new_pending_balance}`. Genera dos movimientos (sale de la `settlement`, entra a la destino). La comisión se **deriva** (`amount_settled − amount_received`) y **no genera movimiento propio**: no es plata que salió, es plata que nunca llegó. |
+
+**Cuál cuenta se usa.** Todas las operaciones de dinero (`POST /sales`, `/contracts`, `/contracts/{id}/payments`, `/cashbox/expenses`, `/inventory/entries`, `/inventory/entries/{id}/pay`) aceptan `account_id` opcional. Si no viene, se usa la predeterminada del tipo que implica el `payment_method` (`cash` → la `cash` por defecto; `transfer`/`other` → la `bank` por defecto).
+
+**Quién exige sesión de caja.** El **tipo de cuenta**, no la operación: solo un movimiento sobre una cuenta `cash` necesita el cajón abierto (`409 CASH_SESSION_NOT_OPEN`). Una venta por Sistecrédito o una transferencia no pasa por el cajón y no se bloquea si nadie abrió caja.
+
+**Alta de empresa.** Cada empresa nueva nace con `Caja principal` (`cash`, default), `Transferencias` (`bank`, default) y `Otros medios` (`bank`).
+
+
+## 14. Esquema completo y tipos para el front
 
 El backend expone OpenAPI 3.1 completo y siempre sincronizado con el código real (generado por FastAPI, no de mantenimiento manual):
 
@@ -237,7 +257,7 @@ npx openapi-typescript openapi.json -o src/types/api.ts
 ```
 Esta tabla de este documento describe **intención y reglas de negocio** (qué hace cada endpoint, por qué puede fallar); el **shape exacto** de request/response (campos, tipos, opcionalidad) siempre sale de `/openapi.json`, nunca de acá — si alguna vez quedan desincronizados, el OpenAPI manda.
 
-## 14. Catálogo de códigos de error usados hasta ahora
+## 15. Catálogo de códigos de error usados hasta ahora
 
 | `code` | HTTP | Cuándo |
 |---|---|---|
@@ -259,14 +279,14 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `VALIDATION_ERROR` | 422 | Body no cumple el schema Pydantic — `details.errors` trae el detalle campo por campo. |
 | `BAD_REQUEST` | 400 | Catch-all de reglas de negocio sin código más específico (p. ej. códigos de permiso inexistentes al armar una matriz de rol, categorías con distinto plazo en un mismo contrato, descuadre de caja sin justificación, stock insuficiente). |
 
-## 15. Qué falta
+## 16. Qué falta
 
-Con `audit` + `reports` + el job nocturno, todo el núcleo operativo de `CLAUDE.md` (`platform` → `identity` → `customers`/`catalogs` → `contracts` → `cashbox` → `inventory`/`sales` → `audit`/`reports` → job nocturno) está completo — ver `docs/ARCHITECTURE.md` §11 para el detalle del job (`app/jobs/nightly.py`). Queda pendiente, fuera del alcance funcional del backend:
+Con `audit` + `reports` + el job nocturno, todo el núcleo operativo de `CLAUDE.md` (`platform` → `identity` → `customers`/`catalogs` → `contracts` → `cashbox` → `inventory`/`sales` → `audit`/`reports` → job nocturno) está completo, más lo agregado después: `company` (§4 bis), el modelo **producto + lote** (el precio vive en el producto, el costo en el lote) y el **catálogo de cuentas** (§13). El backend no tiene trabajo funcional pendiente — ver `docs/ARCHITECTURE.md` §11 para el detalle del job (`app/jobs/nightly.py`). Queda pendiente, fuera del alcance funcional del backend:
 
 - **Desplegar `prod` en Fly.io**: `dev` ya está en producción de pruebas — `https://compraventa-backend-dev.fly.dev`, ver `docs/ARCHITECTURE.md` §8. `prod` usa el mismo `Dockerfile` + `fly.prod.toml`, pero necesita su propio proyecto Supabase (hoy solo existe el de `dev`) antes de poder desplegarse — no reusar el de `dev` para datos reales.
 - **PDFs** (contrato firmado, acta de cierre de caja): requieren Storage + una librería de PDF, fuera de alcance por decisión explícita en los pasos 5 y 6 — el front puede armar ambos con los datos que ya expone la API mientras tanto.
 - **Costeo FIFO por lote** para accesorios de bajo valor: por decisión explícita en el paso 7, todo `inventory_item` usa identificación específica (su propio costo real); FIFO por lote queda como optimización futura.
 
 **Backlog explícito del front** (pedido durante la integración, deliberadamente pospuesto — no bloquean el arranque):
+- **Pantalla de cuentas** (§13): listado con saldo, alta/edición, y el selector de cuenta en cada punto de cobro. Hoy el backend resuelve la predeterminada cuando el front no manda `account_id`, así que todo funciona sin la pantalla — pero sin ella no hay forma de liquidar un convenio ni de ver cuánto debe Sistecrédito.
 - **`GET /reports/series?months=12`**: serie histórica mensual de ingresos (empeño/tienda) para la gráfica principal del dashboard. Por ahora `GET /reports/dashboard` (§12) cubre hoy/mes — suficiente para arrancar.
-- **`GET`/`PATCH /company/settings`** (tenant-scoped): pantalla de configuración de empresa (logo, firma, timezone, datos legales). Hoy esos campos existen en `company` pero no hay endpoint propio para editarlos fuera de `platform` (solo super-admin).
