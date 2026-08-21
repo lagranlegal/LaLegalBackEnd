@@ -1,5 +1,8 @@
 # Pendientes para revisar con backend/arquitectura/infraestructura
 
+> **Esta copia está congelada en el punto 20 (integración inicial del front).** La versión viva —con todo lo resuelto después: cuentas, permisos, producto+lote, reportes— es `frontend-starter/docs/PENDIENTES_BACKEND_INFRA.md`. Se conserva acá solo como historia del arranque.
+
+
 > Documento de traspaso — no es una queja sobre el backend, es la lista concreta de huecos reales encontrados construyendo el front, para decidir en equipo qué se resuelve y en qué orden. Cada punto dice qué se verificó, cómo, y por qué importa para el negocio (no solo técnicamente). Última actualización: 19/08/2026 (segunda revisión — se suman los puntos 13 a 18: reportes, panel de plataforma, ajustes de usuario, paginación, edición de artículos de remate, resumen financiero).
 >
 > **Tercera revisión (backend, mismo día):** puntos 1, 3, 4, 17 y la mitad de 14 (`PlanOut.modules` + `CompanyOut` con plan/suscripción) ya resueltos — ver la nota "✅ Resuelto" en cada uno. Puntos 10 y 14 (auditoría) además tenían un diagnóstico distinto al reportado — corregido inline, no era el bug descrito originalmente.
