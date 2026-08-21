@@ -180,15 +180,31 @@ Acto único diario de apertura/cierre, base única de efectivo (fase 1: una sola
 
 **Bug real que encontré y corregí — ahora resuelto de fondo:** el pre-chequeo de "¿ya existe sesión hoy?" comparaba contra `date.today()` de Python (hora del servidor, UTC en Fly.io) mientras el `INSERT` dejaba que Postgres pusiera la fecha con su propio `current_date` (también UTC, pero un reloj distinto). Colombia es UTC-5 sin horario de verano: entre las 7pm y la medianoche hora Colombia, UTC ya está "un día adelante" — una ventana de **5 horas todos los días, en pleno horario de atención**, no un caso raro de medianoche. Fix aplicado: `app/common/tenant_time.py` + `app/modules/platform/integration.py::get_company_today` calculan "hoy" a partir de `company.settings.timezone` (default `America/Bogota`, ya venía en el esquema) en vez de la hora del servidor — usado ahora en `contracts` (meses adeudados, vencimientos, snapshot) y `cashbox` (sesión diaria) por igual. Test de regresión determinístico (con el instante fijo del bug real) en `tests/unit/test_tenant_time.py`.
 
+**Histórico vs. el turno de hoy** (00031). `cashbox.view` alcanza para la sesión **de hoy** —abierta o ya cerrada— y su reporte; el resto es histórico y exige `cashbox.view_history`:
+
+| Método | Path | Permiso |
+|---|---|---|
+| `GET` | `/api/v1/cashbox/sessions/current` | `cashbox.view` (404 si no hay ninguna abierta) |
+| `GET` | `/api/v1/cashbox/sessions/today` | `cashbox.view` — la de hoy, abierta o cerrada (404 si no se ha abierto) |
+| `GET` | `/api/v1/cashbox/sessions` | `cashbox.view_history` |
+| `GET` | `/api/v1/cashbox/sessions/{id}` y `/report` | `cashbox.view` si es la de hoy; `cashbox.view_history` si no |
+| `GET` | `/api/v1/reports/closings` | `reports.view` **+** `cashbox.view_history` |
+
+El corte es la **fecha de la sesión**, no su estado: una sesión de hoy ya cerrada sigue siendo el turno de quien la cerró (necesita imprimir su acta) y una abierta que quedó de ayer sigue siendo la sesión en curso.
+
+`/reports/closings` exige los dos permisos porque expone **el mismo dato** desde el módulo de reportes — quitarle el histórico al cajero por un lado y dejarle esa URL por el otro sería un control que se rodea escribiendo otra dirección.
+
+`/sessions/today` existe para que el front pueda preguntar "¿ya cerré hoy?" con `cashbox.view`. Antes lo deducía de `/reports/closings`, así que el permiso nuevo le habría **roto la pantalla** al cajero en vez de acotarla.
+
 ## 9. Módulo `inventory`
 
 Ítems entran en `draft` (desde un ingreso o desde un remate) y no son vendibles hasta publicarse — el código (`JOC0001I`) se emite AL PUBLICAR y es inmutable desde ahí.
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `POST` | `/api/v1/inventory/entries` | `inventory.create` | Ingreso de compra u "otro". Body: `{origin_type: "purchase"\|"other", supplier_id?, supplier_invoice?, notes?, lines: [{name, cat1_id, cat2_id, cat3_id, description?, unit_cost, quantity, photos?}]}`. `origin_type="purchase"` exige `supplier_id` (400 si falta). Crea un `inventory_item` en `draft` por línea — costeo por identificación específica, cada uno con su propio costo (nunca promediado). `cat1_id`/`cat2_id`/`cat3_id` deben formar una rama válida del árbol (niveles 1→2→3 encadenados). |
+| `POST` | `/api/v1/inventory/entries` | `inventory.create` | Ingreso de mercancía. `origin_type`: `purchase` \| `initial_stock` \| `adjustment_in` \| `other` (00033). Body: `{origin_type, supplier_id?, supplier_invoice?, notes?, lines: [{name, cat1_id, cat2_id, cat3_id, description?, unit_cost, quantity, photos?}]}`. `origin_type="purchase"` exige `supplier_id` y es el ÚNICO que puede llevar `payment_method` (los demás no tocan caja: `initial_stock` es lo que ya había al arrancar con el sistema, `adjustment_in` un sobrante de conteo). `origin_type="other"` exige `notes` — es un cajón de sastre y sin motivo no queda rastro de dónde salió la mercancía. Crea un `inventory_item` en `draft` por línea — costeo por identificación específica, cada uno con su propio costo (nunca promediado). `cat1_id`/`cat2_id`/`cat3_id` deben formar una rama válida del árbol (niveles 1→2→3 encadenados). |
 | `GET` | `/api/v1/inventory/entries`, `/{id}` | `inventory.view` | Incluye los ítems creados por ese ingreso. |
-| `POST` | `/api/v1/inventory/exits` | `inventory.exit` | Egreso (ajuste/daño/devolución a proveedor/uso interno). Body: `{exit_type, reason, lines: [{item_id, quantity}]}`. Sin aprobación adicional — basta el permiso (CLAUDE.md). Descuenta `quantity`; si llega a 0, el ítem queda `written_off`. Auditado. |
+| `POST` | `/api/v1/inventory/exits` | `inventory.exit` | Egreso: `adjustment` \| `damage` \| `loss` \| `supplier_return` \| `internal_use`. Body: `{exit_type, reason, lines: [{item_id, quantity}]}`. Sin aprobación adicional — basta el permiso (CLAUDE.md). Descuenta `quantity`; si llega a 0, el ítem queda `written_off`. Auditado. |
 | `GET` | `/api/v1/inventory/exits`, `/{id}` | `inventory.view` | |
 | `GET` | `/api/v1/inventory/items`, `/{id}` | `inventory.view` | Filtros combinables: `?status=`, `?q=` (código por prefijo o nombre por full-text español), `?cat1_id=`/`?cat2_id=`/`?cat3_id=`, `?supplier_id=`, `?origin=supplier\|auction\|other`. |
 | `PATCH` | `/api/v1/inventory/items/{id}` | `inventory.create` | Solo mientras `status='draft'` (`409` si ya se publicó) y **solo `{photos?}`**. Desde 00022/00023 el nombre, la descripción, la categoría y el precio son del **producto** y se editan con `PATCH /products/{id}`, donde el cambio aplica a todos sus lotes — editarlos por lote permitía que dos lotes del mismo producto divergieran. Las fotos sí son del lote. |
@@ -246,6 +262,14 @@ El **saldo se deriva** de `cash_movement`, nunca se guarda, y se calcula distint
 
 > El bug que motivó la regla salió en uso real: el selector de cuenta del front filtraba solo por medio de pago (`other`) sin mirar la dirección del movimiento, así que al registrar una compra ofrecía Sistecrédito como fuente de pago. El front ya no la ofrece, pero la validación vive acá porque la UI oculta y no protege (`CLAUDE.md` regla 7). La única salida legítima de una cuenta por cobrar es su **liquidación**, que tiene endpoint propio y no pasa por esta validación.
 
+**Traslados entre cuentas propias** (00032). `POST /api/v1/accounts/transfers` con `accounts.transfer` + `Idempotency-Key`. Body `{from_account_id, to_account_id, amount, transfer_date?, notes?}`; devuelve el traslado con los saldos resultantes de ambas cuentas. `GET /api/v1/accounts/transfers` lista el histórico con `accounts.view`.
+
+El caso real es **consignar en el banco el efectivo del día**, y antes no existía: solo quedaba registrarlo como gasto (que falsea la utilidad por casi toda la caja del día) o no registrarlo (y entonces el saldo del banco queda mentiroso y el efectivo esperado del día siguiente, inflado). **Un traslado no es ingreso ni egreso: es la misma plata en otro bolsillo**, así que no toca el estado de resultados.
+
+Genera dos movimientos con conceptos **propios** `transfer_out` / `transfer_in` (módulo `general`) — no `adjustment`, que significa "el sistema no cuadra con la realidad" cuando acá sí cuadra. Los reportes los excluyen del cálculo de ingresos, gastos y flujo; el arqueo **sí** los cuenta, que es lo correcto: si consignaste, esos billetes ya no están en el cajón.
+
+Reglas: origen ≠ destino; **ninguna de las dos puede ser `settlement`** (no se saca plata que aún te deben, ni se "consigna" hacia una deuda ajena — para eso está la liquidación, que además calcula la comisión); no se puede trasladar más de lo disponible; la fecha nunca es futura. Si toca efectivo **exige caja abierta** (`409 CASH_SESSION_NOT_OPEN`) y por eso va **antes** del cierre: una sesión cerrada es inmutable.
+
 **Alta de empresa.** Cada empresa nueva nace **solo con `Caja principal`** (`cash`, default). Antes se sembraban también `Transferencias` y `Otros medios`, que eran un artefacto de la migración 00024: existían para mapear el enum viejo de medios de pago al catálogo nuevo y no perder el histórico de las empresas que ya estaban. Una empresa nueva no tiene historia que mapear, y el módulo existe para responder **dónde** está la plata — cosa que un nombre como "Transferencias" no hace. Las bancarias las crea el dueño con el nombre de su banco. Si alguien registra una transferencia antes de haber creado ninguna, se crea una al vuelo como red de seguridad: perder el registro de un movimiento de dinero sería peor que crear una cuenta implícita.
 
 **Permisos propios, no prestados** (migración 00029). El módulo nació reusando `cashbox.view` y `company.configure`, y eso tenía dos defectos: no se podía dar acceso a cuentas sin dar toda la caja, ni administrarlas sin dar también logo, firma y documentos — o sea que el módulo **no era parametrizable** desde la matriz de roles. Y peor: `settle` **mueve plata** pero exigía `cashbox.view`, un permiso de solo lectura, así que cualquiera que pudiera mirar la caja podía liquidar Sistecrédito. Ahora son tres (`accounts.view` / `accounts.manage` / `accounts.settle`, este último `is_special`), y la separación sigue el mismo criterio del resto del catálogo: ver, administrar, y la acción sensible aparte.
@@ -285,7 +309,7 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `CONTRACT_LEGACY_CODE_EXISTS` | 409 | `POST /contracts/import` con un `legacy_code` que ya existe en la empresa. |
 | `IMPORT_CAPITAL_EXCEEDS_PRINCIPAL` | 422 | `POST /contracts/import` con `capital_balance ≤ 0` o `capital_balance > principal`. |
 | `IMPORT_DATES_MISALIGNED` | 422 | `POST /contracts/import` con `interest_paid_until` que no cae en un número entero de meses completos desde `start_date`. |
-| `ACCOUNT_CANNOT_FUND_PAYMENT` | 400 | Se intentó pagar (gasto, compra, desembolso) desde una cuenta `settlement`. Es plata por cobrar, no un saldo disponible. |
+| `ACCOUNT_CANNOT_FUND_PAYMENT` | 400 | Se intentó pagar (gasto, compra, desembolso) o trasladar desde una cuenta `settlement`. Es plata por cobrar, no un saldo disponible. |
 | `IDEMPOTENCY_KEY_REQUIRED` | 400 | Falta el header `Idempotency-Key` en un endpoint de dinero. |
 | `VALIDATION_ERROR` | 422 | Body no cumple el schema Pydantic — `details.errors` trae el detalle campo por campo. |
 | `BAD_REQUEST` | 400 | Catch-all de reglas de negocio sin código más específico (p. ej. códigos de permiso inexistentes al armar una matriz de rol, categorías con distinto plazo en un mismo contrato, descuadre de caja sin justificación, stock insuficiente). |
