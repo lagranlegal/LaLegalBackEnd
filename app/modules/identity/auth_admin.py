@@ -19,6 +19,23 @@ class AuthAdminError(AppError):
     code = "AUTH_ADMIN_ERROR"
 
 
+class InviteRateLimitedError(AppError):
+    """Supabase limitó el envío de correos (429).
+
+    Es un caso aparte y no un `AuthAdminError` porque no hay nada roto: hay
+    que esperar. Mezclarlo con el error genérico le decía al admin "no se
+    pudo invitar" con un 502 —que se lee como una falla del sistema— cuando
+    la acción correcta es simplemente reintentar más tarde.
+
+    El servicio de correo incluido de Supabase tiene un límite bajo a
+    propósito: está pensado para pruebas, no para producción. La solución de
+    fondo es configurar un SMTP propio (ver docs/DEPLOY.md).
+    """
+
+    status_code = 429
+    code = "INVITE_RATE_LIMITED"
+
+
 async def invite_user(email: str, full_name: str) -> UUID:
     settings = get_settings()
     url = f"{settings.supabase_url}/auth/v1/invite"
@@ -46,6 +63,11 @@ async def invite_user(email: str, full_name: str) -> UUID:
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(url, headers=headers, json=payload)
 
+    if response.status_code == 429:
+        raise InviteRateLimitedError(
+            "Supabase limitó el envío de correos. Espera unos minutos e invita de nuevo.",
+            details={"body": response.text},
+        )
     if response.status_code >= 400:
         raise AuthAdminError(
             "No se pudo invitar al usuario en Supabase Auth.",

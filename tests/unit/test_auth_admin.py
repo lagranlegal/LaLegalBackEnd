@@ -97,3 +97,39 @@ async def test_invite_omits_redirect_when_not_configured(
     await auth_admin.invite_user("sin@example.com", "Sin Redirect")
 
     assert "redirect_to" not in _FakeClient.captured["json"]
+
+
+class _RateLimitedResponse:
+    status_code = 429
+    text = '{"error_code":"over_email_send_rate_limit"}'
+
+    def json(self) -> dict[str, Any]:
+        return {}
+
+
+class _RateLimitedClient(_FakeClient):
+    async def post(self, url: str, headers: dict, json: dict) -> Any:
+        return _RateLimitedResponse()
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_no_se_reporta_como_falla_del_sistema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un 429 de Supabase significa "espera", no "algo se rompió".
+
+    Antes caía en `AuthAdminError` (502, "No se pudo invitar al usuario en
+    Supabase Auth"), que manda al admin a buscar un problema inexistente: el
+    servicio de correo incluido de Supabase tiene un límite bajo a propósito
+    porque está pensado para pruebas. Se distingue para poder decirle qué
+    hacer — esperar — en vez de dejarlo adivinando.
+    """
+    monkeypatch.setenv("FRONTEND_URL", "https://app.example.com")
+    monkeypatch.setattr(auth_admin.httpx, "AsyncClient", _RateLimitedClient)
+
+    with pytest.raises(auth_admin.InviteRateLimitedError) as exc:
+        await auth_admin.invite_user("nuevo@example.com", "Nuevo Usuario")
+
+    assert exc.value.status_code == 429
+    assert exc.value.code == "INVITE_RATE_LIMITED"
+    assert "espera" in str(exc.value).lower()
