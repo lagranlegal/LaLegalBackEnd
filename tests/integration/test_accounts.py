@@ -46,7 +46,17 @@ async def accounts_tenant(
 
     company_id, role_id, user_id = uuid4(), uuid4(), uuid4()
     register_id, session_id = uuid4(), uuid4()
-    codes = ("cashbox.view", "cashbox.open_close", "company.configure")
+    # `accounts.*` son propios del módulo desde 00029: antes se colaba por
+    # `cashbox.view` (leer) y `company.configure` (administrar), y liquidar
+    # —que mueve plata— quedaba detrás de un permiso de solo lectura.
+    codes = (
+        "cashbox.view",
+        "cashbox.open_close",
+        "company.configure",
+        "accounts.view",
+        "accounts.manage",
+        "accounts.settle",
+    )
 
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
@@ -357,3 +367,84 @@ def test_bank_balance_starts_from_its_opening_balance(
     cuenta = _create(client, token, name="Bancolombia", type="bank", opening_balance="3000000.00")
     assert cuenta["opening_balance"] == "3000000.00"
     assert cuenta["balance"] == "3000000.00"
+
+
+@pytest_asyncio.fixture
+async def solo_lectura_token(
+    accounts_tenant: dict, monkeypatch: pytest.MonkeyPatch, rsa_keypair: tuple[str, object]
+) -> str:
+    """Usuario con `accounts.view` y nada más — el caso del asesor que cobra."""
+    private_pem, public_key = rsa_keypair
+    monkeypatch.setattr(security, "get_jwk_client", lambda: FakeJwkClient(public_key))
+
+    role_id, user_id = uuid4(), uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("insert into public.role (id, company_id, name) values (:id, :cid, 'Solo Ver')"),
+            {"id": str(role_id), "cid": str(accounts_tenant["company_id"])},
+        )
+        await session.execute(
+            text(
+                "insert into public.role_permission (role_id, permission_id) "
+                "select :role_id, id from public.permission where code = 'accounts.view'"
+            ),
+            {"role_id": str(role_id)},
+        )
+        await session.execute(
+            text(
+                "insert into public.app_user (id, company_id, role_id, full_name, email, status) "
+                "values (:id, :cid, :rid, 'Solo Ver', :email, 'active')"
+            ),
+            {
+                "id": str(user_id),
+                "cid": str(accounts_tenant["company_id"]),
+                "rid": str(role_id),
+                "email": f"solover-{user_id}@test.local",
+            },
+        )
+    return make_token(
+        private_pem,
+        sub=str(user_id),
+        company_id=str(accounts_tenant["company_id"]),
+        role_id=str(role_id),
+    )
+
+
+def test_ver_cuentas_no_alcanza_para_liquidar(
+    client: TestClient, accounts_tenant: dict, solo_lectura_token: str
+) -> None:
+    """Liquidar MUEVE PLATA, así que no puede colgar de un permiso de lectura.
+
+    Hasta 00029 `settle` exigía `cashbox.view` — o sea que cualquiera que
+    pudiera mirar la caja podía liquidar Sistecrédito. Este test fija la
+    separación: ver el saldo y cobrarlo son cosas distintas.
+    """
+    headers = {"Authorization": f"Bearer {solo_lectura_token}"}
+
+    # Ver sí puede.
+    assert client.get("/api/v1/accounts", headers=headers).status_code == 200
+
+    convenio = _create(client, accounts_tenant["token"], name="Sistecrédito", type="settlement")
+    destino = next(a for a in _accounts(client, accounts_tenant["token"]) if a["type"] == "cash")
+
+    respuesta = client.post(
+        f"/api/v1/accounts/{convenio['id']}/settle",
+        headers={**headers, "Idempotency-Key": str(uuid4())},
+        json={
+            "to_account_id": destino["id"],
+            "amount_settled": "100000.00",
+            "amount_received": "95000.00",
+        },
+    )
+    assert respuesta.status_code == 403
+    assert respuesta.json()["code"] == "PERMISSION_DENIED"
+
+
+def test_ver_cuentas_no_alcanza_para_crearlas(client: TestClient, solo_lectura_token: str) -> None:
+    """Mismo criterio del otro lado: administrar el catálogo es `accounts.manage`."""
+    respuesta = client.post(
+        "/api/v1/accounts",
+        headers={"Authorization": f"Bearer {solo_lectura_token}"},
+        json={"name": "No debería crearse", "type": "bank"},
+    )
+    assert respuesta.status_code == 403

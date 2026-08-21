@@ -35,6 +35,13 @@ insert into public.permission (code, module, action, is_special, description) va
   ('cashbox.open_close', 'cashbox', 'session', true,  'Abrir y cerrar la caja diaria'),
   ('cashbox.reopen',     'cashbox', 'reopen',  true,  'Reabrir un cierre (excepcional, auditado)'),
   ('cashbox.expense',    'cashbox', 'expense', false, 'Registrar gastos'),
+  -- Cuentas (dónde está la plata: caja, bancos, convenios por cobrar).
+  -- Permisos propios y no prestados de cashbox/company: si no, no se puede
+  -- dar acceso a cuentas sin dar toda la caja, ni administrarlas sin dar
+  -- también logo y firma. `settle` va aparte porque MUEVE PLATA.
+  ('accounts.view',   'accounts', 'view',   false, 'Ver cuentas y sus saldos'),
+  ('accounts.manage', 'accounts', 'manage', false, 'Crear y editar cuentas'),
+  ('accounts.settle', 'accounts', 'settle', true,  'Liquidar cuentas por cobrar (Sistecrédito)'),
   -- Usuarios y roles
   ('identity.manage_users', 'identity', 'users', false, 'Invitar, editar e inactivar usuarios'),
   ('identity.manage_roles', 'identity', 'roles', true,  'Crear roles y editar permisos'),
@@ -60,7 +67,7 @@ on conflict (code) do nothing;
 --               sales.apply_discount, audit.view, company.configure,
 --               contracts.import.
 --   Asesor:     contracts.view/create, payments.create, customers.*,
---               inventory.view, sales.create, cashbox.view.
+--               inventory.view, sales.create, cashbox.view, accounts.view.
 --   Bodega:     inventory.view/create, catalogs.manage (proveedores),
 --               customers.view.
 -- =====================================================================

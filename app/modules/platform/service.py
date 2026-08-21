@@ -26,6 +26,9 @@ _ASESOR_CODES = {
     "inventory.view",
     "sales.create",
     "cashbox.view",
+    # Un asesor que cobra necesita ver a qué cuenta está mandando la plata,
+    # aunque no pueda administrar el catálogo ni liquidar convenios.
+    "accounts.view",
 }
 _BODEGA_CODES = {
     "inventory.view",
@@ -45,6 +48,11 @@ _MODERADOR_EXCLUDED_CODES = {
     "audit.view",
     "company.configure",
     "contracts.import",
+    # Coherente con las dos exclusiones de arriba: si un Moderador no
+    # configura la empresa, tampoco administra el catálogo de cuentas; y si
+    # no abre ni cierra la caja, tampoco liquida convenios (mueve plata).
+    "accounts.manage",
+    "accounts.settle",
 }
 
 

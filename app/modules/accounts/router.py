@@ -17,10 +17,14 @@ from app.modules.accounts.schemas import (
 
 router = APIRouter(prefix="/api/v1/accounts", tags=["accounts"])
 
-_view = require_permission("cashbox.view")
+_view = require_permission("accounts.view")
 # Crear o editar cuentas es configuración del negocio, no operación diaria:
 # usa el mismo permiso que el resto de la configuración de empresa.
-_manage = require_permission("company.configure")
+_manage = require_permission("accounts.manage")
+# Liquidar MUEVE PLATA: genera dos movimientos y baja el saldo por cobrar.
+# Estuvo detrás de `cashbox.view` —un permiso de solo lectura— hasta 00029,
+# o sea que cualquiera que pudiera mirar la caja podía liquidar Sistecrédito.
+_settle = require_permission("accounts.settle")
 
 
 @router.get("", response_model=list[AccountOut])
@@ -64,7 +68,7 @@ async def update_account(
 async def settle_account(
     account_id: UUID,
     body: SettlementIn,
-    user: Annotated[CurrentUser, Depends(_view)],
+    user: Annotated[CurrentUser, Depends(_settle)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     _idempotency_key: Annotated[str, Depends(require_idempotency_key)],
 ) -> SettlementOut:
