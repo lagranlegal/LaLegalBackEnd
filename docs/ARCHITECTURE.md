@@ -104,6 +104,22 @@ Regla dura (CLAUDE.md): **un módulo no importa el `service` de otro módulo.** 
 - **Autorización** = "¿su rol tiene el permiso X?" — `require_permission("modulo.accion")`, RBAC dinámico por empresa, cache TTL 60s por rol. Deny-by-default: un endpoint sin `Depends(require_permission(...))` es un bug, no un endpoint público.
 - **Super-admin de plataforma** (gestiona empresas/suscripciones, fuera del modelo de tenant) = un caso aparte: no tiene fila en `app_user`, se identifica por el claim `app_metadata.platform_role == "super_admin"` que se fija manualmente en Supabase Auth (una sola vez, fuera de la app). Ver `require_super_admin` en `security.py`.
 
+### El Custom Access Token Hook y el estado `invited`
+
+Los claims `company_id`/`role_id` NO los pone el backend: los emite el **Custom Access Token Hook** (`public.custom_access_token_hook`, migración 00003) cuando Supabase Auth firma el token. `get_verified_claims` rechaza con 401 cualquier JWT que llegue sin ellos.
+
+El hook emite claims para `status in ('active', 'invited')`, y esa lista es deliberada. **`invited` tiene que estar ahí**, y que faltara causó un bloqueo mutuo que impedía que cualquier invitado entrara (migración 00028):
+
+1. El hook no emitía claims hasta que el usuario fuera `active`.
+2. `get_verified_claims` rechazaba con 401 todo token sin claims.
+3. Y el único código que pasaba al usuario de `invited` a `active` vivía **detrás** de esa validación, en `get_current_user`.
+
+La auto-activación era código inalcanzable justo para el caso que fue escrito. El invitado veía *"Tu usuario o tu empresa están inactivos"*, un mensaje que apunta al lugar equivocado — no había nada inactivo, había un ciclo. No se detectó antes porque los usuarios de prueba se activaron a mano durante el desarrollo, así que nunca se recorrió el flujo completo de invitación.
+
+Emitir claims para `invited` es seguro: significa "el admin ya lo dio de alta y todavía no ha entrado por primera vez", y para tener un JWT válido en la mano ya completó el flujo de Supabase (puso contraseña o usó Google), lo cual prueba que controla ese correo. El estado que sí corta el acceso es `inactive`. La condición **enumera lo permitido** en vez de negar `inactive`, para que cualquier estado nuevo nazca excluido.
+
+Tests en `tests/integration/test_auth_flow.py`: ejercitan el hook directamente para los tres casos (invitado entra, desactivado no, empresa suspendida corta a todos).
+
 ## 6. Estructura del código
 
 ```

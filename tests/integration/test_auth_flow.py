@@ -237,3 +237,101 @@ def test_valid_token_with_permission_is_200(
         response = client.get("/dummy", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json() == {"user_id": str(tenant_fixture["user_with_perm"])}
+
+
+async def _hook_claims(user_id: uuid.UUID) -> dict[str, object]:
+    """Corre el Custom Access Token Hook como lo hace Supabase Auth y
+    devuelve los claims resultantes."""
+    async with AsyncSessionLocal() as session, session.begin():
+        result = await session.execute(
+            # `cast(... as jsonb)` y no `::jsonb`: SQLAlchemy interpreta el
+            # segundo `:` de `::` como el inicio de un parámetro con nombre.
+            text("select public.custom_access_token_hook(cast(:event as jsonb))"),
+            {"event": f'{{"user_id": "{user_id}", "claims": {{}}}}'},
+        )
+        return dict(result.scalar_one()["claims"])
+
+
+@pytest.mark.asyncio
+async def test_hook_emite_claims_para_un_invitado(
+    tenant_fixture: dict[str, uuid.UUID],
+) -> None:
+    """Un invitado que acaba de poner su contraseña DEBE recibir claims.
+
+    Sin esto se forma un bloqueo mutuo (migración 00028): el hook no emite
+    claims hasta que el usuario sea `active`, `get_verified_claims` rechaza
+    con 401 todo token sin claims, y el único código que activa al usuario
+    vive detrás de esa validación. Resultado: ningún invitado podía entrar
+    jamás, y el mensaje que veía ("usuario o empresa inactivos") apuntaba al
+    lugar equivocado.
+    """
+    invitado = uuid.uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                """
+                insert into public.app_user (id, company_id, role_id, full_name, email, status)
+                values (:id, :company_id, :role_id, 'Recién Invitado', :email, 'invited')
+                """
+            ),
+            {
+                "id": str(invitado),
+                "company_id": str(tenant_fixture["company_id"]),
+                "role_id": str(tenant_fixture["role_with_perm"]),
+                "email": f"invitado-{invitado}@test.local",
+            },
+        )
+
+    claims = await _hook_claims(invitado)
+    assert claims.get("company_id") == str(tenant_fixture["company_id"])
+    assert claims.get("role_id") == str(tenant_fixture["role_with_perm"])
+
+
+@pytest.mark.asyncio
+async def test_hook_no_emite_claims_para_un_usuario_desactivado(
+    tenant_fixture: dict[str, uuid.UUID],
+) -> None:
+    """`inactive` es el estado que SÍ debe cortar el acceso — es lo que hace
+    el admin al desactivar a alguien. La condición del hook enumera los
+    estados permitidos justamente para que esto no se afloje al agregar uno
+    nuevo."""
+    desactivado = uuid.uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                """
+                insert into public.app_user (id, company_id, role_id, full_name, email, status)
+                values (:id, :company_id, :role_id, 'Desactivado', :email, 'inactive')
+                """
+            ),
+            {
+                "id": str(desactivado),
+                "company_id": str(tenant_fixture["company_id"]),
+                "role_id": str(tenant_fixture["role_with_perm"]),
+                "email": f"inactivo-{desactivado}@test.local",
+            },
+        )
+
+    assert await _hook_claims(desactivado) == {}
+
+
+@pytest.mark.asyncio
+async def test_hook_no_emite_claims_si_la_empresa_esta_suspendida(
+    tenant_fixture: dict[str, uuid.UUID],
+) -> None:
+    """Suspender la empresa corta a TODOS sus usuarios, invitados incluidos:
+    es la palanca comercial de la plataforma y no puede depender del estado
+    individual de cada quien."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.company set status = 'suspended' where id = :id"),
+            {"id": str(tenant_fixture["company_id"])},
+        )
+
+    assert await _hook_claims(tenant_fixture["user_with_perm"]) == {}
+
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.company set status = 'active' where id = :id"),
+            {"id": str(tenant_fixture["company_id"])},
+        )
