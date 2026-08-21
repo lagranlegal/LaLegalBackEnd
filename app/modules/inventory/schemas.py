@@ -77,6 +77,18 @@ class EntryLineIn(BaseModel):
     unit_cost: Money
     quantity: int = Field(default=1, ge=1)
     photos: list[str] = Field(default_factory=list)
+    #: Precio de venta del PRODUCTO. Opcional, y si el producto ya tiene uno
+    #: no hace falta repetirlo — se conserva el vigente.
+    #:
+    #: Está acá porque el ingreso es el momento en que la mercancía está en la
+    #: mano de quien la registra: es cuando se sabe en cuánto se va a vender.
+    #: Antes había que registrar el ingreso, salir, buscar cada lote y
+    #: publicarlo uno por uno, así que TODA compra nacía incompleta por diseño
+    #: y el borrador —que debería ser la excepción— era el estado normal.
+    #:
+    #: Con precio y al menos una foto, el lote se publica SOLO (ver
+    #: `create_entry`): emite código y queda `available`, listo para vender.
+    sale_price: Money | None = None
 
 
 class EntryCreateIn(BaseModel):

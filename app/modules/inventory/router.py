@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Annotated
 from uuid import UUID
 
@@ -71,12 +72,37 @@ async def list_entries(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    supplier_id: Annotated[UUID | None, Query()] = None,
+    origin_type: Annotated[
+        str | None, Query(description="purchase | initial_stock | adjustment_in | other | auction")
+    ] = None,
+    payment_status: Annotated[
+        str | None,
+        Query(description="pending (compras por pagar) | paid"),
+    ] = None,
+    from_date: Annotated[date | None, Query(description="Sobre `entry_date`, inclusivo.")] = None,
+    to_date: Annotated[date | None, Query(description="Sobre `entry_date`, inclusivo.")] = None,
+    q: Annotated[
+        str | None, Query(description="Número del ingreso o factura del proveedor.")
+    ] = None,
 ) -> CursorPage[EntryOut]:
+    """`payment_status=pending` responde "¿qué compras tengo por pagar?".
+
+    El dato estaba en cada fila desde 00020 —y hasta con índice parcial— pero
+    ninguna consulta lo ofrecía, así que la pregunta no tenía respuesta en la
+    app aunque la respuesta estuviera guardada.
+    """
     return await service.list_entries(
         db,
         company_id=user.company_id,
         cursor=decode_cursor(cursor) if cursor else None,
         limit=limit,
+        supplier_id=supplier_id,
+        origin_type=origin_type,
+        payment_status=payment_status,
+        from_date=from_date,
+        to_date=to_date,
+        q=q,
     )
 
 
@@ -106,12 +132,21 @@ async def list_exits(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    exit_type: Annotated[
+        str | None,
+        Query(description="adjustment | damage | loss | supplier_return | internal_use"),
+    ] = None,
+    from_date: Annotated[date | None, Query()] = None,
+    to_date: Annotated[date | None, Query()] = None,
 ) -> CursorPage[ExitOut]:
     return await service.list_exits(
         db,
         company_id=user.company_id,
         cursor=decode_cursor(cursor) if cursor else None,
         limit=limit,
+        exit_type=exit_type,
+        from_date=from_date,
+        to_date=to_date,
     )
 
 
@@ -191,6 +226,14 @@ async def list_products(
     include_unique: Annotated[
         bool, Query(description="Incluir piezas de remate, que son productos de un solo lote.")
     ] = False,
+    cat1_id: Annotated[UUID | None, Query()] = None,
+    cat2_id: Annotated[UUID | None, Query()] = None,
+    cat3_id: Annotated[UUID | None, Query()] = None,
+    supplier_id: Annotated[
+        UUID | None, Query(description="Productos con al menos un lote de ese proveedor.")
+    ] = None,
+    in_stock: Annotated[bool, Query(description="Solo lo que tiene unidades disponibles.")] = False,
+    active: Annotated[bool | None, Query()] = None,
 ) -> CursorPage[ProductOut]:
     """Inventario agrupado por producto, con el resumen de sus lotes.
 
@@ -205,6 +248,12 @@ async def list_products(
         limit=limit,
         q=q,
         include_unique=include_unique,
+        cat1_id=cat1_id,
+        cat2_id=cat2_id,
+        cat3_id=cat3_id,
+        supplier_id=supplier_id,
+        in_stock=in_stock,
+        active=active,
     )
 
 

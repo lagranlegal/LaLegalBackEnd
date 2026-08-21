@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -292,6 +293,38 @@ async def create_entry(
             unit_cost=line.unit_cost,
         )
 
+        # PUBLICACIÓN AUTOMÁTICA: si la línea ya trae todo lo que se necesita
+        # para vender —precio y al menos una foto— el lote se publica en el
+        # acto, emite su código y queda `available`.
+        #
+        # POR QUÉ: antes TODA compra nacía en borrador, sin importar qué tan
+        # completa viniera, y había que volver artículo por artículo a
+        # terminarla desde otra pantalla. El borrador dejaba de significar
+        # "le falta algo" y pasaba a ser el estado normal — con el efecto de
+        # que un artículo realmente incompleto se volvía invisible: no está en
+        # la vitrina y nadie se entera.
+        #
+        # Ahora el borrador vuelve a ser la excepción, y significa lo que
+        # debería: a esto le falta precio, o le falta foto.
+        #
+        # El precio puede venir en la línea o ya estar en el producto (reponer
+        # algo que ya se vendía no debería obligar a redigitarlo).
+        precio = line.sale_price
+        if precio is None:
+            producto = await repository.get_product(
+                db, company_id=company_id, product_id=product_id
+            )
+            if producto is not None:
+                precio = producto._mapping["sale_price"]
+
+        if precio is not None and precio > 0 and line.photos:
+            await publish_item(
+                db,
+                company_id=company_id,
+                item_id=item_id,
+                body=ItemPublishIn(sale_price=precio),
+            )
+
         item_ids.append(item_id)
 
     # El movimiento de caja va en la MISMA transacción que el ingreso y sus
@@ -327,9 +360,30 @@ async def get_entry(db: AsyncSession, *, company_id: UUID, entry_id: UUID) -> En
 
 
 async def list_entries(
-    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    supplier_id: UUID | None = None,
+    origin_type: str | None = None,
+    payment_status: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    q: str | None = None,
 ) -> CursorPage[EntryOut]:
-    rows = await repository.list_entries(db, company_id=company_id, cursor=cursor, limit=limit)
+    rows = await repository.list_entries(
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        supplier_id=supplier_id,
+        origin_type=origin_type,
+        payment_status=payment_status,
+        from_date=from_date,
+        to_date=to_date,
+        q=q.strip() or None if q else None,
+    )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     out = []
     for row in page.items:
@@ -405,9 +459,24 @@ async def create_exit(
 
 
 async def list_exits(
-    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    exit_type: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> CursorPage[ExitOut]:
-    rows = await repository.list_exits(db, company_id=company_id, cursor=cursor, limit=limit)
+    rows = await repository.list_exits(
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        exit_type=exit_type,
+        from_date=from_date,
+        to_date=to_date,
+    )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     return CursorPage(items=[_row_to_exit(r) for r in page.items], next_cursor=page.next_cursor)
 
@@ -507,9 +576,20 @@ async def publish_item(
             raise AppError("El proveedor del artículo ya no existe; no se puede emitir el código.")
         suffix_letter = supplier._mapping["code_letter"]
     else:
-        raise AppError(
-            "No se puede emitir el código: el artículo no tiene proveedor y no es de remate."
-        )
+        # Mercancía sin proveedor externo: el inventario inicial de la empresa
+        # o un sobrante de conteo (00033). Antes esto era un error duro, y con
+        # los tipos nuevos se volvió un callejón sin salida: la mercancía que
+        # la compraventa ya tenía en la vitrina al arrancar con el sistema
+        # entraba y quedaba atrapada en borrador PARA SIEMPRE, sin código y
+        # sin poder venderse. O sea que el tipo creado justamente para poder
+        # cargarla no servía para nada.
+        #
+        # `P` de "propio", con la misma lógica que la `R` de remate: la letra
+        # dice de dónde salió la pieza. Un proveedor podría llamarse `P`
+        # también —las letras de proveedor no tienen reservas— pero eso no
+        # rompe nada: la unicidad del código la dan el SKU y el número de
+        # lote, y la letra es información de lectura.
+        suffix_letter = "P"
 
     # SKU del producto: se emite al publicar su PRIMER lote, no al crearlo.
     # Así un producto que nació en un borrador descartado no quema un
@@ -634,6 +714,12 @@ async def list_products(
     limit: int,
     q: str | None = None,
     include_unique: bool = False,
+    cat1_id: UUID | None = None,
+    cat2_id: UUID | None = None,
+    cat3_id: UUID | None = None,
+    supplier_id: UUID | None = None,
+    in_stock: bool = False,
+    active: bool | None = None,
 ) -> CursorPage[ProductOut]:
     rows = await repository.list_products(
         db,
@@ -642,6 +728,12 @@ async def list_products(
         limit=limit,
         q=q.strip() or None if q else None,
         include_unique=include_unique,
+        cat1_id=cat1_id,
+        cat2_id=cat2_id,
+        cat3_id=cat3_id,
+        supplier_id=supplier_id,
+        in_stock=in_stock,
+        active=active,
     )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     return CursorPage(items=[_row_to_product(r) for r in page.items], next_cursor=page.next_cursor)

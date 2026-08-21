@@ -312,10 +312,52 @@ async def get_entry(db: AsyncSession, *, company_id: UUID, entry_id: UUID) -> Ro
 
 
 async def list_entries(
-    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    supplier_id: UUID | None = None,
+    origin_type: str | None = None,
+    payment_status: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    q: str | None = None,
 ) -> list[Row[Any]]:
+    """Ingresos, filtrables.
+
+    `payment_status='pending'` es el filtro que faltaba y el que más se usa:
+    responde "¿qué compras tengo por pagar?". El dato estaba en cada fila
+    desde 00020 —y hasta hay un índice parcial para él— pero ninguna consulta
+    lo ofrecía, así que la pregunta no tenía respuesta en la app.
+    """
     query = f"select {_ENTRY_COLUMNS} from public.inventory_entry where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
+    if supplier_id is not None:
+        query += " and supplier_id = :supplier_id"
+        params["supplier_id"] = str(supplier_id)
+    if origin_type:
+        query += " and origin_type = :origin_type"
+        params["origin_type"] = origin_type
+    if payment_status == "pending":
+        # Solo una COMPRA puede estar pendiente de pago: los demás orígenes no
+        # entregan plata a nadie, así que "sin pagar" no significa nada en
+        # ellos y contarlos inflaría la deuda con proveedores.
+        query += " and origin_type = 'purchase' and paid_at is null"
+    elif payment_status == "paid":
+        query += " and paid_at is not null"
+    if from_date is not None:
+        query += " and entry_date >= :from_date"
+        params["from_date"] = from_date
+    if to_date is not None:
+        query += " and entry_date <= :to_date"
+        params["to_date"] = to_date
+    if q:
+        # Número del ingreso o factura del proveedor — las dos formas en que
+        # alguien busca un ingreso concreto con un papel en la mano.
+        query += " and (coalesce(supplier_invoice, '') ilike :q_like or number::text = :q_exact)"
+        params["q_like"] = f"%{q}%"
+        params["q_exact"] = q
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)
@@ -426,10 +468,28 @@ async def get_exit(db: AsyncSession, *, company_id: UUID, exit_id: UUID) -> Row[
 
 
 async def list_exits(
-    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    exit_type: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> list[Row[Any]]:
     query = f"select {_EXIT_COLUMNS} from public.inventory_exit where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
+    if exit_type:
+        query += " and exit_type = :exit_type"
+        params["exit_type"] = exit_type
+    # `inventory_exit` no tiene fecha propia: se registra en el momento, así
+    # que el filtro va sobre `created_at` acotado al día completo.
+    if from_date is not None:
+        query += " and created_at >= :from_date"
+        params["from_date"] = from_date
+    if to_date is not None:
+        query += " and created_at < (:to_date::date + 1)"
+        params["to_date"] = to_date
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)
@@ -646,6 +706,12 @@ async def list_products(
     limit: int,
     q: str | None = None,
     include_unique: bool = False,
+    cat1_id: UUID | None = None,
+    cat2_id: UUID | None = None,
+    cat3_id: UUID | None = None,
+    supplier_id: UUID | None = None,
+    in_stock: bool = False,
+    active: bool | None = None,
 ) -> list[Row[Any]]:
     """Productos con los agregados de sus lotes — alimenta la vista agrupada.
 
@@ -674,6 +740,26 @@ async def list_products(
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if not include_unique:
         query += " and not p.is_unique"
+    # La categoría es del PRODUCTO, así que se filtra por su columna directa y
+    # no por la de sus lotes — un producto sin lotes vivos sigue teniendo
+    # categoría y debe poder encontrarse.
+    for campo, valor in (("cat1_id", cat1_id), ("cat2_id", cat2_id), ("cat3_id", cat3_id)):
+        if valor is not None:
+            query += f" and p.{campo} = :{campo}"
+            params[campo] = str(valor)
+    if supplier_id is not None:
+        # Productos de los que ALGÚN lote se le compró a ese proveedor. Va
+        # como EXISTS y no como join para no multiplicar filas antes del
+        # group by, que falsearía los agregados de lotes.
+        query += (
+            " and exists (select 1 from public.inventory_item li"
+            " where li.product_id = p.id and li.company_id = p.company_id"
+            " and li.supplier_id = :supplier_id)"
+        )
+        params["supplier_id"] = str(supplier_id)
+    if active is not None:
+        query += " and p.active = :active"
+        params["active"] = active
     if q:
         query += (
             " and (coalesce(p.code, '') ilike :code_prefix"
@@ -684,7 +770,12 @@ async def list_products(
     if cursor is not None:
         query += " and p.id > :cursor"
         params["cursor"] = str(cursor)
-    query += " group by p.id order by p.id limit :limit"
+    query += " group by p.id"
+    if in_stock:
+        # Va en HAVING y no en WHERE porque depende del agregado: "tengo algo
+        # para vender" es una propiedad de la suma de sus lotes, no de una fila.
+        query += " having coalesce(sum(i.quantity) filter (where i.status = 'available'), 0) > 0"
+    query += " order by p.id limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
 

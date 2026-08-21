@@ -955,6 +955,9 @@ def test_products_list_groups_lots_and_sums_available(
     """La vista que resuelve el síntoma original: dos compras de lo mismo son
     UN producto con dos lotes, y el vendedor ve el total sin sumar a mano."""
     token = inventory_tenant["token"]
+    # Con precio y foto en la línea, el lote nace publicado — no hay que
+    # volver a entrar a cada uno. El segundo hereda el precio del producto,
+    # así que ni siquiera hace falta repetirlo.
     for costo in ("100000.00", "150000.00"):
         entry = client.post(
             "/api/v1/inventory/entries",
@@ -965,9 +968,10 @@ def test_products_list_groups_lots_and_sums_available(
                 unit_cost=costo,
                 quantity=3,
                 photos=["https://x/f.jpg"],
+                sale_price="300000.00",
             ),
         ).json()
-        _publish(client, token, entry["items"][0]["id"], "300000.00")
+        assert entry["items"][0]["status"] == "available"
 
     productos = _products(client, token, q="cadena")
     assert len(productos) == 1
@@ -1142,3 +1146,296 @@ def test_loss_exit_is_distinct_from_damage(client: TestClient, inventory_tenant:
     )
     assert response.status_code == 201, response.text
     assert response.json()["exit_type"] == "loss"
+
+
+def test_initial_stock_can_actually_be_published(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """La mercancía inicial tiene que poder llegar a la vitrina.
+
+    Bug encontrado justo después de crear el tipo `initial_stock` (00033): al
+    publicar, el código se arma con la letra del proveedor (o `R` si es
+    remate), y un ingreso sin proveedor no tenía ninguna de las dos — así que
+    lanzaba 400 y la mercancía quedaba atrapada en borrador PARA SIEMPRE. El
+    tipo creado para cargar lo que la compraventa ya tenía en la vitrina no
+    servía para ponerlo en la vitrina.
+
+    Ahora cae en `P` de "propio", con la misma lógica que la `R` de remate:
+    la letra dice de dónde salió la pieza.
+    """
+    headers = _headers(inventory_tenant["token"])
+    payload = _entry_payload(inventory_tenant, origin_type="initial_stock")
+    del payload["supplier_id"]
+    del payload["payment_method"]
+    entry = client.post("/api/v1/inventory/entries", headers=headers, json=payload).json()
+    item_id = entry["items"][0]["id"]
+
+    client.patch(
+        f"/api/v1/inventory/items/{item_id}",
+        headers=_headers(inventory_tenant["token"]),
+        json={"photos": ["inventario-inicial.jpg"]},
+    )
+    published = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=_headers(inventory_tenant["token"]),
+        json={"sale_price": "50000.00"},
+    )
+    assert published.status_code == 200, published.text
+    body = published.json()
+    assert body["status"] == "available"
+    assert body["code"].endswith("P"), body["code"]
+
+
+def test_initial_stock_keeps_the_supplier_letter_when_it_is_known(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Si se sabe a quién se le compró originalmente, esa letra manda.
+
+    `P` es el respaldo para cuando no hay proveedor, no un reemplazo: cargar
+    el inventario inicial sabiendo su origen no debería perder esa
+    trazabilidad.
+    """
+    headers = _headers(inventory_tenant["token"])
+    payload = _entry_payload(inventory_tenant, origin_type="initial_stock")
+    del payload["payment_method"]  # no toca caja, pero sí conserva proveedor
+    entry = client.post("/api/v1/inventory/entries", headers=headers, json=payload).json()
+    item_id = entry["items"][0]["id"]
+
+    client.patch(
+        f"/api/v1/inventory/items/{item_id}",
+        headers=_headers(inventory_tenant["token"]),
+        json={"photos": ["x.jpg"]},
+    )
+    published = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=_headers(inventory_tenant["token"]),
+        json={"sale_price": "50000.00"},
+    )
+    assert published.status_code == 200, published.text
+    # 'I' es la letra del proveedor del fixture.
+    assert published.json()["code"].endswith("I"), published.json()["code"]
+
+
+def test_entry_with_price_and_photo_publishes_on_the_spot(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Una compra completa nace vendible, no en borrador.
+
+    Antes TODA compra nacía en borrador sin importar qué tan completa viniera,
+    y había que volver artículo por artículo desde otra pantalla a ponerle
+    precio y foto. El borrador dejaba de significar "le falta algo" y pasaba a
+    ser el estado normal — con el efecto de que un artículo REALMENTE
+    incompleto se volvía invisible: no está en la vitrina y nadie se entera.
+    """
+    headers = _headers(inventory_tenant["token"])
+    payload = _entry_payload(inventory_tenant)
+    payload["lines"][0]["sale_price"] = "150000.00"
+    payload["lines"][0]["photos"] = ["cadena.jpg"]
+
+    entry = client.post("/api/v1/inventory/entries", headers=headers, json=payload)
+    assert entry.status_code == 201, entry.text
+    item = entry.json()["items"][0]
+
+    assert item["status"] == "available", "con precio y foto no hay nada que esperar"
+    assert item["code"] is not None, "publicar emite el código"
+    assert item["sale_price"] == "150000.00"
+
+
+def test_entry_without_price_or_photo_stays_draft(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El borrador vuelve a significar lo que debería: le falta algo.
+
+    No se publica a medias ni se inventa un precio: sin precio o sin foto el
+    lote espera, que es correcto. Lo que cambió es que ahora eso es la
+    EXCEPCIÓN y no el camino obligatorio de toda compra.
+    """
+    headers = _headers(inventory_tenant["token"])
+
+    sin_nada = client.post(
+        "/api/v1/inventory/entries", headers=headers, json=_entry_payload(inventory_tenant)
+    ).json()
+    assert sin_nada["items"][0]["status"] == "draft"
+    assert sin_nada["items"][0]["code"] is None
+
+    solo_foto = _entry_payload(inventory_tenant)
+    solo_foto["lines"][0]["photos"] = ["x.jpg"]
+    solo_foto["lines"][0]["name"] = "Solo foto sin precio"
+    r = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=solo_foto
+    ).json()
+    assert r["items"][0]["status"] == "draft"
+
+    solo_precio = _entry_payload(inventory_tenant)
+    solo_precio["lines"][0]["sale_price"] = "90000.00"
+    solo_precio["lines"][0]["name"] = "Solo precio sin foto"
+    r2 = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=solo_precio
+    ).json()
+    assert r2["items"][0]["status"] == "draft"
+
+
+def test_restock_inherits_the_price_already_set_on_the_product(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Reponer no obliga a redigitar el precio.
+
+    El precio es del PRODUCTO, así que si ya se le puso una vez, el lote nuevo
+    lo hereda y se publica solo con traer la foto. Volver a pedirlo sería
+    pedir un dato que el sistema ya tiene, con el riesgo real de que alguien
+    escriba otro y deje dos lotes del mismo producto a precios distintos en la
+    misma vitrina.
+    """
+    headers = _headers(inventory_tenant["token"])
+    primera = _entry_payload(inventory_tenant)
+    primera["lines"][0]["name"] = "Cadena que se repone"
+    primera["lines"][0]["sale_price"] = "200000.00"
+    primera["lines"][0]["photos"] = ["a.jpg"]
+    r1 = client.post("/api/v1/inventory/entries", headers=headers, json=primera).json()
+    assert r1["items"][0]["status"] == "available"
+
+    # Segunda compra del MISMO producto: sin precio, solo foto.
+    segunda = _entry_payload(inventory_tenant)
+    segunda["lines"][0]["name"] = "Cadena que se repone"
+    segunda["lines"][0]["photos"] = ["b.jpg"]
+    segunda["lines"][0]["unit_cost"] = "70000.00"  # costo distinto, precio igual
+    r2 = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=segunda
+    ).json()
+    item = r2["items"][0]
+
+    assert item["status"] == "available", "hereda el precio del producto y se publica"
+    assert item["sale_price"] == "200000.00"
+    # Y el costo NO se promedia: cada lote conserva el suyo (NIIF).
+    assert item["cost"] == "70000.00"
+
+
+def test_entries_filter_by_pending_payment(client: TestClient, inventory_tenant: dict) -> None:
+    """ "¿Qué compras tengo por pagar?" — la pregunta que no tenía respuesta.
+
+    El dato vivía en cada fila desde 00020 y hasta tenía índice parcial, pero
+    ninguna consulta lo ofrecía: había que abrir los ingresos uno por uno.
+    """
+    token = inventory_tenant["token"]
+    pagada = _entry_payload(inventory_tenant)  # trae payment_method: se paga ya
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=pagada)
+
+    pendiente = _entry_payload(inventory_tenant)
+    del pendiente["payment_method"]
+    creada = client.post(
+        "/api/v1/inventory/entries", headers=_headers(token), json=pendiente
+    ).json()
+
+    por_pagar = client.get(
+        "/api/v1/inventory/entries",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"payment_status": "pending"},
+    ).json()["items"]
+    ids = {e["id"] for e in por_pagar}
+    assert creada["id"] in ids
+    assert all(e["paid_at"] is None and e["origin_type"] == "purchase" for e in por_pagar)
+
+    pagadas = client.get(
+        "/api/v1/inventory/entries",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"payment_status": "paid"},
+    ).json()["items"]
+    assert creada["id"] not in {e["id"] for e in pagadas}
+    assert all(e["paid_at"] is not None for e in pagadas)
+
+
+def test_entries_filter_by_supplier_and_origin(client: TestClient, inventory_tenant: dict) -> None:
+    token = inventory_tenant["token"]
+    inicial = _entry_payload(inventory_tenant, origin_type="initial_stock")
+    del inicial["payment_method"]
+    del inicial["supplier_id"]
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=inicial)
+    client.post(
+        "/api/v1/inventory/entries", headers=_headers(token), json=_entry_payload(inventory_tenant)
+    )
+
+    solo_inicial = client.get(
+        "/api/v1/inventory/entries",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"origin_type": "initial_stock"},
+    ).json()["items"]
+    assert solo_inicial
+    assert all(e["origin_type"] == "initial_stock" for e in solo_inicial)
+
+    del_proveedor = client.get(
+        "/api/v1/inventory/entries",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"supplier_id": str(inventory_tenant["supplier_id"])},
+    ).json()["items"]
+    assert del_proveedor
+    assert all(e["supplier_id"] == str(inventory_tenant["supplier_id"]) for e in del_proveedor)
+
+
+def test_products_filter_by_category_and_stock(client: TestClient, inventory_tenant: dict) -> None:
+    """La pestaña principal del inventario no tenía más filtro que el texto."""
+    token = inventory_tenant["token"]
+    payload = _entry_with(
+        inventory_tenant, "Cadena filtrable", photos=["f.jpg"], sale_price="80000.00"
+    )
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
+    # Un producto sin publicar: existe pero no tiene unidades disponibles.
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_with(inventory_tenant, "Cadena sin publicar"),
+    )
+
+    def _get(**params: object) -> list[dict]:
+        r = client.get(
+            "/api/v1/inventory/products",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+        )
+        assert r.status_code == 200, r.text
+        return list(r.json()["items"])
+
+    por_categoria = _get(cat3_id=str(inventory_tenant["cat3"]))
+    assert por_categoria
+    assert all(p["cat3_id"] == str(inventory_tenant["cat3"]) for p in por_categoria)
+
+    # Categoría que no existe en la rama: no debe traer nada.
+    assert _get(cat1_id=str(inventory_tenant["cat3"])) == []
+
+    con_stock = _get(in_stock=True)
+    assert all(p["available_quantity"] > 0 for p in con_stock)
+    assert "Cadena sin publicar" not in {p["name"] for p in con_stock}
+
+    por_proveedor = _get(supplier_id=str(inventory_tenant["supplier_id"]))
+    assert por_proveedor
+
+
+def test_exits_filter_by_type(client: TestClient, inventory_tenant: dict) -> None:
+    token = inventory_tenant["token"]
+    entry = client.post(
+        "/api/v1/inventory/entries", headers=_headers(token), json=_entry_payload(inventory_tenant)
+    ).json()
+    item_id = entry["items"][0]["id"]
+    client.post(
+        "/api/v1/inventory/exits",
+        headers=_headers(token),
+        json={
+            "exit_type": "loss",
+            "reason": "Faltante en conteo",
+            "lines": [{"item_id": item_id, "quantity": 1}],
+        },
+    )
+
+    perdidas = client.get(
+        "/api/v1/inventory/exits",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"exit_type": "loss"},
+    ).json()["items"]
+    assert perdidas
+    assert all(e["exit_type"] == "loss" for e in perdidas)
+
+    danos = client.get(
+        "/api/v1/inventory/exits",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"exit_type": "damage"},
+    ).json()["items"]
+    assert all(e["exit_type"] == "damage" for e in danos)
