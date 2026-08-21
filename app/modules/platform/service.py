@@ -89,6 +89,7 @@ async def create_company_defaults(
         db, company_id=company_id, plan_id=plan_id, expires_at=subscription_expires_at
     )
     await repository.insert_cash_register(db, company_id=company_id)
+    await repository.insert_default_accounts(db, company_id=company_id)
 
     all_codes = {row._mapping["code"] for row in await identity_repo.list_permissions(db)}
     seed_matrix = build_seed_role_permissions(all_codes)

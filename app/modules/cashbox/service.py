@@ -299,9 +299,15 @@ async def create_expense(
         receipt_url=body.receipt_url,
         registered_by=registered_by,
     )
+    resolved = await integration.resolve_account_for_movement(
+        db,
+        company_id=company_id,
+        payment_method=body.payment_method,
+        account_id=body.account_id,
+    )
     await integration.record_movement(
         db,
-        session_id=session_id,
+        session_id=resolved.session_id,
         company_id=company_id,
         module=body.module,
         direction="out",
@@ -311,6 +317,7 @@ async def create_expense(
         reference_type="expense",
         reference_id=expense_id,
         created_by=registered_by,
+        account_id=resolved.account_id,
     )
     await identity_repo.insert_audit_log(
         db,

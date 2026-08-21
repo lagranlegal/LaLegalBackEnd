@@ -32,6 +32,9 @@ class ContractItemOut(BaseModel):
 
 
 class ContractCreateIn(BaseModel):
+    #: Cuenta de la que sale el desembolso. Si se omite, la predeterminada del
+    #: medio de pago.
+    account_id: UUID | None = None
     customer_id: UUID
     principal: Money
     interest_rate_pct: Decimal = Field(gt=0, le=100)
@@ -114,6 +117,9 @@ class PaymentQuoteOut(BaseModel):
 
 
 class PaymentCreateIn(BaseModel):
+    #: Cuenta donde entra el abono. Si se omite, la predeterminada del medio
+    #: de pago.
+    account_id: UUID | None = None
     months_covered: int = Field(ge=0)
     capital_amount: Money | None = None
     payment_method: PaymentMethod

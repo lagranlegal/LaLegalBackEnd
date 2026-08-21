@@ -6,7 +6,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
-from app.core.errors import AppError, CashSessionNotOpenError, ConflictError, NotFoundError
+from app.core.errors import AppError, ConflictError, NotFoundError
 from app.modules.cashbox import integration as cashbox_integration
 from app.modules.catalogs import repository as catalogs_repo
 from app.modules.identity import repository as identity_repo
@@ -189,14 +189,19 @@ async def create_entry(
     # facturas de días anteriores o de noche con la caja cerrada, que era
     # imposible antes. El pago se registra después con `pay_entry`.
     pay_now = is_purchase and body.payment_method is not None
-    session = None
+    resolved = None
     if pay_now:
-        session = await cashbox_integration.get_open_session(db, company_id=company_id)
-        if session is None:
-            raise CashSessionNotOpenError(
-                "No hay una sesión de caja abierta para pagar la compra. "
-                "Puedes registrarla como pendiente de pago y saldarla después."
-            )
+        # `pay_now` ya garantiza que hay medio de pago; el assert se lo dice al
+        # verificador de tipos, que no puede deducirlo de la variable booleana.
+        assert body.payment_method is not None
+        # La sesión la exige el tipo de cuenta: pagar en efectivo necesita el
+        # cajón abierto, pero pagar por transferencia no.
+        resolved = await cashbox_integration.resolve_account_for_movement(
+            db,
+            company_id=company_id,
+            payment_method=body.payment_method,
+            account_id=body.account_id,
+        )
 
     entry_id = uuid4()
     number = await repository.next_counter(db, company_id=company_id, prefix="INV_ENTRY")
@@ -279,10 +284,10 @@ async def create_entry(
     # Concepto `purchase`, que el enum `cash_concept` ya contemplaba desde
     # 00007 y hasta ahora nunca se emitía — ese era el hueco que hacía
     # descuadrar el cierre todos los días que se compraba mercancía.
-    if session is not None and body.payment_method is not None:
+    if pay_now and resolved is not None and body.payment_method is not None:
         await cashbox_integration.record_movement(
             db,
-            session_id=session._mapping["id"],
+            session_id=resolved.session_id,
             company_id=company_id,
             module="store",
             direction="out",
@@ -292,6 +297,7 @@ async def create_entry(
             reference_type="inventory_entry",
             reference_id=entry_id,
             created_by=registered_by,
+            account_id=resolved.account_id,
         )
 
     return await get_entry(db, company_id=company_id, entry_id=entry_id)
@@ -556,16 +562,19 @@ async def pay_entry(
     if m["paid_at"] is not None:
         raise ConflictError("Esta compra ya fue pagada.")
 
-    session = await cashbox_integration.get_open_session(db, company_id=company_id)
-    if session is None:
-        raise CashSessionNotOpenError("No hay una sesión de caja abierta para registrar el pago.")
+    resolved = await cashbox_integration.resolve_account_for_movement(
+        db,
+        company_id=company_id,
+        payment_method=body.payment_method,
+        account_id=body.account_id,
+    )
 
     await repository.mark_entry_paid(
         db, company_id=company_id, entry_id=entry_id, payment_method=body.payment_method
     )
     await cashbox_integration.record_movement(
         db,
-        session_id=session._mapping["id"],
+        session_id=resolved.session_id,
         company_id=company_id,
         module="store",
         direction="out",
@@ -575,6 +584,7 @@ async def pay_entry(
         reference_type="inventory_entry",
         reference_id=entry_id,
         created_by=registered_by,
+        account_id=resolved.account_id,
     )
     return await get_entry(db, company_id=company_id, entry_id=entry_id)
 

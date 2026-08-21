@@ -10,7 +10,6 @@ from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
 from app.core.errors import (
     AppError,
-    CashSessionNotOpenError,
     ConflictError,
     ImportCapitalExceedsPrincipalError,
     ImportDatesMisalignedError,
@@ -164,9 +163,14 @@ async def create_contract(
                 "y ventana de mora (categoría)."
             )
 
-    session = await cashbox_integration.get_open_session(db, company_id=company_id)
-    if session is None:
-        raise CashSessionNotOpenError("No hay una sesión de caja abierta para desembolsar.")
+    # El desembolso sale por la cuenta elegida; la sesión la exige el tipo de
+    # cuenta (efectivo sí, banco no), no la operación.
+    resolved = await cashbox_integration.resolve_account_for_movement(
+        db,
+        company_id=company_id,
+        payment_method=body.payment_method,
+        account_id=body.account_id,
+    )
 
     start_date = await platform_integration.get_company_today(db, company_id=company_id)
     due_date = rules.add_months(start_date, term_months)
@@ -217,7 +221,7 @@ async def create_contract(
 
     await cashbox_integration.record_movement(
         db,
-        session_id=session._mapping["id"],
+        session_id=resolved.session_id,
         company_id=company_id,
         module="pawn",
         direction="out",
@@ -227,6 +231,7 @@ async def create_contract(
         reference_type="contract",
         reference_id=contract_id,
         created_by=created_by,
+        account_id=resolved.account_id,
     )
     await identity_repo.insert_audit_log(
         db,
@@ -552,9 +557,12 @@ async def create_payment(
             today=today,
         )
 
-    session = await cashbox_integration.get_open_session(db, company_id=company_id)
-    if session is None:
-        raise CashSessionNotOpenError("No hay una sesión de caja abierta para cobrar.")
+    resolved = await cashbox_integration.resolve_account_for_movement(
+        db,
+        company_id=company_id,
+        payment_method=body.payment_method,
+        account_id=body.account_id,
+    )
 
     payment_id = uuid4()
     receipt_number = await repository.next_receipt_number(db, company_id=company_id)
@@ -595,7 +603,7 @@ async def create_payment(
     if net_interest_collected > 0:
         await cashbox_integration.record_movement(
             db,
-            session_id=session._mapping["id"],
+            session_id=resolved.session_id,
             company_id=company_id,
             module="pawn",
             direction="in",
@@ -609,7 +617,7 @@ async def create_payment(
     if capital_amount > 0:
         await cashbox_integration.record_movement(
             db,
-            session_id=session._mapping["id"],
+            session_id=resolved.session_id,
             company_id=company_id,
             module="pawn",
             direction="in",

@@ -109,7 +109,28 @@ async def _default_account_for(
         {"cid": str(company_id), "type": tipo},
     )
     row = result.first()
-    return UUID(str(row[0])) if row else None
+    if row is not None:
+        return UUID(str(row[0]))
+
+    # Red de seguridad: una empresa sin la cuenta predeterminada de ese tipo
+    # es un hueco del alta (`platform.create_company_defaults` las crea), pero
+    # fallar acá dejaría caer una operación de dinero por un problema de
+    # configuración. Se crea al vuelo y la operación sigue: perder el registro
+    # del movimiento sería peor que crear una cuenta implícita.
+    nombre = "Caja principal" if tipo == "cash" else "Transferencias"
+    result = await db.execute(
+        text(
+            """
+            insert into public.account (company_id, name, type, is_default)
+            values (:cid, :name, :type, true)
+            on conflict (company_id, name) do update set name = excluded.name
+            returning id
+            """
+        ),
+        {"cid": str(company_id), "name": nombre, "type": tipo},
+    )
+    creada = result.first()
+    return UUID(str(creada[0])) if creada else None
 
 
 @dataclass(frozen=True)

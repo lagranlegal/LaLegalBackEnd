@@ -260,3 +260,26 @@ async def list_subscription_events(
     query += " order by created_at desc, id desc limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
+
+
+async def insert_default_accounts(db: AsyncSession, *, company_id: UUID) -> None:
+    """Cuentas iniciales de una empresa nueva.
+
+    Van acá junto a los roles semilla y la caja principal porque son parte del
+    mismo alta: una empresa sin cuenta de efectivo no puede registrar un solo
+    cobro. La migración 00024 las creó para las empresas que ya existían; esto
+    cubre a las que nazcan de aquí en adelante.
+    """
+    await db.execute(
+        text(
+            """
+            insert into public.account (company_id, name, type, is_default)
+            values
+              (:cid, 'Caja principal', 'cash', true),
+              (:cid, 'Transferencias', 'bank', true),
+              (:cid, 'Otros medios', 'bank', false)
+            on conflict (company_id, name) do nothing
+            """
+        ),
+        {"cid": str(company_id)},
+    )

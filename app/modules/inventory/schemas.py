@@ -84,6 +84,8 @@ class EntryCreateIn(BaseModel):
     #: Cuándo ENTRÓ la mercancía (no cuándo se digitó). Por defecto hoy; puede
     #: ser pasada, nunca futura.
     entry_date: date | None = None
+    #: Cuenta de la que sale el pago, cuando la compra se paga en el acto.
+    account_id: UUID | None = None
     lines: list[EntryLineIn] = Field(min_length=1)
 
 
@@ -106,6 +108,8 @@ class EntryOut(BaseModel):
 
 class EntryPayIn(BaseModel):
     payment_method: PaymentMethod
+    #: Cuenta de la que sale el pago. Si se omite, la predeterminada del medio.
+    account_id: UUID | None = None
 
 
 class ExitLineIn(BaseModel):

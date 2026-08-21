@@ -83,6 +83,9 @@ async def _cleanup_company(company_id: uuid.UUID) -> None:
             text("delete from public.role where company_id = :id"), {"id": str(company_id)}
         )
         await session.execute(
+            text("delete from public.account where company_id = :id"), {"id": str(company_id)}
+        )
+        await session.execute(
             text("delete from public.cash_register where company_id = :id"),
             {"id": str(company_id)},
         )
@@ -184,6 +187,25 @@ async def test_create_company_defaults_creates_seed_roles_and_cash_register(
             )
         ).scalar_one()
         assert register_count == 1
+
+        # Una empresa sin cuentas no puede registrar un solo cobro: desde
+        # 00027 `cash_movement.account_id` es NOT NULL. Se verifica acá junto
+        # al resto del alta porque el hueco original fue exactamente este —
+        # el alta creaba la caja pero no las cuentas.
+        accounts = (
+            await session.execute(
+                text(
+                    "select name, type, is_default from public.account "
+                    "where company_id = :id order by name"
+                ),
+                {"id": str(company_id)},
+            )
+        ).all()
+        assert [(a[0], a[1], a[2]) for a in accounts] == [
+            ("Caja principal", "cash", True),
+            ("Otros medios", "bank", False),
+            ("Transferencias", "bank", True),
+        ]
 
         invited_user = (
             await session.execute(

@@ -67,6 +67,9 @@ class ExpenseCategoryOut(BaseModel):
 
 
 class ExpenseCreateIn(BaseModel):
+    #: Cuenta de la que sale el gasto. Si se omite, la predeterminada del
+    #: medio de pago.
+    account_id: UUID | None = None
     category_id: UUID
     description: str
     amount: Money
