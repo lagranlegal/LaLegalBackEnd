@@ -229,16 +229,18 @@ El **saldo se deriva** de `cash_movement`, nunca se guarda, y se calcula distint
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `GET` | `/api/v1/accounts` | `cashbox.view` | Lista con saldo. `?include_inactive=true` para ver también las desactivadas. |
-| `POST` | `/api/v1/accounts` | `company.configure` | Body `{name, type, reference?, is_default?, opening_balance?}`. Marcar `is_default` desmarca la anterior de ese tipo (hay un índice único parcial). |
-| `PATCH` | `/api/v1/accounts/{id}` | `company.configure` | Renombrar, cambiar `reference`, `is_default` o `active`. El **tipo no se edita**: cambiarlo reinterpretaría todos los movimientos históricos de la cuenta. |
-| `POST` | `/api/v1/accounts/{id}/settle` | `cashbox.view` + `Idempotency-Key` | Liquidar un convenio. Body `{to_account_id, amount_settled, amount_received, notes?}`. Devuelve `{settled, received, commission, commission_pct, new_pending_balance}`. Genera dos movimientos (sale de la `settlement`, entra a la destino). La comisión se **deriva** (`amount_settled − amount_received`) y **no genera movimiento propio**: no es plata que salió, es plata que nunca llegó. |
+| `GET` | `/api/v1/accounts` | `accounts.view` | Lista con saldo. `?include_inactive=true` para ver también las desactivadas. |
+| `POST` | `/api/v1/accounts` | `accounts.manage` | Body `{name, type, reference?, is_default?, opening_balance?}`. Marcar `is_default` desmarca la anterior de ese tipo (hay un índice único parcial). |
+| `PATCH` | `/api/v1/accounts/{id}` | `accounts.manage` | Renombrar, cambiar `reference`, `is_default` o `active`. El **tipo no se edita**: cambiarlo reinterpretaría todos los movimientos históricos de la cuenta. |
+| `POST` | `/api/v1/accounts/{id}/settle` | `accounts.settle` + `Idempotency-Key` | Liquidar un convenio. Body `{to_account_id, amount_settled, amount_received, notes?}`. Devuelve `{settled, received, commission, commission_pct, new_pending_balance}`. Genera dos movimientos (sale de la `settlement`, entra a la destino). La comisión se **deriva** (`amount_settled − amount_received`) y **no genera movimiento propio**: no es plata que salió, es plata que nunca llegó. |
 
 **Cuál cuenta se usa.** Todas las operaciones de dinero (`POST /sales`, `/contracts`, `/contracts/{id}/payments`, `/cashbox/expenses`, `/inventory/entries`, `/inventory/entries/{id}/pay`) aceptan `account_id` opcional. Si no viene, se usa la predeterminada del tipo que implica el `payment_method` (`cash` → la `cash` por defecto; `transfer`/`other` → la `bank` por defecto).
 
 **Quién exige sesión de caja.** El **tipo de cuenta**, no la operación: solo un movimiento sobre una cuenta `cash` necesita el cajón abierto (`409 CASH_SESSION_NOT_OPEN`). Una venta por Sistecrédito o una transferencia no pasa por el cajón y no se bloquea si nadie abrió caja.
 
 **Alta de empresa.** Cada empresa nueva nace con `Caja principal` (`cash`, default), `Transferencias` (`bank`, default) y `Otros medios` (`bank`).
+
+**Permisos propios, no prestados** (migración 00029). El módulo nació reusando `cashbox.view` y `company.configure`, y eso tenía dos defectos: no se podía dar acceso a cuentas sin dar toda la caja, ni administrarlas sin dar también logo, firma y documentos — o sea que el módulo **no era parametrizable** desde la matriz de roles. Y peor: `settle` **mueve plata** pero exigía `cashbox.view`, un permiso de solo lectura, así que cualquiera que pudiera mirar la caja podía liquidar Sistecrédito. Ahora son tres (`accounts.view` / `accounts.manage` / `accounts.settle`, este último `is_special`), y la separación sigue el mismo criterio del resto del catálogo: ver, administrar, y la acción sensible aparte.
 
 
 ## 14. Esquema completo y tipos para el front

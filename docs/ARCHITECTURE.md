@@ -232,4 +232,21 @@ De ahí el catálogo de cuentas (`public.account`, tres tipos):
 
 **Alta de empresa.** `platform.create_company_defaults` crea las tres cuentas iniciales junto a los roles semilla y la caja principal — son parte del mismo alta. Que no lo hiciera fue un bug real, invisible mientras `payment_method` fue la fuente de verdad y destapado recién al derivar el saldo por cuenta: aparecieron cientos de movimientos sin cuenta, todos de empresas nacidas después del backfill de 00024.
 
-Migraciones: **00024** (catálogo + `account_id` en las cinco tablas + backfill), **00025** (`opening_balance`), **00026** (`session_id` opcional), **00027** (`account_id` NOT NULL, con auto-reparación previa).
+**Permisos propios** (`accounts.view` / `accounts.manage` / `accounts.settle`). El módulo se construyó reusando `cashbox.view` y `company.configure`, lo que lo dejaba **fuera de la matriz de roles**: un admin no podía otorgar las cuentas sin otorgar además toda la caja o toda la configuración de empresa. Un módulo que no aparece en la matriz es invisible para quien configura los roles. Y `settle` —que genera dos movimientos y baja el saldo por cobrar— colgaba de un permiso de **lectura**: quien pudiera mirar la caja podía liquidar Sistecrédito. La migración 00029 los otorga a quien ya tenía los equivalentes para que nadie pierda acceso, con una excepción deliberada: `accounts.settle` va a quien tiene `cashbox.open_close`, no a quien tiene `cashbox.view` — conservar ese mapeo sería conservar el agujero.
+
+
+### Regla para módulos nuevos: permisos propios desde el día uno
+
+Lo de arriba no fue un descuido aislado, así que queda como regla del proyecto: **un módulo nuevo trae sus propios permisos**, aunque al principio parezcan redundantes con los de otro.
+
+Reusar el permiso de otro módulo se siente económico y sale caro por tres lados:
+
+1. **El módulo desaparece de la matriz de roles.** Quien configura los permisos no puede otorgarlo ni quitarlo a conciencia — ni siquiera sabe que existe.
+2. **Acopla cosas que no tienen por qué ir juntas.** Dar acceso a cuentas obligaba a dar toda la caja.
+3. **Se cuelan acciones sensibles detrás de permisos de lectura**, que es exactamente cómo `settle` terminó al alcance de cualquiera que pudiera mirar la caja.
+
+La separación mínima es `<modulo>.view` / `<modulo>.manage`, más un permiso aparte con `is_special = true` por cada acción que mueva plata, cambie estados irreversibles o exija auditoría — el mismo patrón de `cashbox.reopen`, `contracts.auction` y `sales.void`.
+
+Al agregarlos a un módulo que ya está en producción, la migración **debe otorgarlos a los roles que ya tenían los equivalentes**: si solo se insertan los permisos nuevos, todos los roles existentes pierden el acceso de un día para otro sin que nadie haya tocado una regla de negocio. La excepción es cuando el mapeo viejo *era* el error — ahí se documenta el endurecimiento explícitamente, como hizo 00029 con `settle`.
+
+Migraciones: **00024** (catálogo + `account_id` en las cinco tablas + backfill), **00025** (`opening_balance`), **00026** (`session_id` opcional), **00027** (`account_id` NOT NULL, con auto-reparación previa), **00029** (permisos propios).
