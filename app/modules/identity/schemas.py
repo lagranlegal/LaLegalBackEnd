@@ -17,6 +17,21 @@ class InviteUserIn(BaseModel):
     email: EmailStr
     full_name: str
     role_id: UUID
+    #: `False` entrega un enlace en la respuesta en vez de mandar el correo.
+    #: Sirve cuando el correo no llega, cae en spam, o la persona está al lado
+    #: del admin — y además no consume la cuota de envíos de Supabase, que es
+    #: baja a propósito en el servicio incluido.
+    send_email: bool = True
+
+
+class InvitedUserOut(UserOut):
+    """`UserOut` + el enlace, presente solo cuando se pidió sin correo.
+
+    Es una credencial de un solo uso: quien la tenga se convierte en ese
+    usuario. Solo la recibe quien ya tiene `identity.manage_users`.
+    """
+
+    invite_link: str | None = None
 
 
 class UpdateUserRoleIn(BaseModel):

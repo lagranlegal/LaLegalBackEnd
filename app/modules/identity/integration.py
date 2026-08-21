@@ -20,8 +20,10 @@ async def invite_user(
     email: str,
     full_name: str,
     invited_by: UUID | None = None,
-) -> UUID:
-    user_id = await auth_admin.invite_user(email, full_name)
+    send_email: bool = True,
+) -> tuple[UUID, str | None]:
+    invitation = await auth_admin.invite_user(email, full_name, send_email=send_email)
+    user_id = invitation.user_id
     await repository.insert_app_user(
         db,
         user_id=user_id,
@@ -38,6 +40,13 @@ async def invite_user(
         action="invite_user",
         entity_type="app_user",
         entity_id=user_id,
-        after={"email": email, "role_id": str(role_id)},
+        # Queda registrado CÓMO se entregó: un enlace copiado a mano no deja
+        # rastro en ningún servidor de correo, así que el audit_log es el
+        # único lugar donde consta que esa invitación existió y quién la hizo.
+        after={
+            "email": email,
+            "role_id": str(role_id),
+            "delivery": "email" if send_email else "link",
+        },
     )
-    return user_id
+    return user_id, invitation.link

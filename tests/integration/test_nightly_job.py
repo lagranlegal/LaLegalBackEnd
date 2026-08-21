@@ -252,8 +252,12 @@ def super_admin_token(monkeypatch: pytest.MonkeyPatch, rsa_keypair: tuple[str, o
 
 @pytest_asyncio.fixture
 async def mocked_invite(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    async def _fake_invite(email: str, full_name: str) -> uuid.UUID:
-        return uuid4()
+    async def _fake_invite(
+        email: str, full_name: str, *, send_email: bool = True
+    ) -> identity_auth_admin.Invitation:
+        return identity_auth_admin.Invitation(
+            user_id=uuid4(), link=None if send_email else "https://supabase.test/verify?token=fake"
+        )
 
     monkeypatch.setattr(identity_auth_admin, "invite_user", _fake_invite)
     return []

@@ -3,7 +3,6 @@ salvaguardas de último admin, activación automática invited->active en el
 primer login. Requiere Postgres real (se salta si no hay).
 """
 
-import uuid
 from collections.abc import AsyncGenerator
 from uuid import uuid4
 
@@ -36,9 +35,14 @@ async def _require_postgres() -> None:
 async def mocked_invite(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     invited_emails: list[str] = []
 
-    async def _fake_invite(email: str, full_name: str) -> uuid.UUID:
+    async def _fake_invite(
+        email: str, full_name: str, *, send_email: bool = True
+    ) -> identity_auth_admin.Invitation:
         invited_emails.append(email)
-        return uuid4()
+        # `link` solo cuando NO se manda correo, igual que el real.
+        return identity_auth_admin.Invitation(
+            user_id=uuid4(), link=None if send_email else "https://supabase.test/verify?token=fake"
+        )
 
     monkeypatch.setattr(identity_auth_admin, "invite_user", _fake_invite)
     return invited_emails
@@ -170,6 +174,54 @@ def test_invite_user(client: TestClient, tenant: dict, mocked_invite: list[str])
     assert body["status"] == "invited"
     assert body["role_id"] == str(tenant["basic_role_id"])
     assert mocked_invite == ["nuevo@example.com"]
+
+
+def test_invite_por_enlace_no_manda_correo_y_devuelve_el_link(
+    client: TestClient, tenant: dict, mocked_invite: list[str]
+) -> None:
+    """`send_email=false` crea al usuario igual, pero devuelve el enlace.
+
+    Es la salida cuando el correo no llega, cae en spam, o la persona está
+    parada al lado del admin — que en una compraventa es lo normal. No
+    consume la cuota de envíos de Supabase, que es baja a propósito en el
+    servicio incluido.
+    """
+    response = client.post(
+        "/api/v1/identity/invitations",
+        headers=_headers(tenant["admin_token"]),
+        json={
+            "email": "por-enlace@example.com",
+            "full_name": "Por Enlace",
+            "role_id": str(tenant["basic_role_id"]),
+            "send_email": False,
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # El usuario queda igual que con una invitación por correo…
+    assert body["status"] == "invited"
+    assert body["role_id"] == str(tenant["basic_role_id"])
+    # …y además vuelve el enlace para entregarlo a mano.
+    assert body["invite_link"] == "https://supabase.test/verify?token=fake"
+
+
+def test_invite_por_correo_no_devuelve_enlace(
+    client: TestClient, tenant: dict, mocked_invite: list[str]
+) -> None:
+    """El enlace es una credencial de un solo uso: quien lo tenga se
+    convierte en ese usuario. Si el correo ya salió, no hay razón para que
+    ande dando vueltas también en una respuesta HTTP."""
+    response = client.post(
+        "/api/v1/identity/invitations",
+        headers=_headers(tenant["admin_token"]),
+        json={
+            "email": "por-correo@example.com",
+            "full_name": "Por Correo",
+            "role_id": str(tenant["basic_role_id"]),
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["invite_link"] is None
 
 
 def test_list_users_includes_admin(client: TestClient, tenant: dict) -> None:

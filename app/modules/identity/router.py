@@ -8,6 +8,7 @@ from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_current_user, get_tenant_db, require_permission
 from app.modules.identity import service
 from app.modules.identity.schemas import (
+    InvitedUserOut,
     InviteUserIn,
     MeOut,
     PermissionOut,
@@ -53,12 +54,12 @@ async def list_users(
     )
 
 
-@router.post("/invitations", response_model=UserOut, status_code=201)
+@router.post("/invitations", response_model=InvitedUserOut, status_code=201)
 async def invite_user(
     body: InviteUserIn,
     user: Annotated[CurrentUser, Depends(_manage_users)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
-) -> UserOut:
+) -> InvitedUserOut:
     return await service.invite_user(
         db,
         company_id=user.company_id,
@@ -66,6 +67,7 @@ async def invite_user(
         email=body.email,
         full_name=body.full_name,
         invited_by=user.id,
+        send_email=body.send_email,
     )
 
 

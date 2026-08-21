@@ -10,6 +10,7 @@ from app.core.security import CurrentUser
 from app.core.security import get_role_permissions as get_cached_role_permissions
 from app.modules.identity import integration, repository
 from app.modules.identity.schemas import (
+    InvitedUserOut,
     MeCompanyOut,
     MeDocumentsOut,
     MeOut,
@@ -65,22 +66,24 @@ async def invite_user(
     email: str,
     full_name: str,
     invited_by: UUID,
-) -> UserOut:
+    send_email: bool = True,
+) -> InvitedUserOut:
     role = await repository.get_role(db, company_id=company_id, role_id=role_id)
     if role is None:
         raise NotFoundError("El rol indicado no existe en esta empresa.")
 
-    user_id = await integration.invite_user(
+    user_id, link = await integration.invite_user(
         db,
         company_id=company_id,
         role_id=role_id,
         email=email,
         full_name=full_name,
         invited_by=invited_by,
+        send_email=send_email,
     )
     row = await repository.get_user(db, company_id=company_id, user_id=user_id)
     assert row is not None
-    return _row_to_user(row)
+    return InvitedUserOut(**_row_to_user(row).model_dump(), invite_link=link)
 
 
 async def _role_has_admin_permission(db: AsyncSession, role_id: UUID) -> bool:
