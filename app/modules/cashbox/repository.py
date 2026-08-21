@@ -52,6 +52,27 @@ async def get_open_session_for_register(db: AsyncSession, *, register_id: UUID) 
     return result.first()
 
 
+async def get_session_for_date(
+    db: AsyncSession, *, company_id: UUID, register_id: UUID, session_date: date
+) -> Row[Any] | None:
+    """La sesión de una fecha, esté abierta o cerrada.
+
+    El ciclo es de UNA sesión por día y por caja, así que devuelve como mucho
+    una. Existe para que el front pueda preguntar "¿qué pasó con la caja de
+    hoy?" sin tener que rebuscar en el histórico de cierres — que es lo que
+    hacía antes y lo que obligaba a darle permiso de histórico a un cajero
+    solo para saber si ya había cerrado su propio turno.
+    """
+    result = await db.execute(
+        text(
+            "select id from public.cash_session "
+            "where company_id = :cid and register_id = :rid and session_date = :d"
+        ),
+        {"cid": str(company_id), "rid": str(register_id), "d": session_date},
+    )
+    return result.first()
+
+
 async def insert_session(
     db: AsyncSession,
     *,

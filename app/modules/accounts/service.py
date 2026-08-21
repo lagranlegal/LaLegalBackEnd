@@ -5,7 +5,8 @@ from uuid import UUID, uuid4
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import AppError, ConflictError, NotFoundError
+from app.common.pagination import CursorPage, make_page
+from app.core.errors import AppError, CashSessionNotOpenError, ConflictError, NotFoundError
 from app.modules.accounts import repository
 from app.modules.accounts.schemas import (
     AccountCreateIn,
@@ -13,9 +14,12 @@ from app.modules.accounts.schemas import (
     AccountUpdateIn,
     SettlementIn,
     SettlementOut,
+    TransferIn,
+    TransferOut,
 )
 from app.modules.cashbox import integration as cashbox_integration
 from app.modules.identity import repository as identity_repo
+from app.modules.platform import integration as platform_integration
 
 
 def _row_to_account(row: Row[Any], balance: Decimal | None = None) -> AccountOut:
@@ -216,3 +220,224 @@ async def settle_account(
         ),
         new_pending_balance=pendiente - body.amount_settled,
     )
+
+
+def _row_to_transfer(row: Row[Any], *, from_balance: Decimal, to_balance: Decimal) -> TransferOut:
+    m = row._mapping
+    return TransferOut(
+        id=m["id"],
+        number=m["number"],
+        from_account_id=m["from_account_id"],
+        from_account_name=m["from_account_name"],
+        to_account_id=m["to_account_id"],
+        to_account_name=m["to_account_name"],
+        amount=m["amount"],
+        transfer_date=m["transfer_date"],
+        notes=m["notes"],
+        created_at=m["created_at"],
+        from_balance=from_balance,
+        to_balance=to_balance,
+    )
+
+
+async def create_transfer(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: TransferIn,
+    actor_id: UUID,
+    idempotency_key: str,
+) -> TransferOut:
+    """Mueve plata entre dos cuentas propias. El caso típico: consignar en el
+    banco el efectivo del día.
+
+    NO ES INGRESO NI EGRESO. Es la misma plata en otro bolsillo: no toca el
+    estado de resultados, solo mueve saldos. Es el mismo principio que este
+    proyecto ya pagó caro en los contratos — "el interés es ingreso; el
+    capital recuperado no" — aplicado al efectivo. Registrar una consignación
+    como gasto falsearía la utilidad del período por el monto consignado, que
+    en una compraventa es prácticamente toda la caja del día.
+
+    Genera DOS movimientos con conceptos propios (`transfer_out` /
+    `transfer_in`) y no con `adjustment`: un ajuste significa "el sistema no
+    cuadra con la realidad"; un traslado sí cuadra. Además los conceptos
+    propios permiten EXCLUIRLOS del cálculo de ingresos y gastos sin
+    ambigüedad — contarlos inventaría movimiento de negocio donde solo hubo
+    un cambio de bolsillo.
+    """
+    existing = await repository.find_transfer_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if existing is not None:
+        return await get_transfer(db, company_id=company_id, transfer_id=existing._mapping["id"])
+
+    if body.from_account_id == body.to_account_id:
+        raise AppError(
+            "El origen y el destino no pueden ser la misma cuenta: eso no mueve "
+            "nada y dejaría dos movimientos que se anulan entre sí."
+        )
+
+    origen = await repository.get_account(
+        db, company_id=company_id, account_id=body.from_account_id
+    )
+    if origen is None:
+        raise NotFoundError("La cuenta de origen no existe en esta empresa.")
+    destino = await repository.get_account(db, company_id=company_id, account_id=body.to_account_id)
+    if destino is None:
+        raise NotFoundError("La cuenta destino no existe en esta empresa.")
+
+    # Una cuenta por cobrar no puede ser origen: es plata que todavía te
+    # deben, no un saldo disponible. Sacarla de ahí sería inventar que ya
+    # llegó. Su única salida legítima es la LIQUIDACIÓN, que además registra
+    # cuánto llegó de menos (la comisión) — información que un traslado no
+    # tiene dónde poner, porque en un traslado llega exactamente lo que salió.
+    if origen._mapping["type"] == "settlement":
+        raise AppError(
+            "Una cuenta por cobrar no puede ser el origen de un traslado. Para "
+            "registrar lo que el convenio consignó usa la liquidación, que "
+            "además calcula la comisión.",
+            details={"from_account_id": str(body.from_account_id)},
+            code="ACCOUNT_CANNOT_FUND_PAYMENT",
+        )
+    if destino._mapping["type"] == "settlement":
+        raise AppError(
+            "No se puede trasladar plata HACIA una cuenta por cobrar: esa cuenta "
+            "refleja lo que un convenio te debe, y eso lo genera vender, no "
+            "consignar.",
+            details={"to_account_id": str(body.to_account_id)},
+        )
+
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    transfer_date = body.transfer_date or today
+    if transfer_date > today:
+        raise AppError(
+            "`transfer_date` no puede ser una fecha futura.",
+            details={"transfer_date": str(transfer_date), "today": str(today)},
+        )
+
+    saldo_origen = await repository.account_balance(
+        db, company_id=company_id, account_id=body.from_account_id
+    )
+    if body.amount > saldo_origen:
+        raise AppError(
+            "No se puede trasladar más de lo que hay en la cuenta de origen.",
+            details={"disponible": str(saldo_origen), "amount": str(body.amount)},
+        )
+
+    # Sacar efectivo del cajón exige el cajón abierto, igual que cualquier
+    # otro movimiento de efectivo: sin sesión el arqueo no podría cuadrar. Y
+    # es deliberado que el traslado vaya ANTES del cierre — una sesión cerrada
+    # es inmutable, así que meterle el movimiento después invalidaría un acta
+    # ya cuadrada e impresa.
+    session = await cashbox_integration.get_open_session(db, company_id=company_id)
+    toca_efectivo = "cash" in (origen._mapping["type"], destino._mapping["type"])
+    if toca_efectivo and session is None:
+        raise CashSessionNotOpenError(
+            "No hay una sesión de caja abierta. Consigna el efectivo antes de "
+            "cerrar la caja: un cierre ya firmado no se puede modificar."
+        )
+    session_id = session._mapping["id"] if session is not None else None
+
+    transfer_id = uuid4()
+    number = await repository.next_transfer_number(db, company_id=company_id)
+    await repository.insert_transfer(
+        db,
+        transfer_id=transfer_id,
+        company_id=company_id,
+        number=number,
+        from_account_id=body.from_account_id,
+        to_account_id=body.to_account_id,
+        amount=body.amount,
+        transfer_date=transfer_date,
+        notes=body.notes,
+        created_by=actor_id,
+        idempotency_key=idempotency_key,
+    )
+
+    nota = body.notes or f"Traslado a {destino._mapping['name']}"
+    await cashbox_integration.record_movement(
+        db,
+        session_id=session_id,
+        company_id=company_id,
+        module="general",
+        direction="out",
+        concept="transfer_out",
+        amount=body.amount,
+        payment_method="cash" if origen._mapping["type"] == "cash" else "transfer",
+        reference_type="account_transfer",
+        reference_id=transfer_id,
+        created_by=actor_id,
+        notes=nota,
+        account_id=body.from_account_id,
+    )
+    await cashbox_integration.record_movement(
+        db,
+        session_id=session_id,
+        company_id=company_id,
+        module="general",
+        direction="in",
+        concept="transfer_in",
+        amount=body.amount,
+        payment_method="cash" if destino._mapping["type"] == "cash" else "transfer",
+        reference_type="account_transfer",
+        reference_id=transfer_id,
+        created_by=actor_id,
+        notes=f"Traslado desde {origen._mapping['name']}",
+        account_id=body.to_account_id,
+    )
+
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=actor_id,
+        module="cashbox",
+        action="account_transfer",
+        entity_type="account_transfer",
+        entity_id=transfer_id,
+        after={
+            "from": origen._mapping["name"],
+            "to": destino._mapping["name"],
+            "amount": str(body.amount),
+            "transfer_date": str(transfer_date),
+        },
+    )
+
+    return await get_transfer(db, company_id=company_id, transfer_id=transfer_id)
+
+
+async def get_transfer(db: AsyncSession, *, company_id: UUID, transfer_id: UUID) -> TransferOut:
+    row = await repository.get_transfer(db, company_id=company_id, transfer_id=transfer_id)
+    if row is None:
+        raise NotFoundError("El traslado no existe en esta empresa.")
+    m = row._mapping
+    return _row_to_transfer(
+        row,
+        from_balance=await repository.account_balance(
+            db, company_id=company_id, account_id=m["from_account_id"]
+        ),
+        to_balance=await repository.account_balance(
+            db, company_id=company_id, account_id=m["to_account_id"]
+        ),
+    )
+
+
+async def list_transfers(
+    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+) -> CursorPage[TransferOut]:
+    rows = await repository.list_transfers(db, company_id=company_id, cursor=cursor, limit=limit)
+    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    out = []
+    for row in page.items:
+        m = row._mapping
+        out.append(
+            _row_to_transfer(
+                row,
+                from_balance=await repository.account_balance(
+                    db, company_id=company_id, account_id=m["from_account_id"]
+                ),
+                to_balance=await repository.account_balance(
+                    db, company_id=company_id, account_id=m["to_account_id"]
+                ),
+            )
+        )
+    return CursorPage(items=out, next_cursor=page.next_cursor)

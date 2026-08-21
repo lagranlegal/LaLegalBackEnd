@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -82,3 +82,39 @@ class SettlementOut(BaseModel):
     commission: Decimal
     commission_pct: Decimal | None
     new_pending_balance: Decimal
+
+
+class TransferIn(BaseModel):
+    """Traslado entre dos cuentas propias — típicamente consignar el efectivo
+    del día en el banco.
+
+    No es ingreso ni egreso: es la misma plata en otro bolsillo. No hay
+    comisión ni monto "recibido" distinto del enviado, y ahí está la
+    diferencia con una liquidación: en una liquidación llega MENOS porque el
+    convenio cobra; en un traslado llega exactamente lo que salió, porque
+    ambas cuentas son de la empresa.
+    """
+
+    from_account_id: UUID
+    to_account_id: UUID
+    amount: Decimal = Field(gt=0)
+    #: Cuándo se movió la plata. Por defecto hoy; nunca futura.
+    transfer_date: date | None = None
+    notes: str | None = None
+
+
+class TransferOut(BaseModel):
+    id: UUID
+    number: int
+    from_account_id: UUID
+    from_account_name: str
+    to_account_id: UUID
+    to_account_name: str
+    amount: Decimal
+    transfer_date: date
+    notes: str | None
+    created_at: datetime
+    #: Saldos DESPUÉS del traslado — para que la UI confirme el efecto sin
+    #: tener que volver a pedir el listado de cuentas.
+    from_balance: Decimal
+    to_balance: Decimal

@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -149,3 +150,106 @@ async def update_account_fields(
         text(f"update public.account set {assignments} where company_id = :cid and id = :id"),
         params,
     )
+
+
+async def find_transfer_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id from public.account_transfer "
+            "where company_id = :cid and idempotency_key = :key"
+        ),
+        {"cid": str(company_id), "key": idempotency_key},
+    )
+    return result.first()
+
+
+async def insert_transfer(
+    db: AsyncSession,
+    *,
+    transfer_id: UUID,
+    company_id: UUID,
+    number: int,
+    from_account_id: UUID,
+    to_account_id: UUID,
+    amount: Decimal,
+    transfer_date: date,
+    notes: str | None,
+    created_by: UUID | None,
+    idempotency_key: str,
+) -> None:
+    await db.execute(
+        text(
+            """
+            insert into public.account_transfer
+                (id, company_id, number, from_account_id, to_account_id, amount,
+                 transfer_date, notes, created_by, idempotency_key)
+            values
+                (:id, :cid, :number, :from_id, :to_id, :amount,
+                 :tdate, :notes, :created_by, :key)
+            """
+        ),
+        {
+            "id": str(transfer_id),
+            "cid": str(company_id),
+            "number": number,
+            "from_id": str(from_account_id),
+            "to_id": str(to_account_id),
+            "amount": amount,
+            "tdate": transfer_date,
+            "notes": notes,
+            "created_by": str(created_by) if created_by else None,
+            "key": idempotency_key,
+        },
+    )
+
+
+async def get_transfer(db: AsyncSession, *, company_id: UUID, transfer_id: UUID) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            """
+            select t.id, t.number, t.amount, t.transfer_date, t.notes, t.created_at,
+                   t.from_account_id, t.to_account_id,
+                   fa.name as from_account_name, ta.name as to_account_name
+            from public.account_transfer t
+            join public.account fa on fa.id = t.from_account_id
+            join public.account ta on ta.id = t.to_account_id
+            where t.company_id = :cid and t.id = :id
+            """
+        ),
+        {"cid": str(company_id), "id": str(transfer_id)},
+    )
+    return result.first()
+
+
+async def list_transfers(
+    db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
+) -> list[Row[Any]]:
+    result = await db.execute(
+        text(
+            """
+            select t.id, t.number, t.amount, t.transfer_date, t.notes, t.created_at,
+                   t.from_account_id, t.to_account_id,
+                   fa.name as from_account_name, ta.name as to_account_name
+            from public.account_transfer t
+            join public.account fa on fa.id = t.from_account_id
+            join public.account ta on ta.id = t.to_account_id
+            where t.company_id = :cid and (:cursor is null or t.id > :cursor)
+            order by t.id
+            limit :limit
+            """
+        ),
+        {"cid": str(company_id), "cursor": str(cursor) if cursor else None, "limit": limit + 1},
+    )
+    return list(result.all())
+
+
+async def next_transfer_number(db: AsyncSession, *, company_id: UUID) -> int:
+    """Consecutivo por empresa vía `next_counter()` (atómico, ya en 00001) —
+    mismo mecanismo que usan los ingresos de inventario y los contratos."""
+    result = await db.execute(
+        text("select public.next_counter(:cid, 'ACCOUNT_TRANSFER')"),
+        {"cid": str(company_id)},
+    )
+    return int(result.scalar_one())

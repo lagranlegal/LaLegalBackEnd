@@ -6,7 +6,14 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
-from app.core.errors import AppError, CashSessionNotOpenError, ConflictError, NotFoundError
+from app.core import security
+from app.core.errors import (
+    AppError,
+    CashSessionNotOpenError,
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from app.modules.cashbox import integration, repository
 from app.modules.cashbox.schemas import (
     BreakdownLineOut,
@@ -100,6 +107,68 @@ async def get_current_session(db: AsyncSession, *, company_id: UUID) -> SessionO
     )
     assert full_row is not None
     return _row_to_session(full_row)
+
+
+async def get_today_session(db: AsyncSession, *, company_id: UUID) -> SessionOut:
+    """La sesión de HOY, esté abierta o ya cerrada.
+
+    `/sessions/current` solo devuelve las abiertas, así que para saber "¿ya
+    cerré hoy?" el front tenía que rebuscar en `GET /reports/closings`
+    filtrando por la fecha de hoy — un rodeo que además arrastraba un hallazgo
+    documentado (el listado de sesiones pagina ascendente, así que `limit=1`
+    daba la MÁS VIEJA, no la más reciente).
+
+    Desde 00031 ese rodeo se volvió un problema de permisos y no solo de
+    elegancia: `/reports/closings` exige `cashbox.view_history`, así que un
+    cajero terminaba necesitando permiso de histórico para saber si ya había
+    cerrado su propio turno. Este endpoint responde esa pregunta con
+    `cashbox.view`, que es a quien le corresponde.
+    """
+    register = await repository.get_active_register(db, company_id=company_id)
+    if register is None:
+        raise NotFoundError("La empresa no tiene una caja activa configurada.")
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    row = await repository.get_session_for_date(
+        db, company_id=company_id, register_id=register._mapping["id"], session_date=today
+    )
+    if row is None:
+        raise NotFoundError("Todavía no se ha abierto la caja hoy.")
+    full_row = await repository.get_session(
+        db, company_id=company_id, session_id=row._mapping["id"]
+    )
+    assert full_row is not None
+    return _row_to_session(full_row)
+
+
+async def assert_can_read_session(
+    db: AsyncSession, *, company_id: UUID, session_id: UUID, role_id: UUID
+) -> None:
+    """`cashbox.view` alcanza para la sesión de HOY; el resto es histórico.
+
+    Quien maneja la caja necesita su turno para operar y para cerrarlo esta
+    noche. No necesita —y muchas veces no debe— ver cuánto se movió el mes
+    pasado ni qué descuadres hubo en turnos ajenos. Hasta 00031 `cashbox.view`
+    abría las dos cosas y no había forma de dar "solo el día de hoy".
+
+    El corte es la FECHA DE LA SESIÓN contra el hoy de la empresa, no el
+    estado: una sesión de hoy ya cerrada sigue siendo del turno de quien la
+    cerró (necesita poder imprimir su acta), y una sesión abierta que quedó
+    de ayer —porque nadie cerró— sigue siendo la sesión en curso.
+    """
+    row = await repository.get_session(db, company_id=company_id, session_id=session_id)
+    if row is None:
+        raise NotFoundError("La sesión de caja no existe en esta empresa.")
+
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    if row._mapping["session_date"] == today or row._mapping["status"] == "open":
+        return
+
+    if not await security.has_permission(db, role_id, "cashbox.view_history"):
+        raise PermissionDeniedError(
+            "Solo puedes ver la caja del día de hoy. Ver turnos anteriores "
+            "necesita el permiso de histórico de caja.",
+            details={"permission": "cashbox.view_history"},
+        )
 
 
 async def get_session(db: AsyncSession, *, company_id: UUID, session_id: UUID) -> SessionOut:

@@ -350,3 +350,102 @@ def test_duplicate_expense_category_name_is_conflict(
         "/api/v1/cashbox/expense-categories", headers=headers, json={"name": "Papelería"}
     )
     assert second.status_code == 409
+
+
+async def test_cashbox_view_covers_today_but_not_the_history(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """`cashbox.view` alcanza para el turno de hoy; el histórico va aparte.
+
+    El fixture da `cashbox.view` y NO `cashbox.view_history`, que es
+    exactamente el rol que 00031 vino a hacer posible: quien maneja la caja
+    opera y cierra su día, pero no revisa los cierres de días anteriores ni
+    los descuadres de turnos ajenos.
+    """
+    headers = _headers(cashbox_tenant["token"])
+    opened = client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "0.00"}
+    ).json()
+
+    # La sesión de hoy: se ve y su acta también. Sin esto no podría cerrarla.
+    assert (
+        client.get(f"/api/v1/cashbox/sessions/{opened['id']}", headers=headers).status_code == 200
+    )
+    assert (
+        client.get(f"/api/v1/cashbox/sessions/{opened['id']}/report", headers=headers).status_code
+        == 200
+    )
+    client.post(
+        f"/api/v1/cashbox/sessions/{opened['id']}/close",
+        headers=headers,
+        json={"counted_cash": "0.00"},
+    )
+    # Cerrada pero todavía de HOY: sigue siendo su turno, tiene que poder
+    # imprimir el acta que acaba de firmar.
+    assert (
+        client.get(f"/api/v1/cashbox/sessions/{opened['id']}", headers=headers).status_code == 200
+    )
+
+    # El LISTADO es histórico por definición — la de hoy sale por /current.
+    listado = client.get("/api/v1/cashbox/sessions", headers=headers)
+    assert listado.status_code == 403
+    assert listado.json()["code"] == "PERMISSION_DENIED"
+
+    # Y la puerta de atrás: el mismo dato desde el módulo de reportes.
+    closings = client.get("/api/v1/reports/closings", headers=headers)
+    assert closings.status_code == 403
+
+    # Se envejece la sesión un día: deja de ser "hoy" y pasa a ser histórico.
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "update public.cash_session set session_date = session_date - 1 "
+                "where id = :id and company_id = :cid"
+            ),
+            {"id": opened["id"], "cid": str(cashbox_tenant["company_id"])},
+        )
+
+    ajena = client.get(f"/api/v1/cashbox/sessions/{opened['id']}", headers=headers)
+    assert ajena.status_code == 403
+    assert ajena.json()["details"]["permission"] == "cashbox.view_history"
+    assert (
+        client.get(f"/api/v1/cashbox/sessions/{opened['id']}/report", headers=headers).status_code
+        == 403
+    )
+
+
+def test_today_session_is_readable_without_history_permission(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """ "¿Ya cerré hoy?" se responde con `cashbox.view`, no con el histórico.
+
+    El front lo deducía de `GET /reports/closings`, que desde 00031 exige
+    `cashbox.view_history`. Sin este endpoint, un cajero habría necesitado ver
+    los cierres de todo el negocio para saber si ya había cerrado su propio
+    turno — el permiso nuevo habría roto su pantalla en vez de acotarla.
+    """
+    headers = _headers(cashbox_tenant["token"])
+
+    # Sin caja abierta hoy: 404, no 403. La distinción importa — "todavía no
+    # abriste" no es "no tienes permiso".
+    vacia = client.get("/api/v1/cashbox/sessions/today", headers=headers)
+    assert vacia.status_code == 404
+
+    opened = client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "0.00"}
+    ).json()
+    abierta = client.get("/api/v1/cashbox/sessions/today", headers=headers)
+    assert abierta.status_code == 200
+    assert abierta.json()["id"] == opened["id"]
+    assert abierta.json()["status"] == "open"
+
+    client.post(
+        f"/api/v1/cashbox/sessions/{opened['id']}/close",
+        headers=headers,
+        json={"counted_cash": "0.00"},
+    )
+    # Y CERRADA sigue saliendo: es justo el caso que habilita "Reabrir".
+    cerrada = client.get("/api/v1/cashbox/sessions/today", headers=headers)
+    assert cerrada.status_code == 200
+    assert cerrada.json()["status"] == "closed"
+    assert cerrada.json()["id"] == opened["id"]

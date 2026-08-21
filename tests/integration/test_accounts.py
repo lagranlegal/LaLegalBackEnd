@@ -56,6 +56,8 @@ async def accounts_tenant(
         "accounts.view",
         "accounts.manage",
         "accounts.settle",
+        # 00032: consignar el efectivo del día.
+        "accounts.transfer",
         # Para probar que una cuenta POR COBRAR no puede financiar una salida:
         # el gasto es la salida más simple de montar (no necesita proveedor ni
         # mercancía) y pasa por el mismo `resolve_account_for_movement` que las
@@ -510,3 +512,167 @@ def test_settlement_account_cannot_fund_a_payment(
         a for a in client.get("/api/v1/accounts", headers=headers).json() if a["type"] == "bank"
     )
     assert banco is not None
+
+
+def test_transfer_moves_cash_to_bank_without_touching_results(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Consignar el efectivo baja el cajón y sube el banco. Nada más.
+
+    Es el caso que no existía: al final del día se saca la plata del cajón y
+    se lleva al banco. Sin esta operación había que registrarlo como gasto
+    —que falsea la utilidad por el monto consignado, prácticamente toda la
+    caja del día— o no registrarlo, y entonces el efectivo esperado del día
+    siguiente queda inflado y el arqueo descuadra sin culpa del cajero.
+    """
+    token = accounts_tenant["token"]
+    cuentas = {a["type"]: a for a in _accounts(client, token)}
+    caja, banco = cuentas["cash"], cuentas["bank"]
+
+    saldo_caja_antes = float(caja["balance"])
+
+    traslado = client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={
+            "from_account_id": banco["id"],
+            "to_account_id": caja["id"],
+            "amount": "200000.00",
+            "notes": "Retiro para base de caja",
+        },
+    )
+    # El banco arranca en 0, así que trasladar de ahí debe rechazarse: no se
+    # puede mover plata que no hay.
+    assert traslado.status_code == 400, traslado.text
+    assert "más de lo que hay" in traslado.json()["message"]
+
+    # Se le da saldo inicial a una cuenta bancaria nueva y desde ahí sí.
+    origen = _create(
+        client, token, name="Bancolombia ahorros", type="bank", opening_balance="1000000.00"
+    )
+    ok = client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={
+            "from_account_id": origen["id"],
+            "to_account_id": caja["id"],
+            "amount": "300000.00",
+        },
+    )
+    assert ok.status_code == 201, ok.text
+    body = ok.json()
+    assert float(body["amount"]) == 300000.0
+    assert body["from_account_name"] == "Bancolombia ahorros"
+    # Los saldos vienen en la respuesta: el origen bajó, el destino subió.
+    assert float(body["from_balance"]) == 700000.0
+    assert float(body["to_balance"]) == saldo_caja_antes + 300000.0
+
+
+def test_transfer_rejects_same_account_and_receivables(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Los tres casos que no son un traslado."""
+    token = accounts_tenant["token"]
+    cuentas = {a["type"]: a for a in _accounts(client, token)}
+    caja = cuentas["cash"]
+    sistecredito = _create(client, token, name="Sistecrédito tr", type="settlement")
+
+    misma = client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={
+            "from_account_id": caja["id"],
+            "to_account_id": caja["id"],
+            "amount": "1000.00",
+        },
+    )
+    assert misma.status_code == 400
+    assert "misma cuenta" in misma.json()["message"]
+
+    # Desde una cuenta por cobrar: esa plata todavía no llegó. Su salida
+    # legítima es la liquidación, que además calcula la comisión.
+    desde_cobrar = client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={
+            "from_account_id": sistecredito["id"],
+            "to_account_id": caja["id"],
+            "amount": "1000.00",
+        },
+    )
+    assert desde_cobrar.status_code == 400
+    assert desde_cobrar.json()["code"] == "ACCOUNT_CANNOT_FUND_PAYMENT"
+
+    # Hacia una cuenta por cobrar: lo que un convenio te debe lo genera
+    # vender, no consignar.
+    hacia_cobrar = client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={
+            "from_account_id": caja["id"],
+            "to_account_id": sistecredito["id"],
+            "amount": "1000.00",
+        },
+    )
+    assert hacia_cobrar.status_code == 400
+
+
+def test_transfer_out_of_cash_lowers_expected_cash_of_the_close(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Consignar baja el efectivo esperado — el punto entero de la operación.
+
+    Si el traslado no se reflejara en el arqueo, el cajero contaría menos
+    billetes de los que el sistema espera y tendría que justificar un
+    descuadre por haber hecho exactamente lo que debía.
+    """
+    token = accounts_tenant["token"]
+    cuentas = {a["type"]: a for a in _accounts(client, token)}
+    caja = cuentas["cash"]
+    origen = _create(
+        client, token, name="Banco origen arqueo", type="bank", opening_balance="500000.00"
+    )
+
+    session_id = str(accounts_tenant["session_id"])
+    antes = client.get(
+        f"/api/v1/cashbox/sessions/{session_id}/report",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+
+    # Entra plata al cajón…
+    client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={
+            "from_account_id": origen["id"],
+            "to_account_id": caja["id"],
+            "amount": "400000.00",
+        },
+    )
+    con_ingreso = client.get(
+        f"/api/v1/cashbox/sessions/{session_id}/report",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    assert float(con_ingreso["expected_cash"]) == float(antes["expected_cash"]) + 400000.0
+
+    # …y se consigna de vuelta: el esperado tiene que volver a bajar.
+    client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={
+            "from_account_id": caja["id"],
+            "to_account_id": origen["id"],
+            "amount": "150000.00",
+            "notes": "Consignación del día",
+        },
+    )
+    despues = client.get(
+        f"/api/v1/cashbox/sessions/{session_id}/report",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    assert float(despues["expected_cash"]) == float(con_ingreso["expected_cash"]) - 150000.0
+
+    # Y aparece en el desglose con concepto propio, no como ajuste ni gasto.
+    conceptos = {line["concept"] for line in despues["lines"]}
+    assert "transfer_out" in conceptos
+    assert "transfer_in" in conceptos

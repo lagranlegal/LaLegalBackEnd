@@ -1,0 +1,53 @@
+-- =====================================================================
+-- 00033_entry_and_exit_types.sql — de dónde salió la mercancía.
+--
+-- Hoy el ingreso tiene dos tipos visibles: `purchase` y `other` (más
+-- `auction`, que usa el remate por dentro). "Otro" es un cajón de sastre, y
+-- un cajón de sastre hace imposible responder de dónde vino el inventario —
+-- que es media contabilidad de existencias. Cada origen se COSTEA y se
+-- REPORTA distinto, así que meterlos todos en la misma bolsa borra
+-- justamente el dato que los diferencia.
+--
+-- SE AGREGAN DOS INGRESOS Y UN EGRESO, elegidos por lo que este negocio
+-- necesita de verdad (una sola sede, sin manufactura):
+--
+--   initial_stock   LA URGENTE. Cuando la compraventa arranca con el
+--                   sistema ya tiene mercancía en la vitrina. Hoy solo puede
+--                   cargarla como "otro" —que no dice nada— o como una
+--                   compra falsa, que además le sacaría de la caja una plata
+--                   que nunca salió. No toca caja, y queda marcada para que
+--                   no contamine el costo de mercancía COMPRADA del período:
+--                   sin esa marca, el primer mes de operación reportaría una
+--                   compra gigante que nunca ocurrió.
+--
+--   adjustment_in   Cierra una asimetría evidente: existe el egreso por
+--                   ajuste (`exit_type='adjustment'`), así que el inventario
+--                   físico solo puede BAJAR. Si al contar SOBRA una pieza no
+--                   hay cómo registrarla, y el sistema queda mintiendo a
+--                   sabiendas.
+--
+--   loss            (egreso) Pérdida o hurto. Contablemente no es lo mismo
+--                   que `damage`: un daño es mercancía que existe y ya no
+--                   sirve; una pérdida es mercancía que no está. Suele
+--                   necesitar denuncia y se reporta aparte.
+--
+-- QUÉ SE DEJÓ AFUERA, a propósito:
+--   · devolución de cliente  — no es "anular la venta del mismo día" (eso ya
+--                              lo cubre `sales.void`): la venta ocurrió, hubo
+--                              ingreso, y ahora sale plata. Merece su propio
+--                              camino y su propia decisión de negocio.
+--   · traslado entre bodegas — una sola sede.
+--   · producción / armado    — no se fabrica nada.
+--
+-- `other` SE CONSERVA pero el servicio le exige motivo: un cajón de sastre
+-- que obliga a explicarse al menos deja rastro.
+--
+-- ADITIVA. Los valores nuevos de un enum no se pueden USAR en la misma
+-- transacción que los crea, así que esta migración solo los agrega — nada
+-- acá los referencia.
+-- =====================================================================
+
+alter type entry_origin add value if not exists 'initial_stock';
+alter type entry_origin add value if not exists 'adjustment_in';
+
+alter type exit_type add value if not exists 'loss';

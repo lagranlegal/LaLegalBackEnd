@@ -58,6 +58,11 @@ async def reports_tenant(
         "contracts.view",
         "payments.create",
         "cashbox.view",
+        # Desde 00031 el histórico de cierres exige su propio permiso, y
+        # `GET /reports/closings` lo pide ADEMÁS de `reports.view`: es el mismo
+        # dato que `GET /cashbox/sessions`, así que dejarlo colgando solo de
+        # `reports.view` habría dejado una puerta de atrás al control.
+        "cashbox.view_history",
         "cashbox.open_close",
         "inventory.create",
         "sales.create",

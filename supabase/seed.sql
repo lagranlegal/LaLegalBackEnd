@@ -34,6 +34,10 @@ insert into public.permission (code, module, action, is_special, description) va
   ('sales.apply_discount', 'sales', 'discount', true,  'Aplicar descuento en venta'),
   -- Caja
   ('cashbox.view',       'cashbox', 'view',    false, 'Ver movimientos del día'),
+  -- Separado de `cashbox.view` (00031): quien maneja la caja necesita SU
+  -- turno para operar y cerrarlo, no el histórico de todos los cierres.
+  ('cashbox.view_history', 'cashbox', 'view_history', false,
+   'Ver el histórico de cierres de caja (turnos de días anteriores)'),
   ('cashbox.open_close', 'cashbox', 'session', true,  'Abrir y cerrar la caja diaria'),
   ('cashbox.reopen',     'cashbox', 'reopen',  true,  'Reabrir un cierre (excepcional, auditado)'),
   ('cashbox.expense',    'cashbox', 'expense', false, 'Registrar gastos'),
@@ -44,6 +48,10 @@ insert into public.permission (code, module, action, is_special, description) va
   ('accounts.view',   'accounts', 'view',   false, 'Ver cuentas y sus saldos'),
   ('accounts.manage', 'accounts', 'manage', false, 'Crear y editar cuentas'),
   ('accounts.settle', 'accounts', 'settle', true,  'Liquidar cuentas por cobrar (Sistecrédito)'),
+  -- 00032: consignar el efectivo del día. Va aparte de `manage` porque MUEVE
+  -- PLATA, mismo criterio que `settle`.
+  ('accounts.transfer', 'accounts', 'transfer', true,
+   'Trasladar plata entre cuentas propias (consignar el efectivo)'),
   -- Usuarios y roles
   ('identity.manage_users', 'identity', 'users', false, 'Invitar, editar e inactivar usuarios'),
   ('identity.manage_roles', 'identity', 'roles', true,  'Crear roles y editar permisos'),

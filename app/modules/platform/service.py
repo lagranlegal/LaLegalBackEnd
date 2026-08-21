@@ -58,6 +58,10 @@ _MODERADOR_EXCLUDED_CODES = {
     # no abre ni cierra la caja, tampoco liquida convenios (mueve plata).
     "accounts.manage",
     "accounts.settle",
+    # Misma regla para trasladar (00032): sacar el efectivo del cajón y
+    # consignarlo mueve plata igual que liquidar. Quien no abre ni cierra la
+    # caja tampoco decide cuánto sale de ella.
+    "accounts.transfer",
 }
 
 

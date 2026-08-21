@@ -172,6 +172,18 @@ async def create_entry(
     if not is_purchase and body.payment_method is not None:
         raise AppError("Solo un ingreso de compra puede llevar `payment_method`.")
 
+    # "Otro" es un cajón de sastre y por eso exige explicarse. Los demás
+    # orígenes ya dicen qué son en su propio nombre; este no dice nada, y sin
+    # motivo no hay forma de saber después de dónde salió esa mercancía —
+    # que es justamente lo que 00033 vino a arreglar.
+    if body.origin_type == "other" and not (body.notes and body.notes.strip()):
+        raise AppError(
+            "Un ingreso de tipo 'Otro' necesita una nota que explique de dónde "
+            "salió la mercancía. Si es lo que ya tenías al empezar, usa "
+            "'Inventario inicial'; si sobró en un conteo, usa 'Sobrante de conteo'.",
+            details={"field": "notes"},
+        )
+
     # La mercancía no puede haber entrado en el futuro. Sí puede haber entrado
     # ayer: ese es justamente el caso que esta separación viene a resolver.
     today = await platform_integration.get_company_today(db, company_id=company_id)

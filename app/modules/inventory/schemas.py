@@ -7,8 +7,21 @@ from pydantic import BaseModel, Field
 
 from app.common.money import Money
 
-EntryOriginType = Literal["purchase", "other"]
-ExitType = Literal["adjustment", "damage", "supplier_return", "internal_use"]
+#: De dónde salió la mercancía. Cada uno se costea y se reporta distinto, así
+#: que no son etiquetas cosméticas (00033):
+#:   purchase       compra a proveedor. Es el único que puede tocar caja.
+#:   initial_stock  lo que ya había en la vitrina al arrancar con el sistema.
+#:                  No toca caja —esa plata salió antes y afuera— y se excluye
+#:                  del costo de mercancía comprada del período.
+#:   adjustment_in  sobrante de un conteo físico. Cierra la asimetría de que
+#:                  el inventario solo pudiera bajar (existía el egreso por
+#:                  ajuste, no la entrada).
+#:   other          cajón de sastre. Se conserva, pero exige motivo.
+#: `auction` existe en la BD y lo emite el remate; no se acepta por la API.
+EntryOriginType = Literal["purchase", "initial_stock", "adjustment_in", "other"]
+#: `loss` (00033) no es lo mismo que `damage`: un daño es mercancía que existe
+#: y ya no sirve; una pérdida es mercancía que no está.
+ExitType = Literal["adjustment", "damage", "supplier_return", "internal_use", "loss"]
 PaymentMethod = Literal["cash", "transfer", "other"]
 
 

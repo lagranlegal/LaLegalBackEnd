@@ -376,16 +376,22 @@ async def test_purchase_without_open_session_is_rejected(
 async def test_non_purchase_entry_does_not_touch_cashbox(
     client: TestClient, inventory_tenant: dict
 ) -> None:
-    """Un ingreso 'other' (ajuste, sobrante) no entrega plata a nadie: no
-    exige caja abierta ni genera movimiento — el mismo criterio por el que un
-    remate tampoco lo hace (ahí el capital ya salió como préstamo)."""
+    """Un ingreso que no es compra no entrega plata a nadie: no exige caja
+    abierta ni genera movimiento — el mismo criterio por el que un remate
+    tampoco lo hace (ahí el capital ya salió como préstamo).
+
+    Se usa `initial_stock` (00033) y no `other`: la mercancía que ya estaba en
+    la vitrina al arrancar con el sistema es justo el caso que antes había que
+    disfrazar de "otro" o —peor— de compra falsa, que le habría sacado a la
+    caja una plata que nunca salió.
+    """
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
             text("update public.cash_session set status = 'closed' where id = :sid"),
             {"sid": str(inventory_tenant["session_id"])},
         )
 
-    payload = _entry_payload(inventory_tenant, origin_type="other")
+    payload = _entry_payload(inventory_tenant, origin_type="initial_stock")
     del payload["supplier_id"]
     del payload["payment_method"]
     response = client.post(
@@ -393,6 +399,7 @@ async def test_non_purchase_entry_does_not_touch_cashbox(
     )
     assert response.status_code == 201, response.text
     assert response.json()["payment_method"] is None
+    assert response.json()["origin_type"] == "initial_stock"
 
     async with AsyncSessionLocal() as session:
         count = (
@@ -1069,3 +1076,69 @@ def test_changing_the_product_price_reaches_the_lots_that_the_pos_reads(
     # Lo que el POS va a leer y cobrar.
     item = client.get(f"/api/v1/inventory/items/{item_id}", headers=_headers(token)).json()
     assert item["sale_price"] == "260000.00"
+
+
+def test_other_entry_requires_a_reason(client: TestClient, inventory_tenant: dict) -> None:
+    """ "Otro" es un cajón de sastre, así que tiene que explicarse.
+
+    Los demás orígenes dicen qué son en su propio nombre; este no dice nada.
+    Sin motivo no hay forma de saber después de dónde salió esa mercancía —
+    que es exactamente el problema que 00033 vino a cerrar.
+    """
+    headers = _headers(inventory_tenant["token"])
+    payload = _entry_payload(inventory_tenant, origin_type="other")
+    del payload["supplier_id"]
+    del payload["payment_method"]
+
+    sin_motivo = client.post("/api/v1/inventory/entries", headers=headers, json=payload)
+    assert sin_motivo.status_code == 400, sin_motivo.text
+    assert sin_motivo.json()["details"]["field"] == "notes"
+
+    payload["notes"] = "Mercancía recibida en dación de pago de un tercero"
+    con_motivo = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=payload
+    )
+    assert con_motivo.status_code == 201, con_motivo.text
+
+
+def test_adjustment_in_registers_a_counting_surplus(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El inventario físico ya puede SUBIR, no solo bajar.
+
+    Existía el egreso por ajuste, así que un conteo que encontraba de menos se
+    podía registrar y uno que encontraba de más no. El sistema quedaba
+    mintiendo a sabiendas sobre una diferencia que alguien ya había visto.
+    """
+    headers = _headers(inventory_tenant["token"])
+    payload = _entry_payload(inventory_tenant, origin_type="adjustment_in")
+    del payload["supplier_id"]
+    del payload["payment_method"]
+
+    response = client.post("/api/v1/inventory/entries", headers=headers, json=payload)
+    assert response.status_code == 201, response.text
+    assert response.json()["origin_type"] == "adjustment_in"
+    # No mueve plata: un sobrante aparece, no se compra.
+    assert response.json()["payment_method"] is None
+
+
+def test_loss_exit_is_distinct_from_damage(client: TestClient, inventory_tenant: dict) -> None:
+    """Pérdida/hurto es su propio tipo: un daño es mercancía que existe y ya
+    no sirve; una pérdida es mercancía que no está."""
+    headers = _headers(inventory_tenant["token"])
+    entry = client.post(
+        "/api/v1/inventory/entries", headers=headers, json=_entry_payload(inventory_tenant)
+    ).json()
+    item_id = entry["items"][0]["id"]
+
+    response = client.post(
+        "/api/v1/inventory/exits",
+        headers=_headers(inventory_tenant["token"]),
+        json={
+            "exit_type": "loss",
+            "reason": "Faltante detectado en conteo, se puso la denuncia",
+            "lines": [{"item_id": item_id, "quantity": 1}],
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["exit_type"] == "loss"

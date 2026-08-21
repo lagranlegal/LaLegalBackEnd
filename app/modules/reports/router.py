@@ -19,6 +19,16 @@ router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 _view = require_permission("reports.view")
 
 
+async def _closings(
+    user: Annotated[CurrentUser, Depends(_view)],
+    _history: Annotated[CurrentUser, Depends(require_permission("cashbox.view_history"))],
+) -> CurrentUser:
+    """Los DOS permisos: es un reporte (`reports.view`) del histórico de caja
+    (`cashbox.view_history`, 00031). Componer dos `Depends` es suficiente —
+    FastAPI resuelve ambos y cualquiera de los dos aborta con 403."""
+    return user
+
+
 @router.get("/dashboard", response_model=DashboardOut)
 async def get_dashboard(
     user: Annotated[CurrentUser, Depends(_view)],
@@ -29,13 +39,20 @@ async def get_dashboard(
 
 @router.get("/closings", response_model=CursorPage[ClosingHistoryOut])
 async def list_closings(
-    user: Annotated[CurrentUser, Depends(_view)],
+    user: Annotated[CurrentUser, Depends(_closings)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     from_date: Annotated[date | None, Query()] = None,
     to_date: Annotated[date | None, Query()] = None,
 ) -> CursorPage[ClosingHistoryOut]:
+    """Exige `reports.view` **y** `cashbox.view_history` (00031).
+
+    Es el mismo dato que `GET /cashbox/sessions`, expuesto desde el módulo de
+    reportes. Si se le quita el histórico al cajero por un lado y se le deja
+    esta puerta abierta por el otro, el permiso no restringe nada — sería un
+    control que se rodea escribiendo otra URL.
+    """
     return await service.list_closings(
         db,
         company_id=user.company_id,

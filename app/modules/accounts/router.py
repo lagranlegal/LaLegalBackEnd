@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.idempotency import require_idempotency_key
+from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.accounts import service
 from app.modules.accounts.schemas import (
@@ -13,6 +14,8 @@ from app.modules.accounts.schemas import (
     AccountUpdateIn,
     SettlementIn,
     SettlementOut,
+    TransferIn,
+    TransferOut,
 )
 
 router = APIRouter(prefix="/api/v1/accounts", tags=["accounts"])
@@ -25,6 +28,55 @@ _manage = require_permission("accounts.manage")
 # Estuvo detrás de `cashbox.view` —un permiso de solo lectura— hasta 00029,
 # o sea que cualquiera que pudiera mirar la caja podía liquidar Sistecrédito.
 _settle = require_permission("accounts.settle")
+# Trasladar también MUEVE PLATA, y va aparte de `manage` por la misma razón
+# que `settle` (00032): quien administra el catálogo de cuentas no
+# necesariamente puede sacar el efectivo del cajón y llevarlo al banco.
+_transfer = require_permission("accounts.transfer")
+
+
+@router.post("/transfers", response_model=TransferOut, status_code=201)
+async def create_transfer(
+    body: TransferIn,
+    user: Annotated[CurrentUser, Depends(_transfer)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+) -> TransferOut:
+    """Mueve plata entre dos cuentas propias — típicamente consignar en el
+    banco el efectivo del día.
+
+    **No es ingreso ni egreso**: es la misma plata en otro bolsillo, así que
+    no toca el estado de resultados. Genera dos movimientos
+    (`transfer_out` / `transfer_in`) que los reportes excluyen del cálculo de
+    ingresos y gastos.
+
+    Si el origen es la cuenta de efectivo **exige caja abierta** y baja el
+    efectivo esperado del cierre — que es lo correcto: se consignó, ya no está
+    en el cajón. Por eso el traslado va **antes** de cerrar: una sesión
+    cerrada es inmutable y meterle un movimiento invalidaría un acta ya
+    cuadrada.
+    """
+    return await service.create_transfer(
+        db,
+        company_id=user.company_id,
+        body=body,
+        actor_id=user.id,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.get("/transfers", response_model=CursorPage[TransferOut])
+async def list_transfers(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> CursorPage[TransferOut]:
+    return await service.list_transfers(
+        db,
+        company_id=user.company_id,
+        cursor=decode_cursor(cursor) if cursor else None,
+        limit=limit,
+    )
 
 
 @router.get("", response_model=list[AccountOut])
