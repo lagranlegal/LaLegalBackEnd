@@ -135,10 +135,12 @@ async def list_roles(db: AsyncSession, *, company_id: UUID) -> list[Row[Any]]:
     result = await db.execute(
         text(
             """
-            select id, name, description, is_seed, active
-            from public.role
-            where company_id = :company_id
-            order by name
+            select r.id, r.name, r.description, r.is_seed, r.active,
+                   (select count(*) from public.role_permission rp
+                    where rp.role_id = r.id) as permission_count
+            from public.role r
+            where r.company_id = :company_id
+            order by r.name
             """
         ),
         {"company_id": str(company_id)},

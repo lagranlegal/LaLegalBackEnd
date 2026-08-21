@@ -44,6 +44,10 @@ class RoleOut(BaseModel):
     description: str | None
     is_seed: bool
     active: bool
+    #: Cuántos permisos tiene marcados. Se expone porque un rol en 0 no sirve
+    #: para nada —quien lo tenga no puede ni ver la caja ni el inventario— y
+    #: sin este dato el listado no lo distinguía de un rol bien configurado.
+    permission_count: int = 0
 
 
 class RoleCreateIn(BaseModel):

@@ -47,6 +47,9 @@ def _row_to_role(row: Row[Any]) -> RoleOut:
         description=m["description"],
         is_seed=m["is_seed"],
         active=m["active"],
+        # Solo `list_roles` trae la cuenta; `get_role` no la necesita y no la
+        # selecciona, así que se lee con `.get` en vez de asumirla presente.
+        permission_count=m.get("permission_count", 0),
     )
 
 

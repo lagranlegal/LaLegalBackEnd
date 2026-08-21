@@ -224,6 +224,31 @@ def test_invite_por_correo_no_devuelve_enlace(
     assert response.json()["invite_link"] is None
 
 
+def test_list_roles_expone_cuantos_permisos_tiene_cada_rol(
+    client: TestClient, tenant: dict
+) -> None:
+    """Un rol en 0 permisos no sirve para nada — quien lo tenga no puede ni
+    ver la caja ni el inventario, y la app le muestra mensajes que parecen
+    errores ("Caja cerrada", "no se pudo cargar") en vez de decirle que le
+    faltan permisos. Sin este dato, el listado de roles no lo distinguía de
+    uno bien configurado.
+    """
+    # Un rol recién creado nace SIN permisos — es exactamente lo que pasa
+    # cuando un admin crea un rol y no abre la matriz a marcarlos.
+    creado = client.post(
+        "/api/v1/identity/roles",
+        headers=_headers(tenant["admin_token"]),
+        json={"name": "Cajero Temporal", "description": None},
+    )
+    assert creado.status_code == 201, creado.text
+
+    response = client.get("/api/v1/identity/roles", headers=_headers(tenant["admin_token"]))
+    assert response.status_code == 200
+    por_nombre = {r["name"]: r["permission_count"] for r in response.json()}
+    assert por_nombre["Admin"] > 0
+    assert por_nombre["Cajero Temporal"] == 0
+
+
 def test_list_users_includes_admin(client: TestClient, tenant: dict) -> None:
     response = client.get("/api/v1/identity/users", headers=_headers(tenant["admin_token"]))
     assert response.status_code == 200
