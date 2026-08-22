@@ -139,6 +139,8 @@ Reglas de `code_letter` (1–3 caracteres, usado para armar el código de artíc
 - Único por **empresa** entre proveedores (sin relación con categorías) → `409 CONFLICT`.
 - Árbol de máximo 3 niveles: crear un hijo de una categoría nivel 3 → `400 BAD_REQUEST`.
 
+> **Los parámetros de categoría se HEREDAN.** `default_term_months`, `arrears_window_months` y `max_ltv_pct` se pueden definir en cualquiera de los tres niveles; al crear un contrato, cada campo se resuelve subiendo por `parent_id` hasta el ancestro más cercano que lo defina — **por separado**, así que una hoja puede heredar el plazo de su padre y el LTV de su abuelo. Antes se leían solo de la hoja: los campos de los niveles 1 y 2 eran configuración muerta, y olvidar el plazo en UNA hoja rompía la creación de contratos con esa prenda. Sin migración (los campos ya existían); los contratos vivos no cambian porque congelan su snapshot al nacer.
+
 ## 7. Módulo `contracts` (contratos de empeño)
 
 Requiere una **sesión de caja abierta** (fase 1: una caja por empresa) para desembolsar o cobrar — sin eso, `409 CASH_SESSION_NOT_OPEN`. Ver §8 (`cashbox`) para abrir/cerrar la sesión.
@@ -215,6 +217,8 @@ El corte es la **fecha de la sesión**, no su estado: una sesión de hoy ya cerr
 **La foto es del PRODUCTO, y solo obligatoria en piezas únicas** (00034). `product.photos` describe cómo se ve el producto: se toma una vez y **todos sus lotes la heredan**. `inventory_item.photos` se conserva como *override* del lote, para lo que sí es propio de una compra (una tara, el estado de una pieza rematada). `ItemOut.photos` devuelve las **efectivas**: las del lote si tiene, si no las del producto.
 
 Publicar exige foto únicamente cuando `product.is_unique` — el caso del remate, donde la foto es la evidencia de qué prenda dejó el cliente en garantía y donde cada pieza es irrepetible. Para mercancía fungible es opcional: obligarla hacía re-fotografiar en cada reposición algo ya fotografiado. Las fotos que llegan en una línea de `POST /entries` se guardan en el **producto**.
+
+**Pagar una compra pendiente** (`POST /api/v1/inventory/entries/{id}/pay`) exige **`inventory.pay_purchase`** (00035), no `inventory.create`. Pagarle a un proveedor mueve plata, no inventario: la mercancía ya entró, lo que cambia es el efectivo y la deuda. Antes bastaba con el permiso de registrar mercancía, o sea que bodega podía decidir cuánto sale de la caja — mismo criterio que separó `accounts.settle` y `accounts.transfer`.
 
 **Publicación automática al ingresar.** Si una línea de `POST /entries` trae `sale_price`, el lote **se publica en el acto**: emite código y queda `available`. El precio puede omitirse si el producto ya tiene uno (reponer no obliga a redigitarlo). Sin precio queda en `draft`, que es correcto — lo que cambió es que eso ahora es la EXCEPCIÓN y no el camino obligatorio de toda compra.
 
