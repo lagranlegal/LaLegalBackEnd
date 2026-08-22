@@ -168,7 +168,10 @@ async def settle_account(
             company_id=company_id,
             module="store",
             direction="out",
-            concept="adjustment",
+            # Conceptos propios desde 00038: un "ajuste" significa que el
+            # sistema no cuadra con la realidad. Una liquidación sí cuadra —
+            # es la operación normal que cierra toda venta con Sistecrédito.
+            concept="settlement_out",
             amount=body.amount_settled,
             payment_method="other",
             reference_type="settlement",
@@ -183,7 +186,7 @@ async def settle_account(
             company_id=company_id,
             module="store",
             direction="in",
-            concept="adjustment",
+            concept="settlement_in",
             amount=body.amount_received,
             payment_method="cash" if destino._mapping["type"] == "cash" else "transfer",
             reference_type="settlement",

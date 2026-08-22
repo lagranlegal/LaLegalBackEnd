@@ -1,0 +1,32 @@
+-- =====================================================================
+-- 00038_settlement_concepts.sql — una liquidación no es un "ajuste".
+--
+-- Salió de auditar la matriz completa de conceptos de movimiento contra cómo
+-- los trata cada reporte — algo que ningún test miraba, porque cada test
+-- cubre un camino solo.
+--
+-- `settle_account` emitía sus DOS movimientos con `concept = 'adjustment'`.
+-- Es el mismo error que 00032 corrigió para los traslados y que no se aplicó
+-- hacia atrás: un ajuste significa "el sistema no cuadra con la realidad y lo
+-- estoy corrigiendo". Una liquidación sí cuadra — es una operación normal y
+-- planeada, la que cierra el ciclo de toda venta con Sistecrédito.
+--
+-- CONSECUENCIAS DE HABERLO DEJADO ASÍ:
+--
+--   · En el acta de cierre la liquidación aparecía como "Ajuste", que a
+--     quien firma el arqueo le dice exactamente nada.
+--   · Los reportes no podían distinguirla de un ajuste de verdad, así que
+--     tampoco podían tratarla distinto — que es justo lo que hace falta.
+--
+-- Con conceptos propios, además, queda medible cuánto entra por convenios y
+-- cada cuánto liquidan: información de negociación, no solo contable.
+--
+-- ADITIVA. Los movimientos históricos siguen con `adjustment` y no se
+-- reescriben: `cash_movement` es inmutable a propósito (00007), y un hecho
+-- registrado no se corrige cambiándole la etiqueta. Los reportes tratan bien
+-- los dos casos porque la exclusión de flujo se hace por TIPO DE CUENTA, no
+-- por concepto — ver el comentario de `aggregate.ts`.
+-- =====================================================================
+
+alter type cash_concept add value if not exists 'settlement_out';
+alter type cash_concept add value if not exists 'settlement_in';
