@@ -16,6 +16,7 @@ from app.modules.reports.schemas import (
     ClosingHistoryOut,
     ContractKpisOut,
     DashboardOut,
+    IncomeStatementOut,
     InventoryKpisOut,
     InventoryValuationCategoryOut,
     InventoryValuationOut,
@@ -294,4 +295,74 @@ async def get_stale_inventory(
         product_count=len(items),
         total_cost_value=sum((i.cost_value for i in items), start=Decimal("0.00")),
         items=items,
+    )
+
+
+async def get_income_statement(
+    db: AsyncSession, *, company_id: UUID, from_date: date, to_date: date
+) -> IncomeStatementOut:
+    """Estado de resultados del período: ingresos − costo de ventas − gastos.
+
+    ARREGLA UN NÚMERO QUE ESTABA MAL. La "utilidad operativa" de `/reportes`
+    calculaba `ingresos − gastos` y nunca restaba el costo de ventas: una
+    cadena vendida en 500.000 que costó 300.000 contaba como 500.000 de
+    utilidad. Para una tienda eso sobreestima la ganancia por todo el costo de
+    la mercancía, y en la misma pantalla convivía con "Utilidad bruta de
+    tienda", que sí lo restaba — dos cifras que se contradecían.
+
+    NO reimplementa ninguna regla: reusa `profit_summary` (tienda) y
+    `pawn_performance` (empeño), que ya definen cada número una sola vez y con
+    sus salvedades documentadas. Acá solo se suman y se ordenan.
+
+    Los movimientos de CAPITAL van aparte del resultado, no dentro: prestar no
+    es un gasto y cobrar no es una ganancia — el principio que este proyecto
+    ya pagó caro tres veces. Comprar inventario tampoco es gasto: es efectivo
+    que se vuelve activo, y se convierte en gasto cuando se VENDE, momento en
+    el que ya está contado en `cost_of_goods_sold`.
+    """
+    tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
+
+    tienda = await repository.profit_summary(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
+    empeno = await repository.pawn_performance(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
+    gastos = await repository.operating_expenses(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
+    compras = await repository.inventory_purchased(
+        db, company_id=company_id, from_date=from_date, to_date=to_date
+    )
+
+    t, e, g = tienda._mapping, empeno._mapping, gastos._mapping
+
+    ventas = _dec(t["gross_revenue"]) - _dec(t["discounts"])
+    intereses = _dec(e["interest_collected"])
+    ingresos = ventas + intereses
+    costo_ventas = _dec(t["cost_of_goods_sold"])
+    utilidad_bruta = ingresos - costo_ventas
+    gastos_operativos = _dec(g["total"])
+    utilidad = utilidad_bruta - gastos_operativos
+
+    return IncomeStatementOut(
+        from_date=from_date,
+        to_date=to_date,
+        sales_revenue=ventas,
+        interest_revenue=intereses,
+        total_revenue=ingresos,
+        cost_of_goods_sold=costo_ventas,
+        gross_profit=utilidad_bruta,
+        operating_expenses=gastos_operativos,
+        expense_count=g["expense_count"] or 0,
+        operating_profit=utilidad,
+        # `null` y no 0% cuando no hubo ingresos: un margen de cero sugiere que
+        # se vendió sin ganar, y lo cierto es que no se vendió.
+        margin_pct=(
+            (utilidad / ingresos * 100).quantize(Decimal("0.01")) if ingresos > 0 else None
+        ),
+        interest_discounts=_dec(e["interest_discounts"]),
+        capital_disbursed=_dec(e["capital_disbursed"]),
+        capital_recovered=_dec(e["capital_recovered"]),
+        inventory_purchased=compras,
     )

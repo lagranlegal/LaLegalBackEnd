@@ -202,3 +202,68 @@ class StaleInventoryOut(BaseModel):
     product_count: int
     total_cost_value: Decimal
     items: list[StaleItemOut]
+
+
+class IncomeStatementOut(BaseModel):
+    """Estado de resultados del período: **¿cuánto ganó el negocio?**
+
+    Es la vista de arriba que faltaba. `/profit` cubre la tienda y
+    `/pawn-performance` el empeño —correctamente separados, porque se miden
+    distinto— pero nadie los sumaba en un solo resultado.
+
+    Y arregla un número que estaba MAL: la "utilidad operativa" de `/reportes`
+    calculaba `ingresos − gastos` y **nunca restaba el costo de ventas**, así
+    que una cadena vendida en 500.000 que costó 300.000 contaba como 500.000
+    de utilidad. Para una tienda eso sobreestima la ganancia por todo el costo
+    de la mercancía.
+
+    Sale de los DOCUMENTOS (`sale`, `contract_payment`, `expense`) y no de los
+    movimientos de caja. Dos razones, y las dos importan:
+
+      · El desglose de caja solo cubre sesiones CERRADAS: lo de hoy faltaría.
+      · Una venta con Sistecrédito ES ingreso aunque no haya entrado plata —
+        el ingreso se reconoce al vender, no al cobrar. Armado desde caja, ese
+        ingreso aparecería tarde o no aparecería.
+    """
+
+    from_date: date
+    to_date: date
+
+    #: --- Ingresos ---
+    #: Ventas netas de descuento (tienda).
+    sales_revenue: Decimal
+    #: Intereses efectivamente cobrados (empeño). El empeño no tiene costo de
+    #: ventas: su rentabilidad son los intereses sobre el capital prestado.
+    interest_revenue: Decimal
+    total_revenue: Decimal
+
+    #: --- Costo de ventas ---
+    #: Costo congelado de la mercancía vendida. Solo tienda.
+    cost_of_goods_sold: Decimal
+    #: `total_revenue − cost_of_goods_sold`.
+    gross_profit: Decimal
+
+    #: --- Gastos ---
+    operating_expenses: Decimal
+    expense_count: int
+
+    #: --- Resultado ---
+    #: `gross_profit − operating_expenses`. ESTE es "cuánto ganó el negocio".
+    operating_profit: Decimal
+    #: Sobre el ingreso total, en %. `null` si no hubo ingresos — mostrar 0%
+    #: cuando el dato correcto es "no aplica" es peor que no mostrar nada.
+    margin_pct: Decimal | None
+
+    #: --- Contexto que NO es resultado, y por eso va aparte ---
+    #: Descuentos de interés otorgados: interés que se dejó de cobrar. Erosiona
+    #: el resultado del empeño pero no es un gasto.
+    interest_discounts: Decimal
+    #: Capital prestado y recuperado en el período. NO son gasto ni ingreso —
+    #: es cartera moviéndose. Van acá para que nadie tenga que buscarlos en
+    #: otra pantalla y concluir que faltan.
+    capital_disbursed: Decimal
+    capital_recovered: Decimal
+    #: Mercancía comprada en el período. Tampoco es gasto: es efectivo que se
+    #: convirtió en inventario. Se vuelve gasto cuando se VENDE, y ahí ya está
+    #: contado en `cost_of_goods_sold`.
+    inventory_purchased: Decimal

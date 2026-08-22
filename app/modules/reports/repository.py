@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -379,3 +380,68 @@ async def stale_inventory(
         },
     )
     return list(result.all())
+
+
+async def operating_expenses(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> Row[Any]:
+    """Gastos operativos del período, desde el DOCUMENTO (`expense`).
+
+    No desde los movimientos de caja, que es de donde los saca `/reportes`
+    hoy: el desglose de caja solo cubre sesiones CERRADAS, así que los gastos
+    de hoy no aparecerían. Mismo criterio que ya usan `profit_summary` y
+    `pawn_performance`.
+
+    Las fechas se comparan en la zona horaria de la EMPRESA, no en UTC: el
+    "hoy" del negocio termina a medianoche de Bogotá.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              coalesce(sum(amount), 0) as total,
+              count(*)                 as expense_count
+            from public.expense
+            where company_id = :company_id
+              and (created_at at time zone :tz)::date between :from_date and :to_date
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "tz": tz_name,
+            "from_date": from_date,
+            "to_date": to_date,
+        },
+    )
+    row = result.first()
+    assert row is not None  # los agregados siempre devuelven una fila
+    return row
+
+
+async def inventory_purchased(
+    db: AsyncSession, *, company_id: UUID, from_date: date, to_date: date
+) -> Decimal:
+    """Mercancía comprada en el período, por `entry_date`.
+
+    Por la fecha en que ENTRÓ la mercancía y no por la de digitación ni la de
+    pago: es lo que corresponde al período desde el punto de vista del
+    inventario. Una factura de la semana pasada cargada hoy pertenece a la
+    semana pasada.
+
+    Solo `purchase`: los demás orígenes no le entregan plata a nadie
+    (inventario inicial, sobrante de conteo, transformación) y contarlos daría
+    a entender que el negocio invirtió en mercancía que ya tenía.
+    """
+    result = await db.execute(
+        text(
+            """
+            select coalesce(sum(total_cost), 0)
+            from public.inventory_entry
+            where company_id = :company_id
+              and origin_type = 'purchase'
+              and entry_date between :from_date and :to_date
+            """
+        ),
+        {"company_id": str(company_id), "from_date": from_date, "to_date": to_date},
+    )
+    return Decimal(str(result.scalar_one() or 0))

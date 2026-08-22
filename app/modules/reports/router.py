@@ -10,6 +10,7 @@ from app.modules.reports import service
 from app.modules.reports.schemas import (
     ClosingHistoryOut,
     DashboardOut,
+    IncomeStatementOut,
     InventoryValuationOut,
     PawnPerformanceOut,
     PayablesOut,
@@ -158,4 +159,36 @@ async def get_stale_inventory(
     """
     return await service.get_stale_inventory(
         db, company_id=user.company_id, threshold_days=threshold_days, limit=limit
+    )
+
+
+@router.get("/income-statement", response_model=IncomeStatementOut)
+async def get_income_statement(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    from_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+    to_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+) -> IncomeStatementOut:
+    """Estado de resultados: **ingresos − costo de ventas − gastos = utilidad**.
+
+    Es la vista de arriba que faltaba: `/profit` cubre la tienda y
+    `/pawn-performance` el empeño —bien separados, porque se miden distinto—
+    pero nadie los sumaba en un solo resultado.
+
+    Y corrige un número equivocado: la "utilidad operativa" que mostraba
+    `/reportes` era `ingresos − gastos` y **nunca restaba el costo de ventas**,
+    así que sobreestimaba la ganancia por todo lo que costó la mercancía.
+
+    Sale de los DOCUMENTOS y no de los movimientos de caja: el desglose de
+    caja solo cubre sesiones cerradas (faltaría lo de hoy), y una venta con
+    Sistecrédito es ingreso aunque todavía no haya entrado la plata — el
+    ingreso se reconoce al vender, no al cobrar.
+
+    Los movimientos de CAPITAL (préstamos, abonos) y la compra de inventario
+    se devuelven aparte, fuera del resultado: prestar no es gasto y cobrar no
+    es ganancia; comprar mercancía es convertir efectivo en activo, y se
+    vuelve gasto cuando se vende.
+    """
+    return await service.get_income_statement(
+        db, company_id=user.company_id, from_date=from_date, to_date=to_date
     )

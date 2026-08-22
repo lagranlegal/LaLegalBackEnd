@@ -6,6 +6,7 @@ Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
 from datetime import date
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -64,6 +65,9 @@ async def reports_tenant(
         # `reports.view` habría dejado una puerta de atrás al control.
         "cashbox.view_history",
         "cashbox.open_close",
+        # El estado de resultados resta gastos reales, así que el tenant de
+        # reportes tiene que poder crearlos.
+        "cashbox.expense",
         "inventory.create",
         "sales.create",
         "reports.view",
@@ -555,3 +559,139 @@ def test_pawn_performance_empty_period_has_null_yield(
     assert float(body["interest_collected"]) == 0.0
     assert body["contracts_opened"] == 0
     assert body["yield_on_current_portfolio_pct"] is None
+
+
+def test_income_statement_subtracts_the_cost_of_goods_sold(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """El estado de resultados resta el COSTO DE VENTAS. Ese era el bug.
+
+    La "utilidad operativa" de `/reportes` calculaba `ingresos − gastos` y
+    nunca restaba lo que costó la mercancía: una cadena vendida en 500.000 que
+    costó 300.000 contaba como 500.000 de utilidad. Y en la misma pantalla
+    convivía con "Utilidad bruta de tienda", que sí lo restaba — dos cifras
+    contradiciéndose.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "500000.00"}
+    )
+
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "purchase",
+            "supplier_id": str(reports_tenant["supplier_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "name": "Cadena del estado de resultados",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit_cost": "300000.00",
+                    "photos": ["http://example.com/x.jpg"],
+                    "sale_price": "500000.00",
+                }
+            ],
+        },
+    ).json()
+    item_id = entry["items"][0]["id"]
+
+    venta = client.post(
+        "/api/v1/sales",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "lines": [{"item_id": item_id, "quantity": "1", "unit_price": "500000.00"}],
+        },
+    )
+    assert venta.status_code == 201, venta.text
+
+    # Un gasto real del período.
+    categoria = client.post(
+        "/api/v1/cashbox/expense-categories",
+        headers=headers,
+        json={"name": f"Arriendo {uuid4().hex[:6]}"},
+    ).json()
+    client.post(
+        "/api/v1/cashbox/expenses",
+        headers=headers,
+        json={
+            "category_id": categoria["id"],
+            "description": "Arriendo del local",
+            "amount": "80000.00",
+            "payment_method": "cash",
+        },
+    )
+
+    hoy = date.today().isoformat()
+    r = client.get(
+        "/api/v1/reports/income-statement",
+        headers={"Authorization": f"Bearer {reports_tenant['token']}"},
+        params={"from_date": hoy, "to_date": hoy},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert Decimal(body["sales_revenue"]) == Decimal("500000.00")
+    assert Decimal(body["cost_of_goods_sold"]) == Decimal("300000.00")
+    # 500.000 − 300.000 = 200.000. El número viejo habría dicho 500.000.
+    assert Decimal(body["gross_profit"]) == Decimal("200000.00")
+    assert Decimal(body["operating_expenses"]) == Decimal("80000.00")
+    # 200.000 − 80.000 = 120.000. ESTE es "cuánto ganó el negocio".
+    assert Decimal(body["operating_profit"]) == Decimal("120000.00")
+    assert Decimal(body["margin_pct"]) == Decimal("24.00")
+
+
+def test_income_statement_keeps_capital_and_purchases_out_of_the_result(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Prestar no es gasto, cobrar no es ganancia, comprar no es gasto.
+
+    Los tres principios que este proyecto ya pagó caro. Van fuera del
+    resultado y se devuelven aparte —no escondidos— para que nadie los busque
+    en otra pantalla y concluya que faltan.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "5000000.00"}
+    )
+
+    # Una compra de mercancía: sale plata, pero NO es gasto.
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "purchase",
+            "supplier_id": str(reports_tenant["supplier_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "name": "Mercancía que no es gasto",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit_cost": "700000.00",
+                }
+            ],
+        },
+    )
+
+    hoy = date.today().isoformat()
+    body = client.get(
+        "/api/v1/reports/income-statement",
+        headers={"Authorization": f"Bearer {reports_tenant['token']}"},
+        params={"from_date": hoy, "to_date": hoy},
+    ).json()
+
+    # La compra aparece, pero FUERA del resultado.
+    assert Decimal(body["inventory_purchased"]) == Decimal("700000.00")
+    assert Decimal(body["operating_expenses"]) == Decimal("0.00")
+    # Sin ventas no hay costo de ventas: esos 700.000 son inventario, no gasto.
+    assert Decimal(body["cost_of_goods_sold"]) == Decimal("0.00")
+    assert Decimal(body["operating_profit"]) == Decimal("0.00")
+    # Y sin ingresos el margen es `null`, no 0% — "no vendí" no es "vendí sin
+    # ganar".
+    assert body["margin_pct"] is None
