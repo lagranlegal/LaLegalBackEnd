@@ -65,7 +65,7 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
     `identity.manage_users`, y no se escribe en ningún log.
     """
     settings = get_settings()
-    url = (
+    base_url = (
         f"{settings.supabase_url}/auth/v1/invite"
         if send_email
         else f"{settings.supabase_url}/auth/v1/admin/generate_link"
@@ -80,23 +80,42 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
         # lo da por hecho porque el endpoint ya lo dice.
         payload["type"] = "invite"
 
-    # Sin `redirect_to`, Supabase manda al usuario a su "Site URL" por defecto
-    # y el link del correo muere. El destino es la pantalla donde el invitado
-    # crea su contraseña; `detectSessionInUrl` del cliente de Supabase procesa
-    # ahí el token que viene en el fragmento de la URL.
+    # `redirect_to` VA EN EL QUERY STRING, no en el body.
+    #
+    # BUG REAL, encontrado porque la invitación funcionaba al invitar a un
+    # usuario y NO al crear una empresa. Los dos caminos llaman a esta misma
+    # función; lo único que cambia es `send_email`, y ahí estaba la trampa:
+    #
+    #   · `/admin/generate_link` SÍ lee `redirect_to` del body — por eso el
+    #     botón "Generar enlace" siempre funcionó.
+    #   · `/invite` solo lo lee del QUERY STRING. En el body lo ignora, en
+    #     silencio, y manda al invitado al "Site URL" del proyecto — que es
+    #     la raíz de la app. O sea: el invitado entra directo, con sesión
+    #     activa y sin que nadie le pida contraseña. Y como quedó sin
+    #     contraseña, tampoco puede volver a entrar después.
+    #
+    # Crear una empresa siempre manda correo, así que ese camino estaba roto
+    # al 100% mientras el otro se veía perfecto.
+    #
+    # Se confirma contra el cliente oficial (`@supabase/auth-js`,
+    # `lib/fetch.js`): pone `redirect_to` en el query para AMBOS endpoints.
+    # Acá se manda en los dos lugares a propósito — el query es el que
+    # funciona en ambos, y el body es lo que `generate_link` ya venía
+    # aceptando; un campo de más que el servidor ignora no cuesta nada, y
+    # quitarlo arriesgaría el único camino que hoy sí sirve.
     #
     # OJO: la URL debe estar además en la lista de "Redirect URLs" permitidas
     # del proyecto Supabase (Authentication → URL Configuration). Si no está,
-    # Supabase la IGNORA en silencio y vuelve a caer en la Site URL — o sea,
-    # el mismo síntoma. Configurado en dev el 21/08/2026 (junto con el Site
-    # URL, que estaba en localhost:3000 y era la otra mitad del problema);
-    # el procedimiento y por qué NO se usa `supabase config push` están en
-    # `frontend-starter/docs/DEPLOY.md`.
+    # Supabase la IGNORA —también en silencio— y vuelve a caer en la Site
+    # URL, con el mismo síntoma. Ver `frontend-starter/docs/DEPLOY.md`.
+    params: dict[str, str] = {}
     if settings.frontend_url:
-        payload["redirect_to"] = f"{settings.frontend_url.rstrip('/')}/auth/callback"
+        callback = f"{settings.frontend_url.rstrip('/')}/auth/callback"
+        params["redirect_to"] = callback
+        payload["redirect_to"] = callback
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(url, headers=headers, json=payload)
+        response = await client.post(base_url, headers=headers, json=payload, params=params)
 
     if response.status_code == 429:
         raise InviteRateLimitedError(

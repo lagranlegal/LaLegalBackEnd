@@ -1,14 +1,24 @@
 """El payload de la invitación a Supabase Auth.
 
-Existe por un bug real: `invite_user` no mandaba `redirect_to`, así que
-Supabase caía en su "Site URL" por defecto y el link del correo moría en
-"This site can't be reached". El usuario quedaba `confirmed` en `auth.users`
-pero nunca llegaba a `/auth/callback`, así que jamás creaba contraseña ni
-pasaba de `invited` a `active`.
+Existe por DOS bugs reales, y el segundo se escondió detrás del primero.
+
+1. `invite_user` no mandaba `redirect_to`, así que Supabase caía en su "Site
+   URL" y el link del correo moría en "This site can't be reached".
+
+2. Se agregó `redirect_to`… en el BODY. `/admin/generate_link` lo lee de ahí
+   —por eso "Generar enlace" funcionaba y todo parecía arreglado— pero
+   `/invite` lo lee SOLO del query string. En el body lo ignora en silencio y
+   vuelve a caer en el Site URL, que es la raíz de la app: el invitado entra
+   directo, con sesión, sin que le pidan contraseña. Y como queda sin
+   contraseña, tampoco puede volver a entrar después.
+
+   Crear una empresa siempre manda correo, así que ese camino estaba roto al
+   100% mientras el de invitar a un usuario se veía perfecto.
 
 Los tests de integración mockean `invite_user` ENTERO, así que ninguno mira
-el payload — por eso el hueco pasó desapercibido y por eso este test es
-unitario sobre lo que se le manda a Supabase.
+lo que se manda — por eso esto es unitario. Y el fake client de acá no
+capturaba `params`, así que tampoco podía ver el bug 2: mirar solo el body
+era mirar donde el dato no estaba.
 """
 
 from typing import Any
@@ -45,8 +55,20 @@ class _FakeClient:
     async def __aexit__(self, *args: Any) -> None:
         return None
 
-    async def post(self, url: str, headers: dict, json: dict) -> _FakeResponse:
-        _FakeClient.captured = {"url": url, "headers": headers, "json": json}
+    async def post(
+        self, url: str, headers: dict, json: dict, params: dict | None = None
+    ) -> _FakeResponse:
+        # `params` se captura desde que se descubrió que `/invite` lee
+        # `redirect_to` SOLO del query string: antes esta firma no lo recibía
+        # siquiera, y por eso los tests de este archivo —escritos justo para
+        # el bug de "falta redirect_to"— no vieron la segunda mitad del
+        # problema. Mirar solo el body era mirar donde no estaba.
+        _FakeClient.captured = {
+            "url": url,
+            "headers": headers,
+            "json": json,
+            "params": params or {},
+        }
         return _FakeResponse(str(uuid4()))
 
 
@@ -108,7 +130,7 @@ class _RateLimitedResponse:
 
 
 class _RateLimitedClient(_FakeClient):
-    async def post(self, url: str, headers: dict, json: dict) -> Any:
+    async def post(self, *args: Any, **kwargs: Any) -> Any:
         return _RateLimitedResponse()
 
 
@@ -133,3 +155,61 @@ async def test_rate_limit_no_se_reporta_como_falla_del_sistema(
     assert exc.value.status_code == 429
     assert exc.value.code == "INVITE_RATE_LIMITED"
     assert "espera" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_invite_sends_redirect_in_the_query_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/invite` lee `redirect_to` SOLO del query string.
+
+    Es la mitad del bug que se escondió durante semanas: en el body funciona
+    para `generate_link` y no para `invite`, así que "Generar enlace" andaba
+    bien y el correo de alta de empresa mandaba al invitado directo a la app,
+    sin contraseña.
+    """
+    monkeypatch.setenv("FRONTEND_URL", "https://app.example.com")
+    monkeypatch.setattr(auth_admin.httpx, "AsyncClient", _FakeClient)
+
+    await auth_admin.invite_user("empresa@example.com", "Admin Nuevo", send_email=True)
+
+    captured = _FakeClient.captured
+    assert captured["url"].endswith("/auth/v1/invite")
+    assert captured["params"]["redirect_to"] == "https://app.example.com/auth/callback"
+
+
+@pytest.mark.asyncio
+async def test_generate_link_also_sends_it_in_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """El otro camino usa el MISMO mecanismo.
+
+    El cliente oficial de Supabase pone `redirect_to` en el query para los dos
+    endpoints; se replica para no tener dos comportamientos que mantener. El
+    body se conserva además porque es lo que `generate_link` ya venía
+    aceptando — un campo de más que el servidor ignora no cuesta nada, y
+    quitarlo arriesgaría el único camino que hoy sí funciona.
+    """
+    monkeypatch.setenv("FRONTEND_URL", "https://app.example.com")
+    monkeypatch.setattr(auth_admin.httpx, "AsyncClient", _FakeClient)
+
+    await auth_admin.invite_user("link@example.com", "Por Enlace", send_email=False)
+
+    captured = _FakeClient.captured
+    assert captured["url"].endswith("/auth/v1/admin/generate_link")
+    assert captured["params"]["redirect_to"] == "https://app.example.com/auth/callback"
+    assert captured["json"]["redirect_to"] == "https://app.example.com/auth/callback"
+    assert captured["json"]["type"] == "invite"
+
+
+@pytest.mark.asyncio
+async def test_no_frontend_url_sends_no_redirect_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sin `FRONTEND_URL` no se inventa un destino.
+
+    Mandar un `redirect_to` vacío o basura sería peor que no mandarlo: Supabase
+    lo rechazaría o caería en la Site URL igual, pero con un error más difícil
+    de leer.
+    """
+    monkeypatch.setenv("FRONTEND_URL", "")
+    monkeypatch.setattr(auth_admin.httpx, "AsyncClient", _FakeClient)
+
+    await auth_admin.invite_user("sin@example.com", "Sin URL")
+
+    assert _FakeClient.captured["params"] == {}
+    assert "redirect_to" not in _FakeClient.captured["json"]
