@@ -90,6 +90,7 @@ Todo tenant-scoped: solo ve/afecta datos de la empresa del usuario autenticado (
 |---|---|---|---|
 | `GET` | `/api/v1/identity/users` | `identity.manage_users` | Lista usuarios de la empresa (paginado). |
 | `POST` | `/api/v1/identity/invitations` | `identity.manage_users` | Invita un usuario nuevo. Body `{email, full_name, role_id}` → 201 con el usuario en `status: "invited"`. |
+| `POST` | `/api/v1/identity/users/{id}/recovery-link` | `identity.manage_users` | **Enlace para volver a poner la contraseña, sin mandar correo.** Mismo mecanismo que `send_email: false` al invitar (`generate_link`, `type=recovery`): no consume cuota y el admin lo entrega a mano. Devuelve `{user_id, email, recovery_link}`. **Es una credencial de un solo uso** — quien la tenga puede cambiar esa contraseña y entrar como esa persona; queda auditado quién la generó y para quién, y el enlace NO se guarda en el `audit_log`. Rechaza usuarios inactivos (`409`): darles el enlace sería deshacer la desactivación por la puerta de atrás. |
 | `PATCH` | `/api/v1/identity/users/{id}/role` | `identity.manage_users` | Reasigna de rol. Body `{role_id}`. |
 | `POST` | `/api/v1/identity/users/{id}/deactivate` | `identity.manage_users` | → 204. |
 | `POST` | `/api/v1/identity/users/{id}/reactivate` | `identity.manage_users` | → 204. |
