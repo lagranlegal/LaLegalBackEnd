@@ -215,6 +215,13 @@ El corte es la **fecha de la sesión**, no su estado: una sesión de hoy ya cerr
 | `PATCH` | `/api/v1/inventory/items/{id}` | `inventory.create` | Solo mientras `status='draft'` (`409` si ya se publicó) y **solo `{photos?}`**. Desde 00022/00023 el nombre, la descripción, la categoría y el precio son del **producto** y se editan con `PATCH /products/{id}`, donde el cambio aplica a todos sus lotes — editarlos por lote permitía que dos lotes del mismo producto divergieran. Las fotos sí son del lote. |
 | `POST` | `/api/v1/inventory/items/{id}/publish` | `inventory.create` | Exige `sale_price` (body). La **foto solo es obligatoria si el producto es `is_unique`** (remates y piezas únicas) — ver abajo. El `sale_price` se fija en el **producto**, no en el lote. Arma el código desde las letras de `cat1`/`cat2`/`cat3` + consecutivo (`next_counter` por prefijo) + letra de proveedor (o `R` si `origin='auction'`). `draft→available`. |
 
+**Unidad de medida y cantidad decimal** (00036). `product.unit` es un enum (`unit` | `gram` | `kilogram` | `meter` | `liter`) y `quantity` es `numeric(14,3)` en `inventory_item`, `inventory_entry_line`, `inventory_exit_line` y `sale_line` — antes era `int`, así que **no se podía vender nada por peso ni por medida**. `ItemOut` y `ProductOut` traen además `unit_abbr` (`g`, `kg`, `m`, `L`, `u`) para que todos los consumidores muestren lo mismo.
+
+Tres reglas, todas en el servicio:
+- Un producto medido en `unit` **rechaza cantidades fraccionarias** (`400`), al comprar y al vender. Media cadena no existe.
+- Una línea de `POST /entries` puede traer `unit`, pero **solo se usa si CREA el producto**: si ya existe, se conserva la suya.
+- `PATCH /products/{id}` rechaza cambiar `unit` si el producto **ya tiene lotes** (`409`): reinterpretaría stock y ventas ya registradas.
+
 **La foto es del PRODUCTO, y solo obligatoria en piezas únicas** (00034). `product.photos` describe cómo se ve el producto: se toma una vez y **todos sus lotes la heredan**. `inventory_item.photos` se conserva como *override* del lote, para lo que sí es propio de una compra (una tara, el estado de una pieza rematada). `ItemOut.photos` devuelve las **efectivas**: las del lote si tiene, si no las del producto.
 
 Publicar exige foto únicamente cuando `product.is_unique` — el caso del remate, donde la foto es la evidencia de qué prenda dejó el cliente en garantía y donde cada pieza es irrepetible. Para mercancía fungible es opcional: obligarla hacía re-fotografiar en cada reposición algo ya fotografiado. Las fotos que llegan en una línea de `POST /entries` se guardan en el **producto**.
