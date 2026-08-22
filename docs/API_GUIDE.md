@@ -215,6 +215,14 @@ El corte es la **fecha de la sesión**, no su estado: una sesión de hoy ya cerr
 | `PATCH` | `/api/v1/inventory/items/{id}` | `inventory.create` | Solo mientras `status='draft'` (`409` si ya se publicó) y **solo `{photos?}`**. Desde 00022/00023 el nombre, la descripción, la categoría y el precio son del **producto** y se editan con `PATCH /products/{id}`, donde el cambio aplica a todos sus lotes — editarlos por lote permitía que dos lotes del mismo producto divergieran. Las fotos sí son del lote. |
 | `POST` | `/api/v1/inventory/items/{id}/publish` | `inventory.create` | Exige `sale_price` (body). La **foto solo es obligatoria si el producto es `is_unique`** (remates y piezas únicas) — ver abajo. El `sale_price` se fija en el **producto**, no en el lote. Arma el código desde las letras de `cat1`/`cat2`/`cat3` + consecutivo (`next_counter` por prefijo) + letra de proveedor (o `R` si `origin='auction'`). `draft→available`. |
 
+**Transformación de inventario** (00037). `POST /api/v1/inventory/transformations` con `inventory.transform` + `Idempotency-Key`. Entran N artículos, salen M, y **el costo viaja**: lo que costó lo que entra es lo que cuesta lo que sale, más `extra_cost`. El costo de las salidas **no se digita**.
+
+Cubre fundir, despiezar, armar y reparar con una sola operación — y lo que pase después con lo que sale es inventario común. `extra_cost` (lo que cobra el fundidor o el técnico) **se capitaliza**: exige `payment_method` y genera un movimiento con concepto `purchase`, no `expense`, porque es parte de producir el activo y no un gasto del mes.
+
+Con varias salidas el costo se reparte proporcional a `estimated_value` (mismo mecanismo que el remate); sin estimaciones, en partes iguales. La **merma** no se declara: sale de la diferencia entre lo que entró y lo que se dice haber recuperado, y sube el costo unitario sola.
+
+Consume artículos `available` **y `draft`** — fundir una prenda que nunca se publicó es el caso más común. Genera un egreso `transformation` y un ingreso `transformation` vinculados por el documento, que es **inmutable**: de una barra de oro no salen las tres cadenas otra vez. `GET /inventory/transformations/{id}` (`inventory.view`) devuelve lo consumido y lo producido juntos.
+
 **Unidad de medida y cantidad decimal** (00036). `product.unit` es un enum (`unit` | `gram` | `kilogram` | `meter` | `liter`) y `quantity` es `numeric(14,3)` en `inventory_item`, `inventory_entry_line`, `inventory_exit_line` y `sale_line` — antes era `int`, así que **no se podía vender nada por peso ni por medida**. `ItemOut` y `ProductOut` traen además `unit_abbr` (`g`, `kg`, `m`, `L`, `u`) para que todos los consumidores muestren lo mismo.
 
 Tres reglas, todas en el servicio:
