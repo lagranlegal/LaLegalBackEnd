@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,9 +12,11 @@ from app.modules.accounts import repository
 from app.modules.accounts.schemas import (
     AccountCreateIn,
     AccountOut,
+    AccountStatementOut,
     AccountUpdateIn,
     SettlementIn,
     SettlementOut,
+    StatementLineOut,
     TransferIn,
     TransferOut,
 )
@@ -444,3 +447,100 @@ async def list_transfers(
             )
         )
     return CursorPage(items=out, next_cursor=page.next_cursor)
+
+
+async def get_statement(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    account_id: UUID,
+    from_date: date,
+    to_date: date,
+) -> AccountStatementOut:
+    """Extracto de una cuenta, para conciliar contra el del banco.
+
+    Completa la idea que 00024 dejó escrita y a medias: *"solo las cuentas
+    `cash` entran al arqueo — el resto lleva saldo corriente y se concilia
+    aparte"*. El saldo existía; el "aparte" nunca se construyó, así que la
+    pantalla de Cuentas decía cuánto hay en el banco pero no cómo se llegó
+    ahí — y sin eso no se puede cuadrar.
+
+    EN EFECTIVO NO HAY SALDO CORRIENTE, y no es una carencia: la base del
+    cajón se vuelve a declarar en cada apertura y no es un movimiento, así que
+    acumular el histórico daría un número sin significado. El efectivo se
+    verifica CONTANDO. Se devuelven igual sus movimientos —sirven para ver qué
+    pasó por el cajón— pero sin saldo y diciéndolo.
+    """
+    row = await repository.get_account(db, company_id=company_id, account_id=account_id)
+    if row is None:
+        raise NotFoundError("La cuenta no existe en esta empresa.")
+    if from_date > to_date:
+        raise AppError("`from_date` no puede ser posterior a `to_date`.")
+
+    tipo = str(row._mapping["type"])
+    tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
+    acumula = tipo != "cash"
+
+    saldo_inicial = (
+        await repository.balance_before(
+            db,
+            company_id=company_id,
+            account_id=account_id,
+            from_date=from_date,
+            tz_name=tz_name,
+        )
+        if acumula
+        else None
+    )
+
+    movimientos = await repository.account_movements(
+        db,
+        company_id=company_id,
+        account_id=account_id,
+        from_date=from_date,
+        to_date=to_date,
+        tz_name=tz_name,
+    )
+
+    corriente = saldo_inicial if saldo_inicial is not None else Decimal("0")
+    total_in = Decimal("0")
+    total_out = Decimal("0")
+    lineas: list[StatementLineOut] = []
+    for m in movimientos:
+        d = m._mapping
+        monto = Decimal(str(d["amount"]))
+        if d["direction"] == "in":
+            total_in += monto
+            corriente += monto
+        else:
+            total_out += monto
+            corriente -= monto
+        lineas.append(
+            StatementLineOut(
+                movement_id=d["id"],
+                created_at=d["created_at"],
+                module=d["module"],
+                concept=d["concept"],
+                direction=d["direction"],
+                amount=monto,
+                payment_method=d["payment_method"],
+                notes=d["notes"],
+                reference_type=d["reference_type"],
+                reference_id=d["reference_id"],
+                running_balance=corriente if acumula else None,
+            )
+        )
+
+    return AccountStatementOut(
+        account_id=account_id,
+        name=row._mapping["name"],
+        type=tipo,
+        from_date=from_date,
+        to_date=to_date,
+        opening_balance=saldo_inicial,
+        total_in=total_in,
+        total_out=total_out,
+        closing_balance=corriente if acumula else None,
+        has_running_balance=acumula,
+        lines=lineas,
+    )

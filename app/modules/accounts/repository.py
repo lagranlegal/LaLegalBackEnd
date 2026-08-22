@@ -253,3 +253,73 @@ async def next_transfer_number(db: AsyncSession, *, company_id: UUID) -> int:
         {"cid": str(company_id)},
     )
     return int(result.scalar_one())
+
+
+async def balance_before(
+    db: AsyncSession, *, company_id: UUID, account_id: UUID, from_date: date, tz_name: str
+) -> Decimal:
+    """Saldo de la cuenta ANTES del rango — el punto de partida del extracto.
+
+    Es `opening_balance` más todo lo movido hasta el día anterior. Sin esto el
+    extracto arrancaría en cero y ninguna línea cuadraría contra el banco:
+    conciliar es justamente comparar saldos, no movimientos sueltos.
+
+    SOLO tiene sentido en `bank` y `settlement`. En una cuenta de EFECTIVO el
+    acumulado histórico no es un saldo: la base del cajón se vuelve a declarar
+    en cada apertura de caja y no es un movimiento, así que sumar todo daría
+    un número sin significado —y negativo, porque los préstamos desembolsados
+    superan lo cobrado—. El efectivo se verifica contando, en el arqueo.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              (select opening_balance from public.account
+                where company_id = :cid and id = :aid)
+              + coalesce(sum(case when m.direction = 'in' then m.amount else -m.amount end), 0)
+            from public.cash_movement m
+            where m.company_id = :cid
+              and m.account_id = :aid
+              and (m.created_at at time zone :tz)::date < :from_date
+            """
+        ),
+        {"cid": str(company_id), "aid": str(account_id), "tz": tz_name, "from_date": from_date},
+    )
+    return Decimal(str(result.scalar_one() or 0))
+
+
+async def account_movements(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    account_id: UUID,
+    from_date: date,
+    to_date: date,
+    tz_name: str,
+) -> list[Row[Any]]:
+    """Movimientos de una cuenta en el rango, del más viejo al más nuevo.
+
+    Ese orden y no el inverso: un extracto se lee hacia abajo acumulando, como
+    el del banco. Invertirlo obligaría a leer el saldo al revés.
+    """
+    result = await db.execute(
+        text(
+            """
+            select id, created_at, module, concept, direction, amount,
+                   payment_method, notes, reference_type, reference_id
+            from public.cash_movement
+            where company_id = :cid
+              and account_id = :aid
+              and (created_at at time zone :tz)::date between :from_date and :to_date
+            order by created_at, id
+            """
+        ),
+        {
+            "cid": str(company_id),
+            "aid": str(account_id),
+            "tz": tz_name,
+            "from_date": from_date,
+            "to_date": to_date,
+        },
+    )
+    return list(result.all())

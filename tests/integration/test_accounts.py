@@ -7,6 +7,8 @@ invisible. Requiere Postgres real (se salta si no hay).
 """
 
 from collections.abc import AsyncGenerator
+from datetime import date
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -676,3 +678,92 @@ def test_transfer_out_of_cash_lowers_expected_cash_of_the_close(
     conceptos = {line["concept"] for line in despues["lines"]}
     assert "transfer_out" in conceptos
     assert "transfer_in" in conceptos
+
+
+def test_bank_statement_carries_a_running_balance(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """El extracto es para CONCILIAR: sin saldo corriente no sirve.
+
+    La pantalla de Cuentas decía cuánto hay en el banco pero no cómo se llegó
+    ahí. Si el banco dice 4.200.000 y el sistema 4.350.000, sin extracto no
+    hay dónde buscar la diferencia.
+    """
+    token = accounts_tenant["token"]
+    banco = _create(client, token, name="Banco extracto", type="bank", opening_balance="1000000.00")
+    caja = next(a for a in _accounts(client, token) if a["type"] == "cash")
+
+    # Dos movimientos: sale plata al cajón y vuelve.
+    client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={"from_account_id": banco["id"], "to_account_id": caja["id"], "amount": "300000.00"},
+    )
+    client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={"from_account_id": caja["id"], "to_account_id": banco["id"], "amount": "50000.00"},
+    )
+
+    hoy = date.today().isoformat()
+    r = client.get(
+        f"/api/v1/accounts/{banco['id']}/statement",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": hoy, "to_date": hoy},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["has_running_balance"] is True
+    assert Decimal(body["opening_balance"]) == Decimal("1000000.00")
+    assert Decimal(body["total_out"]) == Decimal("300000.00")
+    assert Decimal(body["total_in"]) == Decimal("50000.00")
+    # 1.000.000 − 300.000 + 50.000 = 750.000, y el saldo de la ÚLTIMA línea
+    # tiene que coincidir con el cierre: si no, el extracto no cuadra consigo
+    # mismo y menos con el banco.
+    assert Decimal(body["closing_balance"]) == Decimal("750000.00")
+    assert Decimal(body["lines"][-1]["running_balance"]) == Decimal("750000.00")
+    # Y va del más viejo al más nuevo: un extracto se lee hacia abajo
+    # acumulando, como el del banco.
+    assert Decimal(body["lines"][0]["running_balance"]) == Decimal("700000.00")
+
+
+def test_cash_statement_has_no_running_balance_and_says_so(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """En efectivo no hay saldo corriente, y no es una carencia.
+
+    La base del cajón se vuelve a declarar en cada apertura y NO es un
+    movimiento, así que acumular el histórico daría un número sin significado
+    —y negativo, porque los préstamos desembolsados superan lo cobrado—. El
+    efectivo se verifica CONTANDO, en el arqueo.
+
+    Devolver un número igual sería peor que no devolverlo: alguien lo
+    conciliaría contra el cajón y nunca cuadraría.
+    """
+    token = accounts_tenant["token"]
+    caja = next(a for a in _accounts(client, token) if a["type"] == "cash")
+
+    hoy = date.today().isoformat()
+    body = client.get(
+        f"/api/v1/accounts/{caja['id']}/statement",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": hoy, "to_date": hoy},
+    ).json()
+
+    assert body["has_running_balance"] is False
+    assert body["opening_balance"] is None
+    assert body["closing_balance"] is None
+    # Los movimientos SÍ se devuelven: sirven para ver qué pasó por el cajón.
+    assert all(line["running_balance"] is None for line in body["lines"])
+
+
+def test_statement_rejects_an_inverted_range(client: TestClient, accounts_tenant: dict) -> None:
+    token = accounts_tenant["token"]
+    caja = next(a for a in _accounts(client, token) if a["type"] == "cash")
+    r = client.get(
+        f"/api/v1/accounts/{caja['id']}/statement",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": "2026-08-31", "to_date": "2026-08-01"},
+    )
+    assert r.status_code == 400

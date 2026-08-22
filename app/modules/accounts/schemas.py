@@ -118,3 +118,53 @@ class TransferOut(BaseModel):
     #: tener que volver a pedir el listado de cuentas.
     from_balance: Decimal
     to_balance: Decimal
+
+
+class StatementLineOut(BaseModel):
+    movement_id: UUID
+    created_at: datetime
+    module: str
+    concept: str
+    direction: str
+    amount: Decimal
+    payment_method: str | None
+    notes: str | None
+    reference_type: str | None
+    reference_id: UUID | None
+    #: Saldo DESPUÉS de este movimiento. `null` en cuentas de efectivo, donde
+    #: un acumulado histórico no es un saldo — ver `AccountStatementOut`.
+    running_balance: Decimal | None
+
+
+class AccountStatementOut(BaseModel):
+    """Extracto de una cuenta: los movimientos con saldo corriente, para
+    conciliar contra el extracto real del banco.
+
+    Es la mitad que faltaba de una idea que el proyecto ya tenía escrita desde
+    00024: *"solo las cuentas `cash` entran al arqueo — el resto lleva saldo
+    corriente y se concilia aparte"*. El saldo estaba; el "aparte" no se había
+    construido, así que la pantalla de Cuentas decía CUÁNTO tienes en el banco
+    pero no CÓMO llegaste ahí — y sin eso no se puede cuadrar: si el banco
+    dice 4.200.000 y el sistema 4.350.000, no hay dónde buscar la diferencia.
+    """
+
+    account_id: UUID
+    name: str
+    type: AccountType
+    from_date: date
+    to_date: date
+
+    #: Saldo al empezar el rango. `null` en efectivo.
+    opening_balance: Decimal | None
+    total_in: Decimal
+    total_out: Decimal
+    #: Saldo al cerrar el rango. `null` en efectivo.
+    closing_balance: Decimal | None
+
+    #: `false` en cuentas de EFECTIVO. No es una limitación técnica: en el
+    #: cajón la base se vuelve a declarar en cada apertura y no es un
+    #: movimiento, así que un acumulado histórico no significa nada. El
+    #: efectivo se verifica CONTANDO, en el arqueo — que es donde hay que
+    #: mirarlo, no acá.
+    has_running_balance: bool
+    lines: list[StatementLineOut]

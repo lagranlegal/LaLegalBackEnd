@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Annotated
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from app.modules.accounts import service
 from app.modules.accounts.schemas import (
     AccountCreateIn,
     AccountOut,
+    AccountStatementOut,
     AccountUpdateIn,
     SettlementIn,
     SettlementOut,
@@ -136,4 +138,36 @@ async def settle_account(
         account_id=account_id,
         body=body,
         actor_id=user.id,
+    )
+
+
+@router.get("/{account_id}/statement", response_model=AccountStatementOut)
+async def get_statement(
+    account_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    from_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+    to_date: Annotated[date, Query(description="Inclusivo, en la zona horaria de la empresa.")],
+) -> AccountStatementOut:
+    """Extracto de la cuenta: movimientos con **saldo corriente**, para
+    conciliar contra el extracto real del banco.
+
+    Completa lo que 00024 dejó escrito y a medias — *"solo las cuentas `cash`
+    entran al arqueo; el resto lleva saldo corriente y se concilia aparte"*.
+    El saldo ya se mostraba, pero no CÓMO se llegó a él, y sin eso no hay
+    forma de encontrar una diferencia contra el banco.
+
+    En cuentas de **efectivo** `has_running_balance` viene en `false` y los
+    saldos en `null`. No es una carencia: la base del cajón se redeclara en
+    cada apertura y no es un movimiento, así que acumular el histórico daría
+    un número sin significado. El efectivo se verifica **contando**, en el
+    arqueo. Sus movimientos sí se devuelven — sirven para ver qué pasó por el
+    cajón.
+    """
+    return await service.get_statement(
+        db,
+        company_id=user.company_id,
+        account_id=account_id,
+        from_date=from_date,
+        to_date=to_date,
     )
