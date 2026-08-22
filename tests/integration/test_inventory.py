@@ -573,7 +573,7 @@ def test_exit_reduces_stock_and_writes_off_at_zero(
     assert exit_resp.status_code == 201, exit_resp.text
 
     item = client.get(f"/api/v1/inventory/items/{item_id}", headers=headers).json()
-    assert item["quantity"] == 0
+    assert Decimal(item["quantity"]) == 0
     assert item["status"] == "written_off"
 
     exits_list = client.get("/api/v1/inventory/exits", headers=headers)
@@ -990,7 +990,7 @@ def test_products_list_groups_lots_and_sums_available(
     assert len(productos) == 1
     p = productos[0]
     assert p["lot_count"] == 2
-    assert p["available_quantity"] == 6
+    assert Decimal(p["available_quantity"]) == 6
     # El rango de costos es informativo: los costos NO se promedian.
     assert p["min_cost"] == "100000.00"
     assert p["max_cost"] == "150000.00"
@@ -1441,7 +1441,7 @@ def test_products_filter_by_category_and_stock(client: TestClient, inventory_ten
     assert _get(cat1_id=str(inventory_tenant["cat3"])) == []
 
     con_stock = _get(in_stock=True)
-    assert all(p["available_quantity"] > 0 for p in con_stock)
+    assert all(Decimal(p["available_quantity"]) > 0 for p in con_stock)
     assert "Cadena sin publicar" not in {p["name"] for p in con_stock}
 
     por_proveedor = _get(supplier_id=str(inventory_tenant["supplier_id"]))
@@ -1762,3 +1762,119 @@ def test_paying_a_purchase_needs_its_own_permission(
     )
     assert ok.status_code == 200, ok.text
     assert ok.json()["paid_at"] is not None
+
+
+def test_a_product_measured_in_grams_accepts_fractional_stock(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Vender por peso, que era imposible hasta 00036.
+
+    `quantity` era `int` en las cuatro tablas del flujo de mercancía, así que
+    12,5 g no se podía ni registrar. Salió diseñando la fundición, pero no es
+    una función de oro: ninguna compraventa podía vender NADA por peso ni por
+    medida.
+    """
+    token = inventory_tenant["token"]
+    payload = _entry_with(
+        inventory_tenant,
+        "Oro 18k",
+        unit="gram",
+        quantity="31.200",
+        unit_cost="19230.00",
+        sale_price="24000.00",
+        photos=["oro.jpg"],
+    )
+    del payload["payment_method"]
+
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
+    assert entry.status_code == 201, entry.text
+    lote = entry.json()["items"][0]
+
+    assert Decimal(lote["quantity"]) == Decimal("31.200")
+    assert lote["unit"] == "gram"
+    # La abreviatura la manda el backend para que front, comprobantes y
+    # reportes digan todos lo mismo: si cada uno tradujera por su cuenta,
+    # "12,5 g" y "12,5 gr" acabarían conviviendo en la misma venta.
+    assert lote["unit_abbr"] == "g"
+
+    productos = _products(client, token, q="Oro 18k")
+    assert Decimal(productos[0]["available_quantity"]) == Decimal("31.200")
+    assert productos[0]["unit_abbr"] == "g"
+
+
+def test_a_product_measured_in_units_rejects_fractions(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Media cadena no existe.
+
+    En un producto contable una cantidad fraccionaria es un error de
+    digitación —una coma donde iba un punto— y registrarlo dejaría un stock
+    imposible que nadie nota hasta que el conteo físico no cuadre.
+    """
+    token = inventory_tenant["token"]
+    payload = _entry_with(inventory_tenant, "Cadena contable", quantity="1.5")
+    del payload["payment_method"]
+
+    rechazado = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
+    assert rechazado.status_code == 400, rechazado.text
+    assert "fraccionarias" in rechazado.json()["message"]
+
+    # Y con cantidad entera pasa sin problema.
+    payload["lines"][0]["quantity"] = "2"
+    ok = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=payload
+    )
+    assert ok.status_code == 201, ok.text
+
+
+def test_the_unit_cannot_change_once_there_is_stock(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Doce unidades no son doce gramos.
+
+    Cambiar la unidad de un producto con lotes reinterpretaría todo lo ya
+    registrado —stock, ventas pasadas, valorización— sin que nada lo
+    advierta. Mismo criterio que impide cambiar el TIPO de una cuenta: un dato
+    que da sentido a los hechos ya guardados no se toca después.
+    """
+    token = inventory_tenant["token"]
+    payload = _entry_with(inventory_tenant, "Producto con unidad")
+    del payload["payment_method"]
+    client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
+
+    producto = _products(client, token, q="unidad")[0]
+    rechazado = client.patch(
+        f"/api/v1/inventory/products/{producto['id']}",
+        headers=_headers(token),
+        json={"unit": "gram"},
+    )
+    assert rechazado.status_code == 409, rechazado.text
+    assert "ya tiene lotes" in rechazado.json()["message"]
+
+
+def test_restocking_keeps_the_unit_of_the_existing_product(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Reponer no puede cambiar la unidad por descuido.
+
+    Si una compra nueva pudiera imponer su unidad, bastaría con dejar el
+    selector en su valor por defecto para reinterpretar en silencio el stock
+    anterior del producto.
+    """
+    token = inventory_tenant["token"]
+    primera = _entry_with(inventory_tenant, "Cable por metro", unit="meter", quantity="10.5")
+    del primera["payment_method"]
+    r1 = client.post("/api/v1/inventory/entries", headers=_headers(token), json=primera).json()
+    assert r1["items"][0]["unit"] == "meter"
+
+    # Segunda compra del MISMO producto, con la unidad por defecto.
+    segunda = _entry_with(inventory_tenant, "Cable por metro", quantity="4.25")
+    del segunda["payment_method"]
+    r2 = client.post(
+        "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=segunda
+    )
+    assert r2.status_code == 201, r2.text
+    # Conserva "meter" — y por eso acepta 4,25, que en "unit" habría sido
+    # rechazado.
+    assert r2.json()["items"][0]["unit"] == "meter"
+    assert Decimal(r2.json()["items"][0]["quantity"]) == Decimal("4.25")

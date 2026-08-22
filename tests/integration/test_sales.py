@@ -4,6 +4,7 @@ permiso condicional, anulación repone stock + contra-movimiento. Requiere
 Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -182,6 +183,9 @@ async def sales_tenant(
     yield {
         "company_id": company_id,
         "item_id": item_id,
+        "cat1": cat1,
+        "cat2": cat2,
+        "cat3": cat3,
         "register_id": register_id,
         "full_token": full_token,
         "limited_token": limited_token,
@@ -513,3 +517,116 @@ async def test_void_sale_restores_stock_and_blocks_double_void(
         f"/api/v1/sales/{sale['id']}/void", headers=void_headers, json={"reason": "otra vez"}
     )
     assert second_void.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_selling_by_weight_charges_the_exact_amount(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    """Vender 12,5 g de oro y cobrar lo que corresponde.
+
+    Era imposible hasta 00036: `quantity` era `int` en las cuatro tablas del
+    flujo de mercancía. Este test mira las dos mitades del cambio — que el
+    stock fraccionario se descuente bien, y que el DINERO salga exacto.
+    """
+    company_id = sales_tenant["company_id"]
+    gold_product, gold_item = uuid4(), uuid4()
+
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.product "
+                "(id, company_id, code, name, cat1_id, cat2_id, cat3_id, sale_price, unit) "
+                "values (:id, :cid, 'MOO0001', 'Oro 18k', :cat1, :cat2, :cat3, 24000, 'gram')"
+            ),
+            {
+                "id": str(gold_product),
+                "cid": str(company_id),
+                "cat1": str(sales_tenant["cat1"]),
+                "cat2": str(sales_tenant["cat2"]),
+                "cat3": str(sales_tenant["cat3"]),
+            },
+        )
+        await session.execute(
+            text(
+                "insert into public.inventory_item "
+                "(id, company_id, product_id, lot_number, code, origin, cost, quantity, status) "
+                "values (:id, :cid, :pid, 1, 'MOO0001-01P', 'other', 19230, 31.200, 'available')"
+            ),
+            {"id": str(gold_item), "cid": str(company_id), "pid": str(gold_product)},
+        )
+        await session.execute(
+            text(
+                "insert into public.cash_session "
+                "(company_id, register_id, opened_by, opening_balance, status) "
+                "values (:cid, :rid, :cid, 0, 'open')"
+            ),
+            {"cid": str(company_id), "rid": str(sales_tenant["register_id"])},
+        )
+
+    venta = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "lines": [{"item_id": str(gold_item), "quantity": "12.500", "unit_price": "24000.00"}],
+        },
+    )
+    assert venta.status_code == 201, venta.text
+    cuerpo = venta.json()
+
+    # 12,5 × 24.000 = 300.000 exactos. Si el subtotal no se redondeara a dos
+    # decimales ANTES de sumarse, el total del recibo podría no cuadrar con la
+    # suma de sus líneas.
+    assert Decimal(cuerpo["total"]) == Decimal("300000.00")
+    assert Decimal(cuerpo["lines"][0]["quantity"]) == Decimal("12.500")
+
+    async with AsyncSessionLocal() as session:
+        restante = (
+            await session.execute(
+                text("select quantity from public.inventory_item where id = :id"),
+                {"id": str(gold_item)},
+            )
+        ).scalar_one()
+    # 31,2 − 12,5 = 18,7. Con enteros esto habría sido imposible de expresar.
+    assert Decimal(restante) == Decimal("18.700")
+
+
+@pytest.mark.asyncio
+async def test_selling_a_fraction_of_a_countable_product_is_rejected(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    """Media cadena no se vende.
+
+    Acá el error cuesta más caro que en una compra: descontaría stock
+    imposible y cobraría un total que no corresponde a nada.
+    """
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.cash_session "
+                "(company_id, register_id, opened_by, opening_balance, status) "
+                "values (:cid, :rid, :cid, 0, 'open')"
+            ),
+            {
+                "cid": str(sales_tenant["company_id"]),
+                "rid": str(sales_tenant["register_id"]),
+            },
+        )
+
+    rechazada = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "item_id": str(sales_tenant["item_id"]),
+                    "quantity": "0.5",
+                    "unit_price": "500000.00",
+                }
+            ],
+        },
+    )
+    assert rechazada.status_code == 400, rechazada.text
+    assert "fraccionarias" in rechazada.json()["message"]

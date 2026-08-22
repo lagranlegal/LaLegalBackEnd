@@ -11,7 +11,7 @@ from app.core.errors import AppError, ConflictError, NotFoundError
 from app.modules.cashbox import integration as cashbox_integration
 from app.modules.catalogs import repository as catalogs_repo
 from app.modules.identity import repository as identity_repo
-from app.modules.inventory import repository, rules
+from app.modules.inventory import repository, rules, units
 from app.modules.inventory.schemas import (
     EntryCreateIn,
     EntryOut,
@@ -25,6 +25,7 @@ from app.modules.inventory.schemas import (
     ProductPurchaseOut,
     ProductUpdateIn,
 )
+from app.modules.inventory.units import UNIT_ABBREVIATIONS
 from app.modules.platform import integration as platform_integration
 
 _LEVEL_1, _LEVEL_2, _LEVEL_3 = 1, 2, 3
@@ -46,6 +47,8 @@ def _row_to_item(row: Row[Any]) -> ItemOut:
         cost=m["cost"],
         sale_price=m["sale_price"],
         quantity=m["quantity"],
+        unit=m["unit"],
+        unit_abbr=UNIT_ABBREVIATIONS.get(m["unit"], m["unit"]),
         status=m["status"],
         photos=list(m["photos"] or []),
         entry_date=m["entry_date"],
@@ -113,7 +116,8 @@ async def _resolve_product(
     cat3_id: UUID,
     description: str | None,
     is_unique: bool = False,
-) -> UUID:
+    unit: str = "unit",
+) -> tuple[UUID, str]:
     """Devuelve el producto al que pertenece un lote nuevo, creándolo si es la
     primera vez que se compra.
 
@@ -135,7 +139,9 @@ async def _resolve_product(
             cat3_id=cat3_id,
         )
         if existing is not None:
-            return UUID(str(existing._mapping["id"]))
+            # La unidad del producto EXISTENTE manda: cambiarla desde una
+            # compra reinterpretaría todo su stock anterior sin avisar.
+            return UUID(str(existing._mapping["id"])), str(existing._mapping["unit"])
 
     product_id = uuid4()
     await repository.insert_product(
@@ -148,8 +154,9 @@ async def _resolve_product(
         cat3_id=cat3_id,
         description=description,
         is_unique=is_unique,
+        unit=unit,
     )
-    return product_id
+    return product_id, unit
 
 
 async def create_entry(
@@ -256,7 +263,7 @@ async def create_entry(
         # El producto se resuelve ANTES del lote: desde 00022 un lote sin
         # producto no tendría ni nombre ni categoría. Si ya se compró algo
         # igual, cae en ese producto y suma un lote.
-        product_id = await _resolve_product(
+        product_id, unidad = await _resolve_product(
             db,
             company_id=company_id,
             name=line.name,
@@ -264,7 +271,19 @@ async def create_entry(
             cat2_id=line.cat2_id,
             cat3_id=line.cat3_id,
             description=line.description,
+            unit=line.unit,
         )
+
+        # Media cadena no existe. Si el producto se mide en unidades, una
+        # cantidad fraccionaria es un error de digitación —una coma donde iba
+        # un punto, típicamente— y registrarlo dejaría un stock imposible que
+        # nadie va a notar hasta que el conteo físico no cuadre.
+        if not units.is_valid_quantity(unidad, line.quantity):
+            raise AppError(
+                f"«{line.name}» se mide en {UNIT_ABBREVIATIONS.get(unidad, unidad)} y no admite "
+                "cantidades fraccionarias.",
+                details={"quantity": str(line.quantity), "unit": unidad},
+            )
         lot_number = await repository.next_lot_number(
             db, company_id=company_id, product_id=product_id
         )
@@ -431,7 +450,7 @@ async def create_exit(
         if item._mapping["quantity"] < line.quantity:
             raise AppError(
                 "No hay suficiente cantidad disponible para el egreso.",
-                details={"item_id": str(line.item_id), "available": item._mapping["quantity"]},
+                details={"item_id": str(line.item_id), "available": str(item._mapping["quantity"])},
             )
         items.append((item, line.quantity))
 
@@ -740,6 +759,8 @@ def _row_to_product(row: Row[Any]) -> ProductOut:
         active=m["active"],
         lot_count=m["lot_count"],
         available_quantity=m["available_quantity"],
+        unit=m["unit"],
+        unit_abbr=UNIT_ABBREVIATIONS.get(m["unit"], m["unit"]),
         min_cost=m["min_cost"],
         max_cost=m["max_cost"],
         photos=list(m["photos"] or []),
@@ -800,10 +821,28 @@ async def update_product(
     Las ventas ya hechas NO se ven afectadas: `sale_line` congela su propio
     `unit_price` al vender, igual que el costo.
     """
-    if await repository.get_product(db, company_id=company_id, product_id=product_id) is None:
+    producto = await repository.get_product(db, company_id=company_id, product_id=product_id)
+    if producto is None:
         raise NotFoundError("El producto no existe en esta empresa.")
 
     fields = body.model_dump(exclude_unset=True)
+
+    # LA UNIDAD NO SE CAMBIA CON STOCK REGISTRADO. Doce unidades no son doce
+    # gramos: cambiarla reinterpretaría todo lo que ya existe —lotes, ventas
+    # pasadas, valorización— sin que nada lo advierta, y el inventario pasaría
+    # a decir algo falso con total confianza.
+    #
+    # Es el mismo criterio que impide cambiar el TIPO de una cuenta (00024):
+    # un dato que da sentido a los hechos ya registrados no se toca después.
+    nueva_unidad = fields.get("unit")
+    if nueva_unidad is not None and nueva_unidad != producto._mapping["unit"]:
+        if await repository.product_has_lots(db, company_id=company_id, product_id=product_id):
+            raise ConflictError(
+                "No se puede cambiar la unidad de un producto que ya tiene lotes: "
+                "reinterpretaría el stock y las ventas ya registradas. Crea un "
+                "producto nuevo con la unidad correcta.",
+                details={"unit_actual": producto._mapping["unit"], "unit_nueva": nueva_unidad},
+            )
     await repository.update_product_fields(
         db, company_id=company_id, product_id=product_id, fields=fields
     )

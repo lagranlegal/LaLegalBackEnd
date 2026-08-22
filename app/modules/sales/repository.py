@@ -80,7 +80,7 @@ async def insert_sale_line(
     company_id: UUID,
     sale_id: UUID,
     item_id: UUID,
-    quantity: int,
+    quantity: Decimal,
     unit_price: Decimal,
     unit_cost: Decimal,
     subtotal: Decimal,

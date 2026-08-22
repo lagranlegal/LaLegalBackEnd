@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.common.money import Money
+from app.modules.inventory.units import ProductUnit
 
 #: De dónde salió la mercancía. Cada uno se costea y se reporta distinto, así
 #: que no son etiquetas cosméticas (00033):
@@ -38,7 +39,13 @@ class ItemOut(BaseModel):
     source_contract_id: UUID | None
     cost: Decimal
     sale_price: Decimal | None
-    quantity: int
+    #: Decimal desde 00036: un producto medido en gramos o metros tiene stock
+    #: fraccionario. Si su unidad es `unit`, el servicio rechaza fracciones.
+    quantity: Decimal
+    #: Unidad del PRODUCTO, repetida acá para que quien muestre un lote no
+    #: tenga que ir a buscarla — un "12,5" sin unidad no dice nada.
+    unit: str
+    unit_abbr: str
     status: str
     photos: list[str]
     entry_date: date
@@ -75,7 +82,12 @@ class EntryLineIn(BaseModel):
     cat3_id: UUID
     description: str | None = None
     unit_cost: Money
-    quantity: int = Field(default=1, ge=1)
+    #: Cuánto entró. Decimal desde 00036 (gramos, metros). El servicio la
+    #: valida contra la unidad del producto: `unit` no admite fracciones.
+    quantity: Decimal = Field(default=Decimal("1"), gt=0)
+    #: Unidad del producto — solo se usa cuando la línea CREA el producto; si
+    #: ya existe, se conserva la suya (cambiarla reinterpretaría su stock).
+    unit: ProductUnit = "unit"
     photos: list[str] = Field(default_factory=list)
     #: Precio de venta del PRODUCTO. Opcional, y si el producto ya tiene uno
     #: no hace falta repetirlo — se conserva el vigente.
@@ -139,7 +151,7 @@ class EntryPayIn(BaseModel):
 
 class ExitLineIn(BaseModel):
     item_id: UUID
-    quantity: int = Field(ge=1)
+    quantity: Decimal = Field(gt=0)
 
 
 class ExitCreateIn(BaseModel):
@@ -176,8 +188,12 @@ class ProductOut(BaseModel):
     active: bool
     #: Lotes vivos (sin contar los dados de baja).
     lot_count: int
-    #: Unidades listas para vender — el número que busca el vendedor.
-    available_quantity: int
+    #: Unidades listas para vender — el número que busca el vendedor. En
+    #: gramos o metros puede tener decimales.
+    available_quantity: Decimal
+    #: En qué se mide este producto (00036).
+    unit: str
+    unit_abbr: str
     #: Rango de costos entre lotes. Una dispersión grande es señal de que el
     #: precio de compra se movió: vale la pena revisar el precio de venta.
     min_cost: Decimal | None
@@ -199,6 +215,10 @@ class ProductUpdateIn(BaseModel):
     sale_price: Money | None = None
     active: bool | None = None
     photos: list[str] | None = None
+    #: Cambiar la unidad reinterpreta TODO el stock existente (12 unidades no
+    #: son 12 gramos), así que solo se acepta mientras el producto no tenga
+    #: lotes — lo valida el servicio.
+    unit: ProductUnit | None = None
 
 
 class ProductPurchaseOut(BaseModel):
@@ -215,7 +235,7 @@ class ProductPurchaseOut(BaseModel):
     entry_date: date
     supplier_id: UUID | None
     supplier_name: str | None
-    quantity: int
+    quantity: Decimal
     unit_cost: Decimal
     total_cost: Decimal
     lot_code: str | None

@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _ITEM_COLUMNS = (
     "i.id, i.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description, "
     "i.origin, i.supplier_id, i.source_contract_id, i.cost, p.sale_price, "
-    "i.quantity, i.status, "
+    "i.quantity, p.unit, "
+    "i.status, "
     "case when jsonb_array_length(i.photos) > 0 then i.photos else p.photos end as photos, "
     "i.entry_date, i.product_id, i.lot_number, "
     "i.created_at"
@@ -58,7 +59,7 @@ async def insert_item(
     supplier_id: UUID | None,
     source_contract_id: UUID | None,
     cost: Decimal,
-    quantity: int,
+    quantity: Decimal,
     photos: list[str],
     created_by: UUID | None,
     entry_date: date | None = None,
@@ -295,7 +296,7 @@ async def insert_entry_line(
     company_id: UUID,
     entry_id: UUID,
     item_id: UUID,
-    quantity: int,
+    quantity: Decimal,
     unit_cost: Decimal,
 ) -> None:
     await db.execute(
@@ -455,7 +456,7 @@ async def insert_exit_line(
     company_id: UUID,
     exit_id: UUID,
     item_id: UUID,
-    quantity: int,
+    quantity: Decimal,
 ) -> None:
     await db.execute(
         text(
@@ -517,7 +518,7 @@ async def list_exits(
 
 
 async def adjust_item_quantity(
-    db: AsyncSession, *, company_id: UUID, item_id: UUID, delta: int, new_status: str | None
+    db: AsyncSession, *, company_id: UUID, item_id: UUID, delta: Decimal, new_status: str | None
 ) -> None:
     query = "update public.inventory_item set quantity = quantity + :delta"
     params: dict[str, Any] = {"company_id": str(company_id), "id": str(item_id), "delta": delta}
@@ -571,7 +572,7 @@ async def mark_entry_paid(
 
 _PRODUCT_COLUMNS = (
     "id, code, name, cat1_id, cat2_id, cat3_id, description, sale_price, is_unique, "
-    "active, photos, created_at"
+    "active, photos, unit, created_at"
 )
 
 
@@ -635,6 +636,7 @@ async def insert_product(
     cat3_id: UUID,
     description: str | None,
     is_unique: bool = False,
+    unit: str = "unit",
 ) -> None:
     """El producto nace SIN código: el SKU se emite al publicar su primer
     lote, igual que antes se emitía el código de la pieza. Así un producto
@@ -644,9 +646,10 @@ async def insert_product(
         text(
             """
             insert into public.product
-                (id, company_id, name, cat1_id, cat2_id, cat3_id, description, is_unique)
+                (id, company_id, name, cat1_id, cat2_id, cat3_id, description, is_unique, unit)
             values
-                (:id, :company_id, :name, :cat1_id, :cat2_id, :cat3_id, :description, :is_unique)
+                (:id, :company_id, :name, :cat1_id, :cat2_id, :cat3_id, :description, :is_unique,
+                 :unit)
             """
         ),
         {
@@ -658,6 +661,7 @@ async def insert_product(
             "cat3_id": str(cat3_id),
             "description": description,
             "is_unique": is_unique,
+            "unit": unit,
         },
     )
 
@@ -744,7 +748,7 @@ async def list_products(
     query = """
         select
           p.id, p.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description,
-          p.sale_price, p.is_unique, p.active, p.photos, p.created_at,
+          p.sale_price, p.is_unique, p.active, p.photos, p.unit, p.created_at,
           coalesce(count(i.id) filter (where i.status <> 'written_off'), 0) as lot_count,
           coalesce(sum(i.quantity) filter (where i.status = 'available'), 0)
             as available_quantity,
@@ -879,3 +883,20 @@ async def product_purchases(
         {"cid": str(company_id), "pid": str(product_id)},
     )
     return list(result.all())
+
+
+async def product_has_lots(db: AsyncSession, *, company_id: UUID, product_id: UUID) -> bool:
+    """¿Este producto ya tiene lotes?
+
+    Decide si su unidad todavía se puede cambiar: con stock registrado,
+    cambiarla reinterpretaría lo que ya existe (12 unidades no son 12 gramos)
+    y el inventario pasaría a decir algo falso sin que nada lo advierta.
+    """
+    result = await db.execute(
+        text(
+            "select 1 from public.inventory_item "
+            "where company_id = :cid and product_id = :pid limit 1"
+        ),
+        {"cid": str(company_id), "pid": str(product_id)},
+    )
+    return result.first() is not None

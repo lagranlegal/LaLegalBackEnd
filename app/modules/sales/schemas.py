@@ -12,7 +12,10 @@ PaymentMethod = Literal["cash", "transfer", "other"]
 
 class SaleLineIn(BaseModel):
     item_id: UUID
-    quantity: int = Field(ge=1)
+    #: Decimal desde 00036: vender 12,5 g de oro o 3,25 m de cable. El
+    #: servicio la valida contra la unidad del producto — si se mide en
+    #: unidades, rechaza fracciones.
+    quantity: Decimal = Field(gt=0)
     unit_price: Money
 
 
@@ -32,7 +35,7 @@ class SaleCreateIn(BaseModel):
 class SaleLineOut(BaseModel):
     id: UUID
     item_id: UUID
-    quantity: int
+    quantity: Decimal
     unit_price: Decimal
     # Costo CONGELADO al vender, no leído del artículo al consultar: el costo
     # de una venta es un hecho histórico y un reporte de un período cerrado no

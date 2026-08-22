@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
 from app.core.errors import (
     AppError,
@@ -17,6 +18,8 @@ from app.core.security import CurrentUser, has_permission
 from app.modules.cashbox import integration as cashbox_integration
 from app.modules.identity import repository as identity_repo
 from app.modules.inventory import repository as inventory_repo
+from app.modules.inventory import units
+from app.modules.inventory.units import UNIT_ABBREVIATIONS
 from app.modules.sales import repository
 from app.modules.sales.schemas import SaleCreateIn, SaleLineOut, SaleOut
 
@@ -85,9 +88,27 @@ async def create_sale(
         if m["quantity"] < line.quantity:
             raise AppError(
                 "No hay suficiente cantidad disponible.",
-                details={"item_id": str(line.item_id), "available": m["quantity"]},
+                details={"item_id": str(line.item_id), "available": str(m["quantity"])},
             )
-        subtotal = line.unit_price * line.quantity
+
+        # Media cadena no se vende. Si el producto se mide en unidades, una
+        # cantidad fraccionaria es un error de digitación, y acá cuesta más
+        # caro que en una compra: descuenta stock imposible y cobra un total
+        # que no corresponde a nada.
+        if not units.is_valid_quantity(m["unit"], line.quantity):
+            raise AppError(
+                f"«{m['name']}» se mide en "
+                f"{UNIT_ABBREVIATIONS.get(m['unit'], m['unit'])} y no admite "
+                "cantidades fraccionarias.",
+                details={"quantity": str(line.quantity), "unit": m["unit"]},
+            )
+
+        # `quantize` porque la cantidad ya puede tener decimales: 12,5 g a
+        # 19.230 da 240.375,0 exacto, pero 0,333 kg a 1.000 daría 333,0 y
+        # cualquier otra combinación puede arrastrar milésimas de peso. El
+        # dinero se redondea a dos decimales ANTES de sumarse, nunca después
+        # — si no, el total del recibo no cuadraría con la suma de sus líneas.
+        subtotal = quantize(line.unit_price * line.quantity)
         subtotal_sum += subtotal
         # El costo se toma del artículo ACÁ, en el momento de vender, y se
         # congela en la línea (00019). No se lee al consultar: el costo de una

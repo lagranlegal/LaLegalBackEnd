@@ -93,6 +93,10 @@ async def create_draft_items_from_auction(
             cat3_id=cat3_id,
             description=auction_item.description,
             is_unique=True,
+            # Una prenda rematada es UNA pieza: se cuenta, no se pesa. Si
+            # después se funde, el oro resultante será otro producto con su
+            # propia unidad — que es justo el caso que 00036 destraba.
+            unit="unit",
         )
         # Las fotos de la prenda van al PRODUCTO (00034), que acá es 1:1 con
         # la pieza porque un remate siempre crea un producto único. Es el
@@ -117,7 +121,7 @@ async def create_draft_items_from_auction(
             supplier_id=None,
             source_contract_id=source_contract_id,
             cost=cost,
-            quantity=1,
+            quantity=Decimal("1"),
             # Vacío a propósito: las fotos ya quedaron en el producto, que
             # para un remate es esta misma pieza. `ItemOut.photos` las
             # resuelve por herencia, así que el artículo sigue naciendo
@@ -131,7 +135,7 @@ async def create_draft_items_from_auction(
             company_id=company_id,
             entry_id=entry_id,
             item_id=item_id,
-            quantity=1,
+            quantity=Decimal("1"),
             unit_cost=cost,
         )
 
