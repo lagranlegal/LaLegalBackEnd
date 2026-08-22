@@ -12,10 +12,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # `product`: el lote solo guarda lo que es propio de ESA compra. `ItemOut`
 # conserva su forma —sigue exponiendo esos campos— pero salen del JOIN, así
 # que ningún consumidor tuvo que cambiar por la contracción.
+# `photos` son las EFECTIVAS del lote: las suyas si tiene, y si no las del
+# producto (00034). La foto es de "qué es esto" y vive en el producto; el lote
+# solo la sobrescribe cuando hay algo propio de ESA compra que documentar —una
+# tara, el estado de una pieza rematada—. Así reponer no obliga a volver a
+# fotografiar lo mismo.
 _ITEM_COLUMNS = (
     "i.id, i.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description, "
     "i.origin, i.supplier_id, i.source_contract_id, i.cost, p.sale_price, "
-    "i.quantity, i.status, i.photos, i.entry_date, i.product_id, i.lot_number, "
+    "i.quantity, i.status, "
+    "case when jsonb_array_length(i.photos) > 0 then i.photos else p.photos end as photos, "
+    "i.entry_date, i.product_id, i.lot_number, "
     "i.created_at"
 )
 # Los filtros de categoría apuntan a `product` (ahí viven ahora); el de
@@ -564,7 +571,7 @@ async def mark_entry_paid(
 
 _PRODUCT_COLUMNS = (
     "id, code, name, cat1_id, cat2_id, cat3_id, description, sale_price, is_unique, "
-    "active, created_at"
+    "active, photos, created_at"
 )
 
 
@@ -737,7 +744,7 @@ async def list_products(
     query = """
         select
           p.id, p.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description,
-          p.sale_price, p.is_unique, p.active, p.created_at,
+          p.sale_price, p.is_unique, p.active, p.photos, p.created_at,
           coalesce(count(i.id) filter (where i.status <> 'written_off'), 0) as lot_count,
           coalesce(sum(i.quantity) filter (where i.status = 'available'), 0)
             as available_quantity,
@@ -818,11 +825,21 @@ async def update_product_fields(
     """
     if not fields:
         return
-    assignments = ", ".join(f"{key} = :{key}" for key in fields)
-    params = {**fields, "company_id": str(company_id), "id": str(product_id)}
+    fields = dict(fields)
+    assignment_parts = []
+    params: dict[str, Any] = {"company_id": str(company_id), "id": str(product_id)}
+    # `photos` es jsonb y necesita cast explícito — mismo manejo que en
+    # `update_item_fields`.
+    if "photos" in fields:
+        assignment_parts.append("photos = cast(:photos as jsonb)")
+        params["photos"] = json.dumps(fields.pop("photos"))
+    for key, value in fields.items():
+        assignment_parts.append(f"{key} = :{key}")
+        params[key] = value
     await db.execute(
         text(
-            f"update public.product set {assignments} where company_id = :company_id and id = :id"
+            f"update public.product set {', '.join(assignment_parts)} "
+            "where company_id = :company_id and id = :id"
         ),
         params,
     )

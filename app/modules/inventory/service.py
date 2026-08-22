@@ -269,6 +269,22 @@ async def create_entry(
             db, company_id=company_id, product_id=product_id
         )
 
+        # Las fotos que se suben en una compra son del PRODUCTO, no del lote
+        # (00034): describen qué es la cosa, no esta compra en particular. Así
+        # se toman una vez y todos los lotes las heredan — reponer deja de
+        # obligar a re-fotografiar lo mismo, que era la queja concreta.
+        #
+        # El lote conserva su propia columna para lo que sí es suyo (una tara,
+        # el estado de una pieza rematada) y se edita desde el diálogo del
+        # lote; por eso acá se inserta vacío y no duplicado.
+        if line.photos:
+            await repository.update_product_fields(
+                db,
+                company_id=company_id,
+                product_id=product_id,
+                fields={"photos": line.photos},
+            )
+
         item_id = uuid4()
         await repository.insert_item(
             db,
@@ -281,7 +297,7 @@ async def create_entry(
             source_contract_id=None,
             cost=line.unit_cost,
             quantity=line.quantity,
-            photos=line.photos,
+            photos=[],
             created_by=registered_by,
             # La fecha del INGRESO, no la de hoy: una compra cargada con fecha
             # de la semana pasada tiene que decir que entró la semana pasada.
@@ -321,7 +337,10 @@ async def create_entry(
             if producto is not None:
                 precio = producto._mapping["sale_price"]
 
-        if precio is not None and precio > 0 and line.photos:
+        # Ya no exige foto: desde 00034 solo las piezas ÚNICAS la necesitan, y
+        # un ingreso nunca crea productos únicos (eso solo lo hace el remate).
+        # Basta con el precio para que el lote nazca vendible.
+        if precio is not None and precio > 0:
             await publish_item(
                 db,
                 company_id=company_id,
@@ -557,9 +576,6 @@ async def publish_item(
     m = row._mapping
     if m["status"] != "draft":
         raise ConflictError("El artículo ya fue publicado.")
-    photos = list(m["photos"] or [])
-    if not photos:
-        raise AppError("El artículo necesita al menos una foto para publicarse.")
 
     # El precio va SOLO al producto (más abajo). Desde 00022 el lote ya no
     # tiene columna de precio: el dato existe una sola vez.
@@ -605,6 +621,26 @@ async def publish_item(
     product = await repository.get_product(db, company_id=company_id, product_id=product_id)
     if product is None:
         raise AppError("El producto del artículo no existe en esta empresa.")
+
+    # LA FOTO SOLO ES OBLIGATORIA EN PIEZAS ÚNICAS (00034).
+    #
+    # Antes se exigía para todo artículo. La regla venía del spec original,
+    # donde la frase estaba escrita pensando en el REMATE — y ahí sí tiene una
+    # razón fuerte: la foto es evidencia de qué prenda dejó el cliente en
+    # garantía, y en joyería el cliente no compra "una cadena", compra ESA
+    # cadena. Un remate crea siempre un producto `is_unique`.
+    #
+    # Para mercancía fungible —cincuenta fundas iguales compradas por
+    # docenas— era fricción sin beneficio: obligaba a fotografiar en cada
+    # reposición algo que ya estaba fotografiado. `m["photos"]` son las fotos
+    # EFECTIVAS (las del lote, o las del producto si el lote no tiene), así
+    # que basta con que el producto esté fotografiado una vez.
+    if product._mapping["is_unique"] and not list(m["photos"] or []):
+        raise AppError(
+            "Una pieza única necesita al menos una foto para publicarse: es lo que "
+            "la identifica y, si viene de un remate, la evidencia de qué prenda era.",
+            details={"product_id": str(product_id)},
+        )
 
     product_code = product._mapping["code"]
     if product_code is None:
@@ -706,6 +742,7 @@ def _row_to_product(row: Row[Any]) -> ProductOut:
         available_quantity=m["available_quantity"],
         min_cost=m["min_cost"],
         max_cost=m["max_cost"],
+        photos=list(m["photos"] or []),
         created_at=m["created_at"],
     )
 

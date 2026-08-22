@@ -355,3 +355,66 @@ async def test_auction_inherits_contract_item_photos(
     )
     assert published.status_code == 200, published.text
     assert published.json()["code"].endswith("R")
+
+
+@pytest.mark.asyncio
+async def test_auction_unique_piece_still_requires_a_photo(
+    client: TestClient, auction_tenant: dict
+) -> None:
+    """En una pieza ÚNICA la foto sigue siendo obligatoria (00034).
+
+    Es el caso para el que la regla se escribió, y el único donde se conserva:
+    un rematado viene de una prenda que un cliente dejó en garantía, así que
+    la foto es la evidencia de qué pieza era. En joyería además el cliente no
+    compra "una cadena", compra ESA cadena.
+
+    Normalmente el remate ya llega fotografiado —hereda las fotos del
+    contrato— así que este bloqueo solo aparece si la prenda se empeñó sin
+    foto, que es justo cuando conviene que aparezca.
+    """
+    headers = _headers(auction_tenant["token"], idempotency_key=str(uuid4()))
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=headers,
+        json={
+            "customer_id": str(auction_tenant["customer_id"]),
+            "principal": "400000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [
+                {
+                    "category_id": str(auction_tenant["category_id"]),
+                    "description": "Anillo sin foto",
+                    "item_appraisal": "600000.00",
+                }
+            ],
+        },
+    ).json()
+
+    await _backdate_and_expire_extension(
+        company_id=auction_tenant["company_id"], contract_id=contract["id"], months=8
+    )
+    remate = client.post(f"/api/v1/contracts/{contract['id']}/auction", headers=headers)
+    assert remate.status_code == 200, remate.text
+    item_id = remate.json()["items"][0]["inventory_item_id"]
+
+    bloqueado = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=_headers(auction_tenant["token"]),
+        json={"sale_price": "700000.00"},
+    )
+    assert bloqueado.status_code == 400, bloqueado.text
+    assert "pieza única" in bloqueado.json()["message"]
+
+    # Con foto sí publica.
+    client.patch(
+        f"/api/v1/inventory/items/{item_id}",
+        headers=_headers(auction_tenant["token"]),
+        json={"photos": ["anillo.jpg"]},
+    )
+    publicado = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=_headers(auction_tenant["token"]),
+        json={"sale_price": "700000.00"},
+    )
+    assert publicado.status_code == 200, publicado.text

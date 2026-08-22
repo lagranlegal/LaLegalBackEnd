@@ -19,10 +19,14 @@ class AuctionItemInput:
     category_id: UUID  # nivel 3 (lo único que guarda contract_item)
     description: str
     appraisal: Decimal | None
-    #: Fotos de la prenda, tomadas al CREAR el contrato. Se copian al artículo
-    #: de inventario en vez de exigir que se vuelvan a subir: es la misma
-    #: pieza física, ya fotografiada, y publicar exige al menos una foto. Sin
-    #: esto, todo remate nacía bloqueado a la espera de un trabajo ya hecho.
+    #: Fotos de la prenda, tomadas al CREAR el contrato. Viajan al PRODUCTO
+    #: del artículo de inventario (00034) en vez de exigir que se vuelvan a
+    #: subir: es la misma pieza física, ya fotografiada.
+    #:
+    #: Importa especialmente acá porque un remate crea un producto ÚNICO, y
+    #: esas son las únicas piezas a las que publicar les sigue exigiendo foto
+    #: — la evidencia de qué prenda dejó el cliente en garantía. Sin esto,
+    #: todo remate nacía bloqueado a la espera de un trabajo ya hecho.
     photos: list[str]
 
 
@@ -90,6 +94,17 @@ async def create_draft_items_from_auction(
             description=auction_item.description,
             is_unique=True,
         )
+        # Las fotos de la prenda van al PRODUCTO (00034), que acá es 1:1 con
+        # la pieza porque un remate siempre crea un producto único. Es el
+        # único caso donde la foto sigue siendo OBLIGATORIA para publicar: es
+        # la evidencia de qué prenda dejó el cliente en garantía.
+        if auction_item.photos:
+            await repository.update_product_fields(
+                db,
+                company_id=company_id,
+                product_id=product_id,
+                fields={"photos": list(auction_item.photos)},
+            )
 
         item_id = uuid4()
         await repository.insert_item(
@@ -103,8 +118,11 @@ async def create_draft_items_from_auction(
             source_contract_id=source_contract_id,
             cost=cost,
             quantity=1,
-            # Heredadas del contrato: la prenda ya se fotografió al empeñarla.
-            photos=list(auction_item.photos),
+            # Vacío a propósito: las fotos ya quedaron en el producto, que
+            # para un remate es esta misma pieza. `ItemOut.photos` las
+            # resuelve por herencia, así que el artículo sigue naciendo
+            # fotografiado y publicable sin subir nada.
+            photos=[],
             created_by=created_by,
         )
         await repository.insert_entry_line(

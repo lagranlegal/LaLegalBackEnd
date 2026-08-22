@@ -425,25 +425,23 @@ async def test_non_purchase_entry_does_not_touch_cashbox(
     assert count == 0
 
 
-def test_publish_requires_photo(client: TestClient, inventory_tenant: dict) -> None:
+def test_publish_does_not_require_a_photo_for_regular_merchandise(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Mercancía fungible se publica SIN foto (00034).
+
+    Antes se exigía para todo artículo. La regla venía del spec original,
+    donde la frase estaba escrita pensando en el REMATE — y ahí se conserva
+    (ver `test_auction_unique_piece_still_requires_a_photo`). Para cincuenta
+    fundas de celular iguales compradas por docenas era fricción sin
+    beneficio: obligaba a fotografiar en cada reposición algo ya fotografiado.
+    """
     headers = _headers(inventory_tenant["token"])
     entry = client.post(
         "/api/v1/inventory/entries", headers=headers, json=_entry_payload(inventory_tenant)
     ).json()
     item_id = entry["items"][0]["id"]
 
-    without_photo = client.post(
-        f"/api/v1/inventory/items/{item_id}/publish",
-        headers=headers,
-        json={"sale_price": "650000.00"},
-    )
-    assert without_photo.status_code == 400
-
-    client.patch(
-        f"/api/v1/inventory/items/{item_id}",
-        headers=headers,
-        json={"photos": ["https://example.com/foto.jpg"]},
-    )
     published = client.post(
         f"/api/v1/inventory/items/{item_id}/publish",
         headers=headers,
@@ -1252,22 +1250,21 @@ def test_entry_with_price_and_photo_publishes_on_the_spot(
     assert item["sale_price"] == "150000.00"
 
 
-def test_entry_without_price_or_photo_stays_draft(
-    client: TestClient, inventory_tenant: dict
-) -> None:
-    """El borrador vuelve a significar lo que debería: le falta algo.
+def test_what_makes_an_entry_line_publishable(client: TestClient, inventory_tenant: dict) -> None:
+    """Lo único que decide es el PRECIO (00034).
 
-    No se publica a medias ni se inventa un precio: sin precio o sin foto el
-    lote espera, que es correcto. Lo que cambió es que ahora eso es la
-    EXCEPCIÓN y no el camino obligatorio de toda compra.
+    Antes hacían falta precio y foto. La foto dejó de ser obligatoria para
+    mercancía fungible, así que ahora el borrador significa exactamente una
+    cosa: no se sabe en cuánto se vende. Y eso sí tiene que bloquear —
+    publicar con un precio inventado sería peor que esperar.
     """
     headers = _headers(inventory_tenant["token"])
 
-    sin_nada = client.post(
+    sin_precio = client.post(
         "/api/v1/inventory/entries", headers=headers, json=_entry_payload(inventory_tenant)
     ).json()
-    assert sin_nada["items"][0]["status"] == "draft"
-    assert sin_nada["items"][0]["code"] is None
+    assert sin_precio["items"][0]["status"] == "draft"
+    assert sin_precio["items"][0]["code"] is None
 
     solo_foto = _entry_payload(inventory_tenant)
     solo_foto["lines"][0]["photos"] = ["x.jpg"]
@@ -1275,7 +1272,7 @@ def test_entry_without_price_or_photo_stays_draft(
     r = client.post(
         "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=solo_foto
     ).json()
-    assert r["items"][0]["status"] == "draft"
+    assert r["items"][0]["status"] == "draft", "una foto no dice en cuánto se vende"
 
     solo_precio = _entry_payload(inventory_tenant)
     solo_precio["lines"][0]["sale_price"] = "90000.00"
@@ -1283,7 +1280,34 @@ def test_entry_without_price_or_photo_stays_draft(
     r2 = client.post(
         "/api/v1/inventory/entries", headers=_headers(inventory_tenant["token"]), json=solo_precio
     ).json()
-    assert r2["items"][0]["status"] == "draft"
+    assert r2["items"][0]["status"] == "available", "con precio ya es vendible, foto o no"
+
+
+def test_entry_photos_belong_to_the_product_and_are_inherited(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """La foto se toma UNA vez y la heredan todos los lotes (00034).
+
+    Era la queja concreta: reponer obligaba a re-fotografiar lo mismo, porque
+    las fotos vivían en el lote mientras el nombre, la categoría y el precio
+    ya habían subido al producto en 00022.
+    """
+    token = inventory_tenant["token"]
+    primera = _entry_with(
+        inventory_tenant, "Cadena fotografiada", photos=["catalogo.jpg"], sale_price="120000.00"
+    )
+    r1 = client.post("/api/v1/inventory/entries", headers=_headers(token), json=primera).json()
+    assert r1["items"][0]["photos"] == ["catalogo.jpg"]
+
+    # Reposición SIN fotos: hereda las del producto.
+    segunda = _entry_with(inventory_tenant, "Cadena fotografiada", unit_cost="70000.00")
+    r2 = client.post("/api/v1/inventory/entries", headers=_headers(token), json=segunda).json()
+    lote_nuevo = r2["items"][0]
+    assert lote_nuevo["photos"] == ["catalogo.jpg"], "no hay que volver a fotografiar"
+    assert lote_nuevo["status"] == "available"
+
+    productos = _products(client, token, q="fotografiada")
+    assert productos[0]["photos"] == ["catalogo.jpg"], "la foto vive en el producto"
 
 
 def test_restock_inherits_the_price_already_set_on_the_product(

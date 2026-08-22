@@ -182,6 +182,10 @@ class ProductOut(BaseModel):
     #: precio de compra se movió: vale la pena revisar el precio de venta.
     min_cost: Decimal | None
     max_cost: Decimal | None
+    #: Cómo se ve este producto (00034). Se toma una vez y la heredan todos
+    #: sus lotes — un lote solo tiene fotos propias si hay algo puntual que
+    #: documentar. Solo es obligatoria en piezas únicas (remates).
+    photos: list[str]
     created_at: datetime
 
 
@@ -194,6 +198,7 @@ class ProductUpdateIn(BaseModel):
     description: str | None = None
     sale_price: Money | None = None
     active: bool | None = None
+    photos: list[str] | None = None
 
 
 class ProductPurchaseOut(BaseModel):

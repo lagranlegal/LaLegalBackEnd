@@ -40,7 +40,7 @@ Backend (FastAPI) de una plataforma SaaS **multi-tenant** para compraventas (cas
 - Job nocturno (pg_cron o worker): persistir estados, marcar suscripciones vencidas.
 
 ### Remate asistido
-`POST /contracts/{id}/auction` (permiso `contracts.auction`): en una transacción — contrato→`auctioned`, items→`auctioned`, crear `inventory_item` en `draft` (cost = saldo capital + intereses pendientes, `origin='auction'`, `source_contract_id`, vínculo en `contract_item.inventory_item_id`), crear `inventory_entry`, auditar. Luego `POST /inventory/items/{id}/publish` valida precio/fotos y emite el código.
+`POST /contracts/{id}/auction` (permiso `contracts.auction`): en una transacción — contrato→`auctioned`, items→`auctioned`, crear `inventory_item` en `draft` (cost = saldo capital + intereses pendientes, `origin='auction'`, `source_contract_id`, vínculo en `contract_item.inventory_item_id`), crear `inventory_entry`, auditar. Luego `POST /inventory/items/{id}/publish` emite el código. Exige precio siempre y **foto solo en piezas únicas** — que es el caso del remate: la foto es la evidencia de qué prenda dejó el cliente. Para mercancía fungible la foto es opcional y vive en el producto, no en el lote (00034).
 
 ### Códigos de inventario
 `[letra cat1][cat2][cat3][consecutivo 4 dígitos][letra proveedor | 'R' si remate]` → `JOC0001I` / `JOC0001R`. Consecutivo por (company_id, prefijo) vía `next_counter()` (ya en migraciones, atómico). El código se emite AL PUBLICAR y es inmutable. Costos por identificación específica: cada pieza/lote conserva su costo real; nunca promediar.
