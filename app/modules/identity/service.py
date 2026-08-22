@@ -8,7 +8,7 @@ from app.common.pagination import CursorPage, make_page
 from app.core.errors import AppError, ConflictError, NotFoundError
 from app.core.security import CurrentUser
 from app.core.security import get_role_permissions as get_cached_role_permissions
-from app.modules.identity import integration, repository
+from app.modules.identity import auth_admin, integration, repository
 from app.modules.identity.schemas import (
     InvitedUserOut,
     MeCompanyOut,
@@ -19,6 +19,7 @@ from app.modules.identity.schemas import (
     MeSubscriptionOut,
     MeUserOut,
     PermissionOut,
+    RecoveryLinkOut,
     RoleOut,
     UserOut,
 )
@@ -373,3 +374,45 @@ async def get_me(db: AsyncSession, *, user: CurrentUser) -> MeOut:
         subscription=MeSubscriptionOut(status=sm["status"], expires_at=sm["expires_at"]),
         plan=MePlanOut(code=sm["plan_code"], name=sm["plan_name"]),
     )
+
+
+async def generate_recovery_link(
+    db: AsyncSession, *, company_id: UUID, user_id: UUID, acting_user_id: UUID
+) -> RecoveryLinkOut:
+    """Enlace para que un usuario vuelva a poner su contraseña, sin correo.
+
+    Cierra el único hueco funcional que dejaba no tener correo propio: invitar
+    ya se podía hacer por enlace, pero recuperar la contraseña dependía del
+    envío, y con el SMTP incluido de Supabase eso significa que un olvido podía
+    dejar a alguien afuera sin que nadie pudiera ayudarlo.
+    """
+    user = await repository.get_user(db, company_id=company_id, user_id=user_id)
+    if user is None:
+        raise NotFoundError("El usuario no existe en esta empresa.")
+
+    # Un usuario inactivo no debe poder volver a entrar: darle el enlace sería
+    # deshacer la desactivación por la puerta de atrás, sin quedar registrado
+    # como una reactivación.
+    if user._mapping["status"] == "inactive":
+        raise ConflictError(
+            "Este usuario está inactivo. Reactívalo primero si quiere volver a entrar."
+        )
+
+    email = user._mapping["email"]
+    link = await auth_admin.generate_recovery_link(email)
+
+    # Se audita SIEMPRE: el enlace es una credencial, y el registro de quién lo
+    # generó y para quién es lo único que queda si después hay que explicar un
+    # acceso. El enlace en sí NO se guarda — el audit_log es consultable y
+    # dejaría la credencial al alcance de cualquiera con `audit.view`.
+    await repository.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="identity",
+        action="generate_recovery_link",
+        entity_type="app_user",
+        entity_id=user_id,
+        after={"email": email},
+    )
+    return RecoveryLinkOut(user_id=user_id, email=email, recovery_link=link)

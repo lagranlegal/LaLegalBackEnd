@@ -34,6 +34,18 @@ class InvitedUserOut(UserOut):
     invite_link: str | None = None
 
 
+class RecoveryLinkOut(BaseModel):
+    """Enlace de recuperación de contraseña, para entregar a mano.
+
+    Misma naturaleza que `invite_link`: es una credencial de un solo uso —
+    quien la tenga puede cambiar esa contraseña y entrar como esa persona.
+    """
+
+    user_id: UUID
+    email: str
+    recovery_link: str
+
+
 class UpdateUserRoleIn(BaseModel):
     role_id: UUID
 

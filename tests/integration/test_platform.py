@@ -422,3 +422,138 @@ def test_subscription_events_for_unknown_company_is_404(
         headers={"Authorization": f"Bearer {super_admin_token}"},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_onboarding_completo_de_una_empresa_nueva(
+    client: TestClient,
+    created_company: dict,
+    mocked_invite: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    rsa_keypair: tuple[str, object],
+) -> None:
+    """El camino que recorre TODO cliente nuevo, de punta a punta.
+
+    Existe por lo que costó descubrir el bug del `redirect_to`: la invitación
+    del alta de empresa estuvo rota al 100% —el admin entraba sin poner
+    contraseña y después no podía volver— mientras el resto de la app se veía
+    perfecto. Nadie lo detectó porque cada pieza estaba probada por separado y
+    **nada probaba la cadena completa**, que es justamente el primer contacto
+    de cada cliente con el producto.
+
+    Lo que Supabase Auth hace (el correo, el token, la contraseña) no se puede
+    probar acá. Lo que SÍ es nuestro y se prueba: que el admin quede creado con
+    el rol correcto, que su primer request lo active, que tenga todos los
+    permisos, y que desde ahí pueda operar la empresa — invitar y rescatar a
+    alguien sin depender del correo.
+    """
+    private_pem, public_key = rsa_keypair
+    monkeypatch.setattr(security, "get_jwk_client", lambda: FakeJwkClient(public_key))
+    company_id = uuid.UUID(created_company["id"])
+
+    async with AsyncSessionLocal() as session:
+        fila = (
+            await session.execute(
+                text(
+                    "select u.id, u.status, r.name as role_name "
+                    "from public.app_user u join public.role r on r.id = u.role_id "
+                    "where u.company_id = :cid"
+                ),
+                {"cid": str(company_id)},
+            )
+        ).first()
+
+    assert fila is not None, "el alta tiene que dejar al primer admin creado"
+    admin_id, estado_inicial, rol = fila
+    # Nace `invited`: existe en la BD pero todavía no ha entrado nunca.
+    assert estado_inicial == "invited"
+    assert rol == "Admin"
+
+    role_id = await _role_id_de(company_id, "Admin")
+    token = make_token(
+        private_pem, sub=str(admin_id), company_id=str(company_id), role_id=str(role_id)
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # PRIMER REQUEST — es lo que hace el front justo después del callback.
+    me = client.get("/api/v1/me", headers=headers)
+    assert me.status_code == 200, me.text
+    cuerpo = me.json()
+    assert cuerpo["company"]["id"] == str(company_id)
+    assert cuerpo["role"]["name"] == "Admin"
+    # Un Admin tiene TODO: si el alta le diera menos, el cliente nuevo se
+    # encontraría con módulos que no puede abrir en su primer minuto de uso.
+    assert "identity.manage_users" in cuerpo["permissions"]
+    assert "cashbox.open_close" in cuerpo["permissions"]
+
+    async with AsyncSessionLocal() as session:
+        estado_final = (
+            await session.execute(
+                text("select status from public.app_user where id = :id"), {"id": str(admin_id)}
+            )
+        ).scalar_one()
+    assert estado_final == "active", "el primer request lo activa (invited -> active)"
+
+    # Y desde ahí YA PUEDE OPERAR: invitar a alguien sin depender del correo.
+    invitacion = client.post(
+        "/api/v1/identity/invitations",
+        headers=headers,
+        json={
+            "email": "empleado@example.com",
+            "full_name": "Empleado Nuevo",
+            "role_id": str(await _role_id_de(company_id, "Asesor")),
+            "send_email": False,
+        },
+    )
+    assert invitacion.status_code == 201, invitacion.text
+    assert invitacion.json()["invite_link"], "sin correo, el enlace es la única entrega posible"
+
+    # Y puede RESCATAR a alguien que olvidó su contraseña, también sin correo.
+    # Sin esto, un olvido dejaba a esa persona afuera y nadie podía ayudarla:
+    # era el único hueco funcional que quedaba por no tener correo propio.
+    empleado_id = invitacion.json()["id"]
+    monkeypatch.setattr(
+        identity_auth_admin,
+        "generate_recovery_link",
+        _fake_recovery_link,
+    )
+    rescate = client.post(f"/api/v1/identity/users/{empleado_id}/recovery-link", headers=headers)
+    assert rescate.status_code == 200, rescate.text
+    assert rescate.json()["recovery_link"].startswith("https://")
+    assert rescate.json()["email"] == "empleado@example.com"
+
+    # Queda auditado quién lo generó y para quién — el enlace es una
+    # credencial, y el audit_log es lo único que queda si después hay que
+    # explicar un acceso. El enlace en sí NO se guarda.
+    async with AsyncSessionLocal() as session:
+        auditoria = (
+            await session.execute(
+                text(
+                    "select action, after from public.audit_log "
+                    "where company_id = :cid and action = 'generate_recovery_link'"
+                ),
+                {"cid": str(company_id)},
+            )
+        ).first()
+    assert auditoria is not None
+    assert "link" not in str(auditoria[1]), "la credencial no puede quedar en el log"
+
+
+async def _fake_recovery_link(email: str) -> str:
+    return "https://supabase.test/verify?token=recovery-fake"
+
+
+async def _role_id_de(company_id: uuid.UUID, nombre: str) -> uuid.UUID:
+    async with AsyncSessionLocal() as session:
+        return uuid.UUID(
+            str(
+                (
+                    await session.execute(
+                        text(
+                            "select id from public.role where company_id = :cid and name = :nombre"
+                        ),
+                        {"cid": str(company_id), "nombre": nombre},
+                    )
+                ).scalar_one()
+            )
+        )

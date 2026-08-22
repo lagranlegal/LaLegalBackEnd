@@ -12,6 +12,7 @@ from app.modules.identity.schemas import (
     InviteUserIn,
     MeOut,
     PermissionOut,
+    RecoveryLinkOut,
     RoleCreateIn,
     RoleOut,
     RolePermissionsIn,
@@ -181,3 +182,26 @@ async def list_permissions(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> list[PermissionOut]:
     return await service.list_permissions(db)
+
+
+@router.post("/users/{user_id}/recovery-link", response_model=RecoveryLinkOut)
+async def generate_recovery_link(
+    user_id: UUID,
+    user: Annotated[CurrentUser, Depends(_manage_users)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> RecoveryLinkOut:
+    """Enlace para que un usuario vuelva a poner su contraseña, SIN mandar correo.
+
+    Es el equivalente del "Generar enlace" de la invitación, para el otro caso:
+    a alguien se le olvidó la contraseña. Antes eso solo se resolvía por correo,
+    y con el SMTP incluido de Supabase —limitado a unos pocos envíos por hora—
+    un olvido podía dejar a esa persona afuera sin que nadie pudiera ayudarla.
+
+    **Es una credencial de un solo uso**: quien la tenga puede cambiar esa
+    contraseña y entrar como esa persona. Por eso exige `identity.manage_users`,
+    queda auditado quién lo generó y para quién, y el enlace no se escribe en
+    ningún log.
+    """
+    return await service.generate_recovery_link(
+        db, company_id=user.company_id, user_id=user_id, acting_user_id=user.id
+    )

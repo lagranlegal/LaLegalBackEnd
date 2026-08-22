@@ -130,3 +130,57 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
 
     body = response.json()
     return Invitation(user_id=UUID(body["id"]), link=body.get("action_link"))
+
+
+async def generate_recovery_link(email: str) -> str:
+    """Enlace para que alguien vuelva a poner su contraseña, SIN mandar correo.
+
+    Es el equivalente del "Generar enlace" de la invitación, para el otro caso:
+    a un empleado se le olvidó la contraseña. Hasta ahora eso solo se resolvía
+    por correo (`resetPasswordForEmail` en el front), y el servicio incluido de
+    Supabase limita los envíos a unos pocos por hora — así que si el correo no
+    llegaba, esa persona quedaba afuera y NADIE podía rescatarla. Era el único
+    hueco funcional que dejaba no tener correo propio.
+
+    Con el enlace, el admin lo pasa por WhatsApp y listo, sin consumir cuota —
+    el mismo camino que las compraventas ya usan para invitar, y que para
+    ellas suele ser mejor que el correo porque la persona está ahí mismo.
+
+    Es una CREDENCIAL de un solo uso: quien lo tenga puede cambiarle la
+    contraseña a ese usuario y entrar como él. Por eso solo lo obtiene quien ya
+    tiene `identity.manage_users`, se audita, y no se escribe en ningún log.
+    """
+    settings = get_settings()
+    headers = {
+        "apikey": settings.supabase_service_role_key,
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+    }
+    payload: dict[str, object] = {"type": "recovery", "email": email}
+
+    # Query Y body, por lo mismo que en `invite_user`: el query es el que
+    # funciona en los dos endpoints de GoTrue y el body es lo que
+    # `generate_link` ya venía aceptando.
+    params: dict[str, str] = {}
+    if settings.frontend_url:
+        callback = f"{settings.frontend_url.rstrip('/')}/auth/callback"
+        params["redirect_to"] = callback
+        payload["redirect_to"] = callback
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            f"{settings.supabase_url}/auth/v1/admin/generate_link",
+            headers=headers,
+            json=payload,
+            params=params,
+        )
+
+    if response.status_code >= 400:
+        raise AuthAdminError(
+            "No se pudo generar el enlace de recuperación en Supabase Auth.",
+            details={"status_code": response.status_code, "body": response.text},
+        )
+
+    link = response.json().get("action_link")
+    if not link:
+        raise AuthAdminError("Supabase no devolvió el enlace de recuperación.")
+    return str(link)
