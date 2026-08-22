@@ -68,6 +68,8 @@ async def inventory_tenant(
         # Desde 00035 pagar una compra pendiente exige su propio permiso:
         # mueve plata, no inventario.
         "inventory.pay_purchase",
+        # 00037: fundir, despiezar, armar.
+        "inventory.transform",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -1878,3 +1880,158 @@ def test_restocking_keeps_the_unit_of_the_existing_product(
     # rechazado.
     assert r2.json()["items"][0]["unit"] == "meter"
     assert Decimal(r2.json()["items"][0]["quantity"]) == Decimal("4.25")
+
+
+def test_melting_moves_the_cost_and_the_waste_raises_it(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Fundir: EL COSTO VIAJA, y la merma sube el costo por gramo.
+
+    Sin esta operación había que dar de baja las prendas como pérdida
+    —castigando su costo contra resultados, como si se hubieran evaporado— y
+    meter el oro como sobrante de conteo, inventando ese costo de la nada. Dos
+    errores que se compensan en el saldo y destrozan el estado de resultados.
+    """
+    token = inventory_tenant["token"]
+
+    # Tres prendas que costaron 575.000 en total.
+    consumidos = []
+    for nombre, costo in (("Anillo", "180000.00"), ("Cadena", "300000.00"), ("Dije", "95000.00")):
+        payload = _entry_with(
+            inventory_tenant, nombre, unit_cost=costo, sale_price="900000.00", photos=["p.jpg"]
+        )
+        del payload["payment_method"]
+        entry = client.post(
+            "/api/v1/inventory/entries", headers=_headers(token), json=payload
+        ).json()
+        consumidos.append(entry["items"][0]["id"])
+
+    fundicion = client.post(
+        "/api/v1/inventory/transformations",
+        headers=_headers(token),
+        json={
+            "reason": "Fundición de prendas rematadas sin rotación",
+            # Lo que cobra el fundidor: se CAPITALIZA, no es gasto del mes.
+            "extra_cost": "25000.00",
+            "payment_method": "cash",
+            "inputs": [{"item_id": i, "quantity": "1"} for i in consumidos],
+            "outputs": [
+                {
+                    "name": "Oro 18k",
+                    "cat1_id": str(inventory_tenant["cat1"]),
+                    "cat2_id": str(inventory_tenant["cat2"]),
+                    "cat3_id": str(inventory_tenant["cat3"]),
+                    # Entraron 34 g de prendas y salen 31,2: la diferencia es
+                    # soldadura, impurezas, pérdida del proceso.
+                    "quantity": "31.200",
+                    "unit": "gram",
+                    "sale_price": "24000.00",
+                }
+            ],
+        },
+    )
+    assert fundicion.status_code == 201, fundicion.text
+    cuerpo = fundicion.json()
+
+    # 575.000 de prendas + 25.000 del fundidor = 600.000 que VIAJAN.
+    assert Decimal(cuerpo["total_cost"]) == Decimal("600000.00")
+    assert len(cuerpo["consumed"]) == 3
+    assert len(cuerpo["produced"]) == 1
+
+    oro = cuerpo["produced"][0]
+    assert Decimal(oro["quantity"]) == Decimal("31.200")
+    assert oro["unit"] == "gram"
+    # 600.000 / 31,2 = 19.230,77 por gramo. Ese es EL número: contra el precio
+    # del oro del día se sabe si fundir convenía.
+    assert Decimal(oro["cost"]) == Decimal("19230.77")
+    # Y con precio, nace vendible.
+    assert oro["status"] == "available"
+
+    # Las prendas dejaron de existir — pero NO como pérdida.
+    for item_id in consumidos:
+        consumido = client.get(
+            f"/api/v1/inventory/items/{item_id}", headers={"Authorization": f"Bearer {token}"}
+        ).json()
+        assert consumido["status"] == "written_off"
+        assert Decimal(consumido["quantity"]) == 0
+
+
+def test_transformation_splits_the_cost_across_several_outputs(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Despiezar: un equipo entra, varias partes salen.
+
+    El costo se reparte proporcional al valor estimado de cada parte — el
+    MISMO mecanismo con que el remate reparte el saldo del contrato entre las
+    prendas. Repartirlo en partes iguales habría hecho que una carcasa
+    "costara" lo mismo que una pantalla.
+    """
+    token = inventory_tenant["token"]
+    payload = _entry_with(inventory_tenant, "Equipo para despiece", unit_cost="400000.00")
+    del payload["payment_method"]
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).json()
+
+    def _salida(nombre: str, valor: str) -> dict:
+        return {
+            "name": nombre,
+            "cat1_id": str(inventory_tenant["cat1"]),
+            "cat2_id": str(inventory_tenant["cat2"]),
+            "cat3_id": str(inventory_tenant["cat3"]),
+            "quantity": "1",
+            "estimated_value": valor,
+        }
+
+    despiece = client.post(
+        "/api/v1/inventory/transformations",
+        headers=_headers(token),
+        json={
+            "reason": "Despiece de equipo dañado",
+            "inputs": [{"item_id": entry["items"][0]["id"], "quantity": "1"}],
+            "outputs": [_salida("Pantalla", "300000"), _salida("Carcasa", "100000")],
+        },
+    )
+    assert despiece.status_code == 201, despiece.text
+    partes = {p["name"]: Decimal(p["cost"]) for p in despiece.json()["produced"]}
+
+    # 75% / 25% de 400.000 — y la suma es exactamente el costo original: nada
+    # se pierde ni se inventa por el camino.
+    assert partes["Pantalla"] == Decimal("300000.00")
+    assert partes["Carcasa"] == Decimal("100000.00")
+    assert sum(partes.values()) == Decimal("400000.00")
+
+
+def test_transformation_with_a_process_cost_needs_to_say_who_paid(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Si el proceso costó, esa plata salió de algún lado.
+
+    Sin medio de pago, el costo del inventario subiría 25.000 sin que nadie
+    hubiera pagado nada — plata inventada, que es justo lo que esta operación
+    existe para evitar.
+    """
+    token = inventory_tenant["token"]
+    payload = _entry_with(inventory_tenant, "Prenda a fundir sin pago")
+    del payload["payment_method"]
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).json()
+
+    rechazado = client.post(
+        "/api/v1/inventory/transformations",
+        headers=_headers(token),
+        json={
+            "reason": "Fundición sin decir quién pagó",
+            "extra_cost": "25000.00",
+            "inputs": [{"item_id": entry["items"][0]["id"], "quantity": "1"}],
+            "outputs": [
+                {
+                    "name": "Oro sin pago",
+                    "cat1_id": str(inventory_tenant["cat1"]),
+                    "cat2_id": str(inventory_tenant["cat2"]),
+                    "cat3_id": str(inventory_tenant["cat3"]),
+                    "quantity": "5",
+                    "unit": "gram",
+                }
+            ],
+        },
+    )
+    assert rechazado.status_code == 400, rechazado.text
+    assert rechazado.json()["details"]["field"] == "payment_method"

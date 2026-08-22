@@ -67,6 +67,9 @@ _MODERADOR_EXCLUDED_CODES = {
     # modos — dejarlo explícito evita que se cuele si mañana cambia esa
     # exclusión.
     "inventory.pay_purchase",
+    # Transformar destruye inventario de forma irreversible (00037). Un
+    # Moderador ya no hace egresos; fundir es más definitivo todavía.
+    "inventory.transform",
 }
 
 

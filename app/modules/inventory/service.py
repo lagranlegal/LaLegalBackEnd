@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
 from app.core.errors import AppError, ConflictError, NotFoundError
 from app.modules.cashbox import integration as cashbox_integration
@@ -24,6 +25,8 @@ from app.modules.inventory.schemas import (
     ProductOut,
     ProductPurchaseOut,
     ProductUpdateIn,
+    TransformationCreateIn,
+    TransformationOut,
 )
 from app.modules.inventory.units import UNIT_ABBREVIATIONS
 from app.modules.platform import integration as platform_integration
@@ -888,3 +891,322 @@ async def list_product_purchases(
         )
         for r in rows
     ]
+
+
+async def create_transformation(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: TransformationCreateIn,
+    registered_by: UUID,
+    idempotency_key: str,
+) -> TransformationOut:
+    """Fundir, despiezar o armar: entran N artículos, salen M, y EL COSTO VIAJA.
+
+    Lo que costó lo que entra es lo que cuesta lo que sale, más lo que cueste
+    el proceso. Ni se pierde ni se inventa — y por eso el costo de las salidas
+    no se digita en ninguna parte.
+
+    Sin esta operación, fundir tres cadenas de 575.000 obligaba a darlas de
+    baja como pérdida (castiga 575.000 contra resultados, como si se hubieran
+    evaporado) y meter el oro como sobrante de conteo (inventa 575.000 de la
+    nada). Dos errores que se compensan en el saldo y destrozan el estado de
+    resultados.
+
+    LA MERMA SE ABSORBE SOLA: si entran 34 g y salen 31,2, los 575.000 se
+    reparten entre menos gramos y el costo por gramo sube. Es exactamente la
+    verdad, y ese número es el que dice si fundir convenía.
+
+    Reusa los caminos que ya existen —un egreso para lo consumido, un ingreso
+    para lo producido— en vez de inventar uno paralelo. Así el stock se mueve
+    con las mismas validaciones de siempre y la trazabilidad sobrevive:
+    contrato → remate → artículo → transformación → lote de oro.
+    """
+    existing = await repository.find_transformation_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if existing is not None:
+        return await get_transformation(
+            db, company_id=company_id, transformation_id=existing._mapping["id"]
+        )
+
+    # Se valida ANTES de tocar el stock. Todo esto vive en una transacción y
+    # revertiría igual, pero fallar temprano deja el error donde el usuario lo
+    # puede leer sin ruido de por medio.
+    if body.extra_cost > 0 and body.payment_method is None:
+        raise AppError(
+            "Si el proceso tuvo un costo, hay que decir de dónde salió esa plata: "
+            "si no, el costo del inventario sube sin que nadie haya pagado nada.",
+            details={"field": "payment_method"},
+        )
+
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    transform_date = body.transform_date or today
+    if transform_date > today:
+        raise AppError(
+            "`transform_date` no puede ser una fecha futura.",
+            details={"transform_date": str(transform_date), "today": str(today)},
+        )
+
+    # --- Lo que se consume, y CUÁNTO COSTÓ ------------------------------
+    consumidos: list[tuple[Row[Any], Decimal]] = []
+    costo_consumido = Decimal("0")
+    for entrada in body.inputs:
+        item = await repository.get_item(db, company_id=company_id, item_id=entrada.item_id)
+        if item is None:
+            raise NotFoundError(
+                "Un artículo a transformar no existe en esta empresa.",
+                details={"item_id": str(entrada.item_id)},
+            )
+        m = item._mapping
+        # Un BORRADOR también se funde, y de hecho es el caso más probable:
+        # una prenda que nunca se molestaron en publicar porque ya sabían que
+        # iba al crisol. Lo que no se puede transformar es lo que ya no está
+        # —vendido o dado de baja—, porque su stock no existe.
+        if m["status"] not in ("available", "draft"):
+            raise AppError(
+                "Solo se puede transformar un artículo que siga en inventario.",
+                details={"item_id": str(entrada.item_id), "status": m["status"]},
+            )
+        if m["quantity"] < entrada.quantity:
+            raise AppError(
+                "No hay suficiente cantidad para transformar.",
+                details={"item_id": str(entrada.item_id), "available": str(m["quantity"])},
+            )
+        if not units.is_valid_quantity(m["unit"], entrada.quantity):
+            raise AppError(
+                f"«{m['name']}» se mide en {UNIT_ABBREVIATIONS.get(m['unit'], m['unit'])} "
+                "y no admite cantidades fraccionarias.",
+                details={"quantity": str(entrada.quantity), "unit": m["unit"]},
+            )
+        # El costo del LOTE es por unidad, así que lo que viaja es la parte
+        # proporcional a lo que se consume — transformar 2 de 5 unidades no
+        # arrastra el costo de las cinco.
+        costo_consumido += quantize(m["cost"] * entrada.quantity)
+        consumidos.append((item, entrada.quantity))
+
+    # Lo que cobra el tercero SE CAPITALIZA: es parte de producir el activo,
+    # igual que el flete de una compra, no un gasto del período.
+    costo_total = quantize(costo_consumido + body.extra_cost)
+
+    # --- El egreso: lo consumido deja de existir ------------------------
+    exit_id = uuid4()
+    exit_number = await repository.next_counter(db, company_id=company_id, prefix="INV_EXIT")
+    await repository.insert_exit(
+        db,
+        exit_id=exit_id,
+        company_id=company_id,
+        number=exit_number,
+        exit_type="transformation",
+        reason=body.reason,
+        registered_by=registered_by,
+    )
+    for item, cantidad in consumidos:
+        item_id = item._mapping["id"]
+        restante = item._mapping["quantity"] - cantidad
+        await repository.insert_exit_line(
+            db,
+            line_id=uuid4(),
+            company_id=company_id,
+            exit_id=exit_id,
+            item_id=item_id,
+            quantity=cantidad,
+        )
+        await repository.adjust_item_quantity(
+            db,
+            company_id=company_id,
+            item_id=item_id,
+            delta=-cantidad,
+            new_status="written_off" if restante <= 0 else None,
+        )
+
+    # --- El ingreso: lo producido, con el costo heredado ----------------
+    entry_id = uuid4()
+    entry_number = await repository.next_counter(db, company_id=company_id, prefix="INV_ENTRY")
+    await repository.insert_entry(
+        db,
+        entry_id=entry_id,
+        company_id=company_id,
+        number=entry_number,
+        origin_type="transformation",
+        supplier_id=None,
+        supplier_invoice=None,
+        contract_id=None,
+        total_cost=costo_total,
+        notes=body.notes,
+        registered_by=registered_by,
+        entry_date=transform_date,
+    )
+
+    # El costo se reparte entre las salidas proporcional a su valor estimado —
+    # el MISMO mecanismo con el que el remate reparte el saldo del contrato
+    # entre las prendas. Sin estimaciones, en partes iguales.
+    partes = rules.split_cost_by_appraisal(
+        costo_total, [salida.estimated_value for salida in body.outputs]
+    )
+
+    for salida, parte in zip(body.outputs, partes, strict=True):
+        await _validate_category_chain(
+            db,
+            company_id=company_id,
+            cat1_id=salida.cat1_id,
+            cat2_id=salida.cat2_id,
+            cat3_id=salida.cat3_id,
+        )
+        product_id, unidad = await _resolve_product(
+            db,
+            company_id=company_id,
+            name=salida.name,
+            cat1_id=salida.cat1_id,
+            cat2_id=salida.cat2_id,
+            cat3_id=salida.cat3_id,
+            description=salida.description,
+            unit=salida.unit,
+        )
+        if not units.is_valid_quantity(unidad, salida.quantity):
+            raise AppError(
+                f"«{salida.name}» se mide en {UNIT_ABBREVIATIONS.get(unidad, unidad)} "
+                "y no admite cantidades fraccionarias.",
+                details={"quantity": str(salida.quantity), "unit": unidad},
+            )
+        if salida.photos:
+            await repository.update_product_fields(
+                db, company_id=company_id, product_id=product_id, fields={"photos": salida.photos}
+            )
+
+        lot_number = await repository.next_lot_number(
+            db, company_id=company_id, product_id=product_id
+        )
+        item_id = uuid4()
+        # El costo del LOTE es por unidad: la parte que le tocó dividida entre
+        # lo que salió. Acá es donde la merma sube el costo unitario sin que
+        # nadie tenga que calcular nada.
+        costo_unitario = quantize(parte / salida.quantity) if salida.quantity > 0 else parte
+        await repository.insert_item(
+            db,
+            item_id=item_id,
+            company_id=company_id,
+            product_id=product_id,
+            lot_number=lot_number,
+            origin="other",
+            supplier_id=None,
+            source_contract_id=None,
+            cost=costo_unitario,
+            quantity=salida.quantity,
+            photos=[],
+            created_by=registered_by,
+            entry_date=transform_date,
+        )
+        await repository.insert_entry_line(
+            db,
+            line_id=uuid4(),
+            company_id=company_id,
+            entry_id=entry_id,
+            item_id=item_id,
+            quantity=salida.quantity,
+            unit_cost=costo_unitario,
+        )
+
+        precio = salida.sale_price
+        if precio is None:
+            producto = await repository.get_product(
+                db, company_id=company_id, product_id=product_id
+            )
+            if producto is not None:
+                precio = producto._mapping["sale_price"]
+        if precio is not None and precio > 0:
+            await publish_item(
+                db, company_id=company_id, item_id=item_id, body=ItemPublishIn(sale_price=precio)
+            )
+
+    # --- La plata del proceso, si la hubo -------------------------------
+    if body.extra_cost > 0:
+        assert body.payment_method is not None  # validado al entrar
+        resolved = await cashbox_integration.resolve_account_for_movement(
+            db,
+            company_id=company_id,
+            payment_method=body.payment_method,
+            account_id=body.account_id,
+            direction="out",
+        )
+        # Concepto `purchase` y no `expense`: se está comprando un SERVICIO
+        # que se capitaliza en el inventario. Como gasto aparecería en el
+        # estado de resultados del mes, y no es un gasto — es activo.
+        await cashbox_integration.record_movement(
+            db,
+            session_id=resolved.session_id,
+            company_id=company_id,
+            module="store",
+            direction="out",
+            concept="purchase",
+            amount=body.extra_cost,
+            payment_method=body.payment_method,
+            reference_type="inventory_entry",
+            reference_id=entry_id,
+            created_by=registered_by,
+            notes=f"Costo del proceso: {body.reason}",
+            account_id=resolved.account_id,
+        )
+
+    transformation_id = uuid4()
+    number = await repository.next_counter(db, company_id=company_id, prefix="INV_TRANSFORM")
+    await repository.insert_transformation(
+        db,
+        transformation_id=transformation_id,
+        company_id=company_id,
+        number=number,
+        transform_date=transform_date,
+        extra_cost=body.extra_cost,
+        notes=body.notes,
+        exit_id=exit_id,
+        entry_id=entry_id,
+        created_by=registered_by,
+        idempotency_key=idempotency_key,
+    )
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=registered_by,
+        module="inventory",
+        action="create_transformation",
+        entity_type="inventory_transformation",
+        entity_id=transformation_id,
+        after={
+            "reason": body.reason,
+            "consumidos": len(body.inputs),
+            "producidos": len(body.outputs),
+            "costo_total": str(costo_total),
+        },
+    )
+    return await get_transformation(db, company_id=company_id, transformation_id=transformation_id)
+
+
+async def get_transformation(
+    db: AsyncSession, *, company_id: UUID, transformation_id: UUID
+) -> TransformationOut:
+    row = await repository.get_transformation(
+        db, company_id=company_id, transformation_id=transformation_id
+    )
+    if row is None:
+        raise NotFoundError("La transformación no existe en esta empresa.")
+    m = row._mapping
+
+    consumidos = await repository.list_items_for_exit(
+        db, company_id=company_id, exit_id=m["exit_id"]
+    )
+    producidos = await repository.list_items_for_entry(
+        db, company_id=company_id, entry_id=m["entry_id"]
+    )
+    entrada = await repository.get_entry(db, company_id=company_id, entry_id=m["entry_id"])
+
+    return TransformationOut(
+        id=m["id"],
+        number=m["number"],
+        transform_date=m["transform_date"],
+        extra_cost=m["extra_cost"],
+        notes=m["notes"],
+        created_at=m["created_at"],
+        total_cost=entrada._mapping["total_cost"] if entrada is not None else Decimal("0"),
+        consumed=[_row_to_item(r) for r in consumidos],
+        produced=[_row_to_item(r) for r in producidos],
+    )

@@ -900,3 +900,88 @@ async def product_has_lots(db: AsyncSession, *, company_id: UUID, product_id: UU
         {"cid": str(company_id), "pid": str(product_id)},
     )
     return result.first() is not None
+
+
+async def find_transformation_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id from public.inventory_transformation "
+            "where company_id = :cid and idempotency_key = :key"
+        ),
+        {"cid": str(company_id), "key": idempotency_key},
+    )
+    return result.first()
+
+
+async def insert_transformation(
+    db: AsyncSession,
+    *,
+    transformation_id: UUID,
+    company_id: UUID,
+    number: int,
+    transform_date: date,
+    extra_cost: Decimal,
+    notes: str | None,
+    exit_id: UUID,
+    entry_id: UUID,
+    created_by: UUID | None,
+    idempotency_key: str,
+) -> None:
+    await db.execute(
+        text(
+            """
+            insert into public.inventory_transformation
+                (id, company_id, number, transform_date, extra_cost, notes,
+                 exit_id, entry_id, created_by, idempotency_key)
+            values
+                (:id, :cid, :number, :tdate, :extra, :notes,
+                 :exit_id, :entry_id, :created_by, :key)
+            """
+        ),
+        {
+            "id": str(transformation_id),
+            "cid": str(company_id),
+            "number": number,
+            "tdate": transform_date,
+            "extra": extra_cost,
+            "notes": notes,
+            "exit_id": str(exit_id),
+            "entry_id": str(entry_id),
+            "created_by": str(created_by) if created_by else None,
+            "key": idempotency_key,
+        },
+    )
+
+
+async def get_transformation(
+    db: AsyncSession, *, company_id: UUID, transformation_id: UUID
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id, number, transform_date, extra_cost, notes, exit_id, entry_id, created_at "
+            "from public.inventory_transformation where company_id = :cid and id = :id"
+        ),
+        {"cid": str(company_id), "id": str(transformation_id)},
+    )
+    return result.first()
+
+
+async def list_items_for_exit(
+    db: AsyncSession, *, company_id: UUID, exit_id: UUID
+) -> list[Row[Any]]:
+    """Artículos que salieron por un egreso. Espeja `list_items_for_entry`,
+    con el mismo desempate por `id` — todas las líneas se insertan en la misma
+    transacción y comparten `created_at`, así que sin desempate el orden queda
+    a merced del plan de ejecución."""
+    result = await db.execute(
+        text(
+            f"select {_ITEM_COLUMNS} {_ITEM_FROM} "
+            "join public.inventory_exit_line l on l.item_id = i.id and l.company_id = i.company_id "
+            "where i.company_id = :cid and l.exit_id = :exit_id "
+            "order by i.created_at, i.id"
+        ),
+        {"cid": str(company_id), "exit_id": str(exit_id)},
+    )
+    return list(result.all())

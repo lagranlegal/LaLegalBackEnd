@@ -240,3 +240,73 @@ class ProductPurchaseOut(BaseModel):
     total_cost: Decimal
     lot_code: str | None
     paid_at: datetime | None
+
+
+class TransformationInputLineIn(BaseModel):
+    """Un artículo que se CONSUME. Deja de existir como tal."""
+
+    item_id: UUID
+    quantity: Decimal = Field(gt=0)
+
+
+class TransformationOutputLineIn(BaseModel):
+    """Un artículo que se PRODUCE.
+
+    Es una línea de ingreso sin costo: el costo no se digita, se hereda de lo
+    consumido. Digitarlo sería justamente el error que esta operación viene a
+    evitar — inventar costo o perderlo por el camino.
+    """
+
+    name: str
+    cat1_id: UUID
+    cat2_id: UUID
+    cat3_id: UUID
+    description: str | None = None
+    quantity: Decimal = Field(gt=0)
+    unit: ProductUnit = "unit"
+    photos: list[str] = Field(default_factory=list)
+    sale_price: Money | None = None
+    #: Base para repartir el costo cuando salen VARIOS artículos (despiezar un
+    #: celular en pantalla, batería y carcasa). Es lo que cada uno vale
+    #: relativamente, no un precio: si se omite en todos, el costo se reparte
+    #: en partes iguales. Mismo mecanismo que usa el remate para repartir el
+    #: saldo del contrato entre las prendas.
+    estimated_value: Decimal | None = Field(default=None, ge=0)
+
+
+class TransformationCreateIn(BaseModel):
+    """Fundir, despiezar o armar: entran N artículos y salen M.
+
+    El costo de lo que sale es el de lo que entró más `extra_cost`. No se
+    digita en ninguna parte, y ese es el punto: el costo VIAJA.
+    """
+
+    inputs: list[TransformationInputLineIn] = Field(min_length=1)
+    outputs: list[TransformationOutputLineIn] = Field(min_length=1)
+    #: Lo que cobró el tercero (el fundidor, el técnico). Se CAPITALIZA al
+    #: costo de lo que sale: es parte de producir el activo, no un gasto del
+    #: mes — igual que el flete de una compra.
+    extra_cost: Money = Decimal("0")
+    #: Obligatorio si `extra_cost > 0`: esa plata sale de algún lado y tiene
+    #: que quedar registrada, o el costo sube sin que nadie haya pagado nada.
+    payment_method: PaymentMethod | None = None
+    account_id: UUID | None = None
+    transform_date: date | None = None
+    reason: str
+    notes: str | None = None
+
+
+class TransformationOut(BaseModel):
+    id: UUID
+    number: int
+    transform_date: date
+    extra_cost: Decimal
+    notes: str | None
+    created_at: datetime
+    #: Costo total que viajó: lo consumido + `extra_cost`. Es lo que ahora
+    #: vale lo producido.
+    total_cost: Decimal
+    #: Lo que se consumió y lo que salió, para poder explicar la operación
+    #: sin ir a buscar dos documentos por separado.
+    consumed: list[ItemOut]
+    produced: list[ItemOut]

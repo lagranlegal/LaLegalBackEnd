@@ -31,6 +31,10 @@ insert into public.permission (code, module, action, is_special, description) va
   -- `inventory.create` para que bodega no decida cuánto sale de la caja.
   ('inventory.pay_purchase', 'inventory', 'pay_purchase', true,
    'Pagar compras pendientes a proveedores (saca plata de la caja)'),
+  -- 00037: fundir, despiezar o armar. Destruye inventario de forma
+  -- irreversible, por eso va aparte de `create` y de `exit`.
+  ('inventory.transform', 'inventory', 'transform', true,
+   'Transformar inventario: fundir, despiezar o armar (consume artículos y crea otros)'),
   -- Ventas
   ('sales.view',   'sales', 'view',   false, 'Ver ventas y su detalle'),
   ('sales.create',         'sales', 'create',   false, 'Registrar ventas'),

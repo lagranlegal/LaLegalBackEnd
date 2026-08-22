@@ -21,6 +21,8 @@ from app.modules.inventory.schemas import (
     ProductOut,
     ProductPurchaseOut,
     ProductUpdateIn,
+    TransformationCreateIn,
+    TransformationOut,
 )
 
 router = APIRouter(prefix="/api/v1/inventory", tags=["inventory"])
@@ -28,6 +30,10 @@ router = APIRouter(prefix="/api/v1/inventory", tags=["inventory"])
 _view = require_permission("inventory.view")
 _create = require_permission("inventory.create")
 _exit_perm = require_permission("inventory.exit")
+# Transformar DESTRUYE inventario de forma irreversible —de una barra de oro
+# no salen las tres cadenas otra vez— así que va aparte de `create` y de
+# `exit`, mismo criterio que `accounts.transfer` e `inventory.pay_purchase`.
+_transform = require_permission("inventory.transform")
 # Pagarle a un proveedor NO es administrar inventario: la mercancía ya entró,
 # lo que cambia es el efectivo y la deuda. Va aparte de `inventory.create`
 # (00035) por el mismo criterio que separó `accounts.settle` y
@@ -305,4 +311,52 @@ async def list_product_purchases(
     """
     return await service.list_product_purchases(
         db, company_id=user.company_id, product_id=product_id
+    )
+
+
+@router.post("/transformations", response_model=TransformationOut, status_code=201)
+async def create_transformation(
+    body: TransformationCreateIn,
+    user: Annotated[CurrentUser, Depends(_transform)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+) -> TransformationOut:
+    """Fundir, despiezar o armar: entran N artículos, salen M y **el costo viaja**.
+
+    Una sola operación para lo que en la práctica son varios usos —fundir
+    prendas rematadas en oro, despiezar un equipo dañado, armar un combo— y
+    lo que pase DESPUÉS con lo que sale es inventario común y corriente.
+
+    **El costo no se digita.** Lo que costó lo que entra es lo que cuesta lo
+    que sale, más `extra_cost` (lo que cobró el fundidor o el técnico, que se
+    **capitaliza**: es parte de producir el activo, no un gasto del mes).
+
+    **La merma se absorbe sola:** si entran 34 g de prendas y salen 31,2 g de
+    oro, el mismo costo se reparte entre menos gramos y el costo unitario
+    sube. Ese número es el que dice si la operación convenía.
+
+    Genera un egreso (`transformation`) por lo consumido y un ingreso
+    (`transformation`) por lo producido, vinculados por el documento — así el
+    stock se mueve por los caminos de siempre y la trazabilidad sobrevive:
+    contrato → remate → artículo → transformación → lote nuevo.
+
+    Es **irreversible**: de una barra de oro no salen las tres cadenas otra vez.
+    """
+    return await service.create_transformation(
+        db,
+        company_id=user.company_id,
+        body=body,
+        registered_by=user.id,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.get("/transformations/{transformation_id}", response_model=TransformationOut)
+async def get_transformation(
+    transformation_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> TransformationOut:
+    return await service.get_transformation(
+        db, company_id=user.company_id, transformation_id=transformation_id
     )
