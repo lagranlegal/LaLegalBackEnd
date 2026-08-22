@@ -337,3 +337,61 @@ async def supplier_purchases(
     query += " order by e.id limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
+
+
+async def resolve_category_params(
+    db: AsyncSession, *, company_id: UUID, category_id: UUID
+) -> Row[Any] | None:
+    """Plazo, ventana de mora y LTV de una categoría, HEREDADOS del árbol.
+
+    Toma el valor de la categoría misma y, si está vacío, sube por
+    `parent_id` hasta encontrar el ancestro más cercano que lo tenga. Cada
+    campo se resuelve por separado: una hoja puede heredar el plazo de su
+    abuelo y traer su propio LTV.
+
+    POR QUÉ EXISTE: hasta ahora el contrato leía estos tres valores SOLO de la
+    categoría de nivel 3, así que los mismos campos en los niveles 1 y 2 eran
+    configuración muerta — se pedían en el formulario y nada los leía. Peor:
+    si a UNA hoja se le olvidaba el plazo, crear un contrato con esa prenda
+    fallaba con "la categoría no tiene plazo configurado". Con treinta hojas,
+    era cuestión de tiempo.
+
+    Heredando, "toda la joyería en oro va a 4 meses" se configura una vez en
+    `Oro` en vez de repetirse en cada hoja — que es lo que hace que tener un
+    árbol de tres niveles valga la pena— y esa clase de falla desaparece.
+
+    No hizo falta migración: los campos ya existían en los tres niveles, solo
+    que nadie leía los de arriba.
+
+    Los contratos ya creados no se ven afectados: el contrato congela estos
+    valores en su propio SNAPSHOT al nacer (CLAUDE.md), así que cambiar el
+    árbol nunca reescribe un contrato vivo.
+    """
+    result = await db.execute(
+        text(
+            """
+            with recursive cadena as (
+              select id, parent_id, default_term_months, arrears_window_months,
+                     max_ltv_pct, 0 as profundidad
+              from public.category
+              where company_id = :cid and id = :id
+              union all
+              select c.id, c.parent_id, c.default_term_months, c.arrears_window_months,
+                     c.max_ltv_pct, cadena.profundidad + 1
+              from public.category c
+              join cadena on c.id = cadena.parent_id
+              where c.company_id = :cid
+            )
+            select
+              (array_agg(default_term_months order by profundidad)
+                 filter (where default_term_months is not null))[1] as default_term_months,
+              (array_agg(arrears_window_months order by profundidad)
+                 filter (where arrears_window_months is not null))[1] as arrears_window_months,
+              (array_agg(max_ltv_pct order by profundidad)
+                 filter (where max_ltv_pct is not null))[1] as max_ltv_pct
+            from cadena
+            """
+        ),
+        {"cid": str(company_id), "id": str(category_id)},
+    )
+    return result.first()

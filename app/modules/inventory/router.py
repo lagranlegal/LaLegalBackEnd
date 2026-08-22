@@ -28,6 +28,12 @@ router = APIRouter(prefix="/api/v1/inventory", tags=["inventory"])
 _view = require_permission("inventory.view")
 _create = require_permission("inventory.create")
 _exit_perm = require_permission("inventory.exit")
+# Pagarle a un proveedor NO es administrar inventario: la mercancía ya entró,
+# lo que cambia es el efectivo y la deuda. Va aparte de `inventory.create`
+# (00035) por el mismo criterio que separó `accounts.settle` y
+# `accounts.transfer` — una acción que mueve plata lleva su propio permiso,
+# aunque viva en la pantalla de otro módulo.
+_pay_purchase = require_permission("inventory.pay_purchase")
 
 
 @router.post("/entries", response_model=EntryOut, status_code=201)
@@ -50,7 +56,7 @@ async def create_entry(
 async def pay_entry(
     entry_id: UUID,
     body: EntryPayIn,
-    user: Annotated[CurrentUser, Depends(_create)],
+    user: Annotated[CurrentUser, Depends(_pay_purchase)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
 ) -> EntryOut:

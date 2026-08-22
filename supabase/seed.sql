@@ -27,6 +27,10 @@ insert into public.permission (code, module, action, is_special, description) va
   ('inventory.view',   'inventory', 'view',   false, 'Ver artículos y stock'),
   ('inventory.create', 'inventory', 'create', false, 'Crear artículos e ingresos de mercancía'),
   ('inventory.exit',   'inventory', 'exit',   true,  'Egresos de inventario (ajuste, daño, devolución)'),
+  -- 00035: pagarle a un proveedor mueve plata, no inventario. Va aparte de
+  -- `inventory.create` para que bodega no decida cuánto sale de la caja.
+  ('inventory.pay_purchase', 'inventory', 'pay_purchase', true,
+   'Pagar compras pendientes a proveedores (saca plata de la caja)'),
   -- Ventas
   ('sales.view',   'sales', 'view',   false, 'Ver ventas y su detalle'),
   ('sales.create',         'sales', 'create',   false, 'Registrar ventas'),

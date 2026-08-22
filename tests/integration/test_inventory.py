@@ -3,6 +3,7 @@ publicar exige foto+precio y emite código inmutable, egresos descuentan
 stock, y la compra a proveedor sale por caja (concepto `purchase`).
 Requiere Postgres real (se salta si no hay)."""
 
+import asyncio
 from collections.abc import AsyncGenerator
 from datetime import date, timedelta
 from decimal import Decimal
@@ -64,6 +65,9 @@ async def inventory_tenant(
         # La ficha del proveedor vive en `catalogs` por la misma razón: sus
         # números salen de las compras, que se crean acá.
         "catalogs.view",
+        # Desde 00035 pagar una compra pendiente exige su propio permiso:
+        # mueve plata, no inventario.
+        "inventory.pay_purchase",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -1684,3 +1688,77 @@ def test_supplier_summary_and_purchase_history(client: TestClient, inventory_ten
     assert {i["item_count"] for i in items} == {1}
     # Una pagada y una no: es lo que distingue la deuda del histórico.
     assert sorted(i["paid_at"] is None for i in items) == [False, True]
+
+
+def test_paying_a_purchase_needs_its_own_permission(
+    client: TestClient, inventory_tenant: dict, rsa_keypair: tuple[str, object]
+) -> None:
+    """Pagarle a un proveedor no es administrar el inventario (00035).
+
+    Antes exigía `inventory.create`, o sea que quien registra mercancía podía
+    además sacar plata de la caja para pagarla. Son dos hechos distintos y
+    separados en el tiempo —la mercancía ENTRA, la factura SE PAGA— y el
+    sistema ya los distingue por dentro (`entry_date` vs `paid_at`).
+    """
+    token = inventory_tenant["token"]
+    pendiente = _entry_payload(inventory_tenant)
+    del pendiente["payment_method"]
+    entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=pendiente).json()
+
+    # Un rol con `inventory.create` pero SIN el permiso nuevo no puede pagar.
+    private_pem, _ = rsa_keypair
+    bodega_role, bodega_user = uuid4(), uuid4()
+    company_id = inventory_tenant["company_id"]
+
+    async def _crear_rol_bodega() -> None:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text(
+                    "insert into public.role (id, company_id, name) "
+                    "values (:id, :cid, 'Solo bodega')"
+                ),
+                {"id": str(bodega_role), "cid": str(company_id)},
+            )
+            await session.execute(
+                text(
+                    "insert into public.role_permission (role_id, permission_id) "
+                    "select :rid, id from public.permission "
+                    "where code in ('inventory.view', 'inventory.create')"
+                ),
+                {"rid": str(bodega_role)},
+            )
+            await session.execute(
+                text(
+                    "insert into public.app_user "
+                    "(id, company_id, role_id, full_name, email, status) "
+                    "values (:id, :cid, :rid, 'Solo Bodega', :email, 'active')"
+                ),
+                {
+                    "id": str(bodega_user),
+                    "cid": str(company_id),
+                    "rid": str(bodega_role),
+                    "email": f"bodega-only-{bodega_user}@example.com",
+                },
+            )
+
+    asyncio.run(_crear_rol_bodega())
+    bodega_token = make_token(
+        private_pem, sub=str(bodega_user), company_id=str(company_id), role_id=str(bodega_role)
+    )
+
+    rechazado = client.post(
+        f"/api/v1/inventory/entries/{entry['id']}/pay",
+        headers=_headers(bodega_token),
+        json={"payment_method": "cash"},
+    )
+    assert rechazado.status_code == 403, rechazado.text
+    assert rechazado.json()["details"]["permission"] == "inventory.pay_purchase"
+
+    # Y el rol que sí lo tiene, paga.
+    ok = client.post(
+        f"/api/v1/inventory/entries/{entry['id']}/pay",
+        headers=_headers(token),
+        json={"payment_method": "cash"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["paid_at"] is not None

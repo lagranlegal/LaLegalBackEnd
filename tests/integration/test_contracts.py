@@ -579,3 +579,77 @@ async def test_ready_for_auction_lists_after_extension_triggered(
     assert listing.status_code == 200
     ids = [c["id"] for c in listing.json()]
     assert contract["id"] in ids
+
+
+async def test_category_params_are_inherited_from_ancestors(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El plazo y la ventana se heredan del árbol de categorías.
+
+    Antes se leían SOLO de la hoja, así que los mismos campos en los niveles 1
+    y 2 eran configuración muerta —el formulario los pedía y nada los leía— y
+    olvidar el plazo en UNA hoja rompía la creación de contratos con esa
+    prenda con un error que no decía qué hacer. Con treinta hojas era cuestión
+    de tiempo.
+
+    Configurar "toda la joyería en oro va a 4 meses" una sola vez en el padre
+    es lo que hace que tener un árbol de tres niveles valga la pena.
+    """
+    company_id = contract_tenant["company_id"]
+    cat1, cat2 = uuid4(), uuid4()
+    hoja = uuid4()
+
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.category "
+                "(id, company_id, parent_id, level, name, code_letter, "
+                " default_term_months, arrears_window_months, max_ltv_pct) "
+                "values (:id, :cid, null, 1, 'Herencia N1', 'H', 9, 9, 50)"
+            ),
+            {"id": str(cat1), "cid": str(company_id)},
+        )
+        # El nivel 2 define plazo y ventana propios; NO define LTV.
+        await session.execute(
+            text(
+                "insert into public.category "
+                "(id, company_id, parent_id, level, name, code_letter, "
+                " default_term_months, arrears_window_months) "
+                "values (:id, :cid, :parent, 2, 'Herencia N2', 'E', 4, 4)"
+            ),
+            {"id": str(cat2), "cid": str(company_id), "parent": str(cat1)},
+        )
+        # La hoja no define NADA: hereda plazo/ventana del nivel 2 y LTV del 1.
+        await session.execute(
+            text(
+                "insert into public.category "
+                "(id, company_id, parent_id, level, name, code_letter) "
+                "values (:id, :cid, :parent, 3, 'Herencia hoja', 'J')"
+            ),
+            {"id": str(hoja), "cid": str(company_id), "parent": str(cat2)},
+        )
+
+    await _open_cash_session(company_id=company_id, register_id=contract_tenant["register_id"])
+
+    headers = _headers(contract_tenant["full_token"], idempotency_key=str(uuid4()))
+    response = client.post(
+        "/api/v1/contracts",
+        headers=headers,
+        json={
+            "customer_id": str(contract_tenant["customer_id"]),
+            "principal": "1000000.00",
+            "appraisal_value": "1500000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [{"category_id": str(hoja), "description": "Prenda que hereda"}],
+        },
+    )
+    assert response.status_code == 201, response.text
+    contrato = response.json()
+
+    # Plazo y ventana vienen del nivel 2, el más cercano que los define.
+    assert contrato["term_months"] == 4
+    assert contrato["arrears_window_months"] == 4
+    # Y el LTV del nivel 1, porque el 2 no lo define: cada campo se resuelve
+    # por separado, no en bloque.
+    assert contrato["ltv_warning"] is True, "1.000.000 sobre 1.500.000 es 66%, supera el 50% del N1"

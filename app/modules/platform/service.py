@@ -62,6 +62,11 @@ _MODERADOR_EXCLUDED_CODES = {
     # consignarlo mueve plata igual que liquidar. Quien no abre ni cierra la
     # caja tampoco decide cuánto sale de ella.
     "accounts.transfer",
+    # Y para pagarle a proveedores (00035), por lo mismo. Un Moderador
+    # tampoco tiene `inventory.create`, así que no habría podido de todos
+    # modos — dejarlo explícito evita que se cuele si mañana cambia esa
+    # exclusión.
+    "inventory.pay_purchase",
 }
 
 

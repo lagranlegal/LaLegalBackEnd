@@ -143,17 +143,36 @@ async def create_contract(
             )
         categories.append(category)
 
-    first = categories[0]._mapping
+    # Los parámetros se HEREDAN del árbol: si la hoja no los define, se toma
+    # el ancestro más cercano que sí (`catalogs.resolve_category_params`, sin
+    # migración: es lógica de consulta). Antes se leían solo de la hoja,
+    # así que los mismos campos en los niveles 1 y 2 no los usaba nadie y
+    # olvidar el plazo en UNA hoja rompía la creación de contratos con esa
+    # prenda.
+    parametros = []
+    for category in categories:
+        params = await catalogs_repo.resolve_category_params(
+            db, company_id=company_id, category_id=category._mapping["id"]
+        )
+        if params is None:
+            raise AppError(
+                "No se pudieron resolver los parámetros de la categoría.",
+                details={"category_id": str(category._mapping["id"])},
+            )
+        parametros.append(params._mapping)
+
+    first = parametros[0]
     term_months = first["default_term_months"]
     arrears_window_months = first["arrears_window_months"]
     max_ltv_pct = first["max_ltv_pct"]
     if term_months is None or arrears_window_months is None:
         raise AppError(
-            "La categoría no tiene plazo/ventana de mora por defecto configurados.",
-            details={"category_id": str(first["id"])},
+            "Ni la categoría del artículo ni ninguna de sus categorías padre tienen "
+            "plazo y ventana de mora configurados. Configúralos en Catálogos — si los "
+            "pones en una categoría superior, los heredan todas las de abajo.",
+            details={"category_id": str(categories[0]._mapping["id"])},
         )
-    for category in categories[1:]:
-        m = category._mapping
+    for m in parametros[1:]:
         if (
             m["default_term_months"] != term_months
             or m["arrears_window_months"] != arrears_window_months
@@ -327,7 +346,12 @@ async def import_contract(
 
     ltv_warning = False
     if body.appraisal_value and body.appraisal_value > 0:
-        max_ltv_pct = categories[0]._mapping["max_ltv_pct"]
+        # También heredado: un LTV puesto en la categoría padre vale
+        # para sus hojas.
+        params_ltv = await catalogs_repo.resolve_category_params(
+            db, company_id=company_id, category_id=categories[0]._mapping["id"]
+        )
+        max_ltv_pct = params_ltv._mapping["max_ltv_pct"] if params_ltv is not None else None
         if max_ltv_pct is not None:
             ltv_pct = body.principal / body.appraisal_value * 100
             ltv_warning = ltv_pct > max_ltv_pct
