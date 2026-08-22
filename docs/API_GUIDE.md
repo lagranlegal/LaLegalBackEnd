@@ -123,13 +123,15 @@ Categorías (árbol de 3 niveles) y proveedores, compartidos entre Empeño y Tie
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `GET` | `/api/v1/catalogs/categories` | ninguno (autenticado) | Lista **plana** (no anidada) ordenada por nivel y nombre — el front arma el árbol con `id`/`parent_id`. |
+| `GET` | `/api/v1/catalogs/categories` | `catalogs.view` | Lista **plana** (no anidada) ordenada por nivel y nombre — el front arma el árbol con `id`/`parent_id`. |
 | `POST` | `/api/v1/catalogs/categories` | `catalogs.manage` | Crea categoría. Body: `{name, code_letter, parent_id?, applies_to?, default_term_months?, arrears_window_months?, max_ltv_pct?}`. `level` lo calcula el backend (`parent.level + 1`, o `1` si no hay `parent_id`) — no se manda. |
-| `GET` | `/api/v1/catalogs/categories/{id}` | ninguno (autenticado) | Detalle. |
+| `GET` | `/api/v1/catalogs/categories/{id}` | `catalogs.view` | Detalle. |
 | `PATCH` | `/api/v1/catalogs/categories/{id}` | `catalogs.manage` | Edición parcial. **No permite reparentar** (cambiar `parent_id`) — fuera de alcance por ahora, ver `docs/ARCHITECTURE.md`. |
-| `GET` | `/api/v1/catalogs/suppliers` | ninguno (autenticado) | Lista paginada. |
+| `GET` | `/api/v1/catalogs/suppliers` | `catalogs.view` | Lista paginada. |
 | `POST` | `/api/v1/catalogs/suppliers` | `catalogs.manage` | Crea proveedor. Body: `{name, code_letter, doc_type?, doc_number?, phone?, email?, address?, notes?}`. |
-| `GET` | `/api/v1/catalogs/suppliers/{id}` | ninguno (autenticado) | Detalle. |
+| `GET` | `/api/v1/catalogs/suppliers/{id}` | `catalogs.view` | Detalle. |
+| `GET` | `/api/v1/catalogs/suppliers/{id}/summary` | `catalogs.view` | **Ficha del proveedor**: `purchase_count`, `total_purchased`, `pending_count`/`pending_total` (lo que se le debe), `first_purchase_date`/`last_purchase_date` y `product_count` (productos distintos comprados). Los totales cuentan solo `origin_type='purchase'`. |
+| `GET` | `/api/v1/catalogs/suppliers/{id}/purchases` | `catalogs.view` | Historial de compras a ese proveedor, paginado por cursor. |
 | `PATCH` | `/api/v1/catalogs/suppliers/{id}` | `catalogs.manage` | Edición parcial. |
 
 Reglas de `code_letter` (1–3 caracteres, usado para armar el código de artículo — ver `CLAUDE.md`):
@@ -216,6 +218,8 @@ El corte es la **fecha de la sesión**, no su estado: una sesión de hoy ya cerr
 
 **Ojo con el precio al publicar.** El precio se manda en `publish` y aterriza en el producto; `PATCH /items/{id}` **no lo acepta**. El front tenía un diálogo que mostraba el campo "precio" junto a un botón "Guardar fotos" que solo mandaba las fotos: el precio se descartaba en silencio y había que escribirlo dos veces. Corregido — el diálogo hace ahora las dos llamadas por dentro (guardar fotos → publicar) sin que el usuario tenga que saber en qué tabla vive cada dato.
 
+**Historial de compras de un producto.** `GET /api/v1/inventory/products/{id}/purchases` (`inventory.view`) devuelve, de la más reciente a la más vieja: fecha, proveedor, cantidad, `unit_cost` de ESA compra y si está pagada. Responde "¿cómo se movió el costo?" y "¿a quién conviene comprarle?" — la lista de productos ya insinuaba esto con el rango `min_cost`/`max_cost` pero no dejaba abrirlo. Sale de `inventory_entry_line` (que congela el costo de la compra) e incluye todos los orígenes, no solo `purchase`: un inventario inicial también explica de dónde salió el stock, y se distingue porque `supplier_name` viene en `null`.
+
 **Vista agrupada por producto.** `GET /api/v1/inventory/products` (`inventory.view`) devuelve el inventario agrupado, con `lot_count`, `available_quantity` y el RANGO de costos entre lotes (informativo — los costos nunca se promedian). Filtros: `?q=` (SKU o nombre), `?cat1_id=`/`?cat2_id=`/`?cat3_id=`, `?supplier_id=` (productos con al menos un lote de ese proveedor), `?in_stock=true` (solo lo que tiene unidades disponibles), `?active=`, `?include_unique=` (las piezas de remate son productos de un solo lote y se excluyen por defecto). `GET /products/{id}/lots` da el detalle por lote, del más antiguo al más nuevo (FIFO); `PATCH /products/{id}` cambia nombre, descripción, precio o `active` **para todos sus lotes a la vez**.
 
 **Los artículos de remate heredan las fotos de la prenda.** `POST /contracts/{id}/auction` copia `contract_item.photos` al `inventory_item` que crea. Antes nacía con `photos=[]`, y como publicar exige al menos una foto, toda pieza rematada quedaba bloqueada esperando que alguien volviera a fotografiar una prenda **ya fotografiada** al firmar el contrato. En una compraventa los rematados son buena parte del inventario, así que era trabajo rehecho todos los días.
@@ -246,6 +250,14 @@ Solo lectura, agrega datos que ya existen en otros módulos — no muta nada. `G
 |---|---|---|---|
 | `GET` | `/api/v1/reports/dashboard` | `reports.view` | KPIs de un vistazo: `contracts` (conteo por estado `active`/`in_arrears`/`in_extension`/`auctioned`, `ready_for_auction_count` = en prórroga y ya vencida, `capital_outstanding` = suma de `capital_balance` de los contratos vivos), `sales` (`today_total`/`today_count`/`month_total`, solo ventas `completed`), `inventory` (`available_count`/`available_value` = costo×cantidad de lo `available`, `draft_count`), `cashbox` (si hay sesión `open` ahora mismo, y sus datos básicos). Refleja el `status` persistido de cada contrato (recalculado on-read en cada `GET /contracts/{id}` y por el job nocturno — no vuelve a recalcular todo el libro en cada llamada al dashboard). |
 | `GET` | `/api/v1/reports/closings` | `reports.view` | Histórico de cierres de caja (`status='closed'`), paginado por cursor. `?from_date=`/`?to_date=` filtran por `session_date`. Trae `{session_id, session_date, opening_balance, expected_cash, counted_cash, difference, difference_reason, closed_by, closed_at}` — el mismo desglose módulo×concepto×medio de una sesión puntual sigue viviendo en `GET /cashbox/sessions/{id}/report` (éste es el listado, aquél el detalle). |
+
+**Reportes contables** (Tanda D). Los tres son una **foto de hoy**, no un resumen de un rango, y por eso no llevan `from_date`/`to_date`: "¿cuánto debo?" no tiene versión "en marzo".
+
+| Método | Path | Permiso | Descripción |
+|---|---|---|---|
+| `GET` | `/api/v1/reports/payables` | `reports.view` | Cuentas por pagar a proveedores, agrupadas y con antigüedad `days_0_30` / `days_31_60` / `days_over_60`. La antigüedad se mide desde `entry_date` (la fecha desde la que el proveedor cuenta el plazo). Solo cuenta `origin_type='purchase'`: los demás orígenes no entregan plata y contarlos inflaría la deuda. Un proveedor sin asignar aparece igual, agrupado como "Sin proveedor asignado". |
+| `GET` | `/api/v1/reports/inventory-valuation` | `reports.view` | Valor del inventario **al costo**, con desglose por categoría de primer nivel. Solo `status='available'`. `retail_value` va aparte y **no es el valor del inventario** — es lo que se cobraría vendiendo todo hoy. `potential_profit` puede ser **negativa** (mercancía por debajo del costo) y se devuelve así a propósito. |
+| `GET` | `/api/v1/reports/stale-inventory` | `reports.view` | Mercancía disponible sin rotación. `?threshold_days=` (default 90) y `?limit=`. Se mide sobre el lote **más antiguo todavía disponible**: una reposición reciente no debe esconder la pieza vieja. |
 
 ## 13. Módulo `accounts` (catálogo de cuentas)
 
