@@ -70,6 +70,11 @@ async def inventory_tenant(
         "inventory.pay_purchase",
         # 00037: fundir, despiezar, armar.
         "inventory.transform",
+        # El KARDEX se prueba acá porque es del inventario, pero necesita
+        # vender y anular: la anulación es el único movimiento de stock que no
+        # existe como fila en ninguna tabla y hay que sintetizarlo.
+        "sales.create",
+        "sales.void",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -2063,3 +2068,95 @@ def test_transformation_with_a_process_cost_needs_to_say_who_paid(
     )
     assert rechazado.status_code == 400, rechazado.text
     assert rechazado.json()["details"]["field"] == "payment_method"
+
+
+def test_kardex_cuadra_con_el_stock_real_incluida_la_anulacion(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El kardex es el libro auxiliar del inventario: su saldo final TIENE que
+    ser el stock real, o no sirve para nada.
+
+    La prueba de fuego es la **anulación de una venta**. Anular repone el
+    stock pero NO escribe una línea inversa —solo cambia el estado de la
+    venta— así que ese movimiento existe en el stock y en ninguna tabla. Si el
+    kardex no lo sintetiza, muestra una salida que nunca vuelve y su saldo
+    queda por debajo del real para siempre.
+    """
+    token = inventory_tenant["token"]
+
+    # Dos lotes del MISMO producto a costos distintos: es lo que hace que el
+    # saldo de costo no se pueda derivar de las unidades.
+    for costo in ("100000.00", "160000.00"):
+        payload = _entry_with(
+            inventory_tenant, "Cadena plata", unit_cost=costo, quantity=2, sale_price="250000.00"
+        )
+        del payload["payment_method"]
+        entrada = client.post(
+            "/api/v1/inventory/entries", headers=_headers(token), json=payload
+        ).json()
+        assert entrada["items"][0]["status"] == "available"
+        primer_lote = entrada["items"][0]
+
+    product_id = primer_lote["product_id"]
+
+    # 4 unidades: 2 a 100.000 + 2 a 160.000 = 520.000
+    kardex = client.get(
+        f"/api/v1/inventory/products/{product_id}/kardex", headers=_headers(token)
+    )
+    assert kardex.status_code == 200, kardex.text
+    cuerpo = kardex.json()
+    assert Decimal(cuerpo["closing_quantity"]) == Decimal("4")
+    assert Decimal(cuerpo["closing_value"]) == Decimal("520000.00")
+    assert len(cuerpo["lines"]) == 2
+
+    # Vender una unidad del lote CARO.
+    venta = client.post(
+        "/api/v1/sales",
+        headers=_headers(token),
+        json={
+            "payment_method": "cash",
+            "lines": [
+                {"item_id": primer_lote["id"], "quantity": "1", "unit_price": "250000.00"}
+            ],
+        },
+    )
+    assert venta.status_code == 201, venta.text
+
+    cuerpo = client.get(
+        f"/api/v1/inventory/products/{product_id}/kardex", headers=_headers(token)
+    ).json()
+    assert Decimal(cuerpo["closing_quantity"]) == Decimal("3")
+    # Sale al costo de SU lote (160.000), no a un promedio (130.000). Si se
+    # promediara, acá diría 390.000.
+    assert Decimal(cuerpo["closing_value"]) == Decimal("360000.00")
+    assert cuerpo["lines"][-1]["kind"] == "sale"
+
+    # Anular: el stock vuelve, y el kardex tiene que decirlo.
+    anulacion = client.post(
+        f"/api/v1/sales/{venta.json()['id']}/void",
+        headers=_headers(token),
+        json={"reason": "El cliente se arrepintió"},
+    )
+    assert anulacion.status_code == 200, anulacion.text
+
+    cuerpo = client.get(
+        f"/api/v1/inventory/products/{product_id}/kardex", headers=_headers(token)
+    ).json()
+    ultima = cuerpo["lines"][-1]
+    assert ultima["kind"] == "sale_void"
+    assert Decimal(ultima["quantity_in"]) == Decimal("1")
+    assert ultima["detail"] == "El cliente se arrepintió"
+    # Y el saldo volvió exactamente a donde estaba.
+    assert Decimal(cuerpo["closing_quantity"]) == Decimal("4")
+    assert Decimal(cuerpo["closing_value"]) == Decimal("520000.00")
+
+    # El saldo del kardex ES el stock real: la comprobación que justifica todo
+    # lo demás. Se compara contra la suma de los lotes, que es la otra forma
+    # —independiente— de responder cuánto hay.
+    lotes = client.get(
+        f"/api/v1/inventory/products/{product_id}/lots", headers=_headers(token)
+    ).json()
+    stock_real = sum(Decimal(lote["quantity"]) for lote in lotes)
+    assert stock_real == Decimal(cuerpo["closing_quantity"])
+    costo_real = sum(Decimal(lote["quantity"]) * Decimal(lote["cost"]) for lote in lotes)
+    assert costo_real == Decimal(cuerpo["closing_value"])

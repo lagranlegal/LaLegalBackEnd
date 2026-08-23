@@ -226,6 +226,16 @@ Con varias salidas el costo se reparte proporcional a `estimated_value` (mismo m
 
 Consume artículos `available` **y `draft`** — fundir una prenda que nunca se publicó es el caso más común. Genera un egreso `transformation` y un ingreso `transformation` vinculados por el documento, que es **inmutable**: de una barra de oro no salen las tres cadenas otra vez. `GET /inventory/transformations/{id}` (`inventory.view`) devuelve lo consumido y lo producido juntos.
 
+**Kardex por producto** (00040). `GET /api/v1/inventory/products/{id}/kardex` con `inventory.view`. El libro auxiliar de inventario: la historia completa de un producto en una sola línea de tiempo, con saldo de unidades y de costo corriendo.
+
+El dato existía y la pregunta no: los movimientos viven en **tres tablas de líneas** (`inventory_entry_line`, `inventory_exit_line`, `sale_line`) indexadas por su documento porque siempre se consultaron **hacia adelante** — *dado un ingreso, qué artículos trajo*. *"¿Qué pasó con este producto?"* es la dirección contraria.
+
+Reúne cuatro clases de movimiento (`entry`, `exit`, `sale`, `sale_void`), y **una no existe como fila**: anular una venta repone el stock pero no escribe línea inversa —`void_sale` solo cambia el `status`— así que se sintetiza. Sin eso el kardex mostraría una salida que nunca vuelve y su saldo no cuadraría contra el stock real. Su fecha sale de `updated_at`, confiable porque `void_sale` es el único `UPDATE` sobre `sale` en todo el backend.
+
+**La valoración es POR LOTE, nunca promediada** (identificación específica, NIIF): `running_value` **no** se deriva de `running_quantity` — tres unidades valen distinto según de qué lote salgan. Por eso cada línea trae `item_id`/`item_code`.
+
+Sin `from_date` devuelve la historia entera, al revés que `GET /accounts/{id}/statement` (últimos 30 días): en un extracto se busca conciliar el mes, en un kardex de dónde salió el saldo. Lo anterior al rango se comprime en `opening_quantity`/`opening_value`.
+
 **Trazabilidad de vuelta** (00039). `inventory_item.source_transformation_id` es el **tercer puntero de origen**, junto a `supplier_id` y `source_contract_id`; los tres son excluyentes y dicen respectivamente que la mercancía se compró, se remató o se produjo acá. Ninguno de los tres = mercancía propia sin documento externo (inventario inicial o sobrante de conteo).
 
 Hasta 00039 el vínculo existía solo hacia adelante: parado en el lote de oro, llegar a la fundición requería `item → línea de ingreso → ingreso → transformación`, cuatro saltos sin ningún endpoint que los recorriera. Importa porque ese oro puede venir de la prenda de un cliente, y ante un reclamo la cadena tiene que poder recorrerse hacia atrás. `ItemOut` expone el campo, y el documento se inserta **antes** de los lotes que produce (la FK lo exige; de paso el choque de `Idempotency-Key` revienta antes de tocar stock).

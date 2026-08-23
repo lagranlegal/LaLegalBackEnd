@@ -978,6 +978,153 @@ async def get_transformation(
     return result.first()
 
 
+#: Historia completa de un producto, unida de las tres tablas de líneas que la
+#: guardan por separado. Cada rama produce la misma forma de fila.
+#:
+#: LA VALORACIÓN ES POR LOTE, siempre. Cada movimiento se valora al costo del
+#: lote que se movió (`l.cost`), nunca a un promedio: identificación específica
+#: (NIIF), que es la regla dura del proyecto. Dos lotes del mismo producto
+#: comprados a precios distintos salen del inventario cada uno con el suyo, y
+#: por eso el saldo de costo NO es "unidades × un costo" — es la suma de lo que
+#: costó lo que queda.
+#:
+#: Los ingresos usan `el.unit_cost` en vez de `l.cost` porque son la fuente:
+#: es el costo con el que ese lote nació, y coincide con `l.cost`. Se lee del
+#: documento y no del lote para que la línea diga lo que decía el papel.
+_KARDEX_SQL = """
+with lotes as (
+    select id, cost, code, lot_number
+    from public.inventory_item
+    where company_id = :cid and product_id = :pid
+),
+movimientos as (
+    select
+        (e.entry_date)                       as fecha,
+        e.created_at                         as orden,
+        'entry'                              as tipo,
+        e.origin_type::text                  as subtipo,
+        e.id                                 as ref_id,
+        e.number                             as ref_number,
+        e.notes                              as detalle,
+        el.item_id                           as item_id,
+        el.quantity                          as cantidad_in,
+        cast(0 as numeric(14,3))             as cantidad_out,
+        el.unit_cost                         as costo_unitario
+    from public.inventory_entry_line el
+    join public.inventory_entry e
+      on e.id = el.entry_id and e.company_id = el.company_id
+    join lotes l on l.id = el.item_id
+    where el.company_id = :cid
+
+    union all
+
+    select
+        (x.created_at at time zone :tz)::date,
+        x.created_at,
+        'exit',
+        x.exit_type::text,
+        x.id,
+        x.number,
+        x.reason,
+        xl.item_id,
+        cast(0 as numeric(14,3)),
+        xl.quantity,
+        l.cost
+    from public.inventory_exit_line xl
+    join public.inventory_exit x
+      on x.id = xl.exit_id and x.company_id = xl.company_id
+    join lotes l on l.id = xl.item_id
+    where xl.company_id = :cid
+
+    union all
+
+    select
+        (s.sold_at at time zone :tz)::date,
+        s.sold_at,
+        'sale',
+        s.status::text,
+        s.id,
+        s.number,
+        null,
+        sl.item_id,
+        cast(0 as numeric(14,3)),
+        sl.quantity,
+        l.cost
+    from public.sale_line sl
+    join public.sale s on s.id = sl.sale_id and s.company_id = sl.company_id
+    join lotes l on l.id = sl.item_id
+    where sl.company_id = :cid
+
+    union all
+
+    -- ANULACIÓN DE VENTA. Anular repone el stock, pero NO escribe una línea
+    -- inversa: `void_sale` solo cambia el `status` de la venta y le devuelve
+    -- la cantidad al lote (00006). Así que el movimiento existe en el stock y
+    -- no en ninguna tabla — hay que sintetizarlo, o el kardex mostraría una
+    -- salida que nunca vuelve y su saldo no cuadraría contra el stock real.
+    --
+    -- La fecha sale de `updated_at` porque no hay columna `voided_at`. Es
+    -- confiable acá y solo acá: `void_sale` es el ÚNICO `update` que existe
+    -- sobre `sale` en todo el backend (verificado), y un trigger mueve
+    -- `updated_at`. Si algún día la venta se pudiera editar por otro camino,
+    -- esta fecha dejaría de significar "cuándo se anuló".
+    select
+        (s.updated_at at time zone :tz)::date,
+        s.updated_at,
+        'sale_void',
+        'voided',
+        s.id,
+        s.number,
+        s.void_reason,
+        sl.item_id,
+        sl.quantity,
+        cast(0 as numeric(14,3)),
+        l.cost
+    from public.sale_line sl
+    join public.sale s on s.id = sl.sale_id and s.company_id = sl.company_id
+    join lotes l on l.id = sl.item_id
+    where sl.company_id = :cid and s.status = 'voided'
+)
+select m.*, l.code as item_code, l.lot_number
+from movimientos m
+join lotes l on l.id = m.item_id
+{filtro}
+-- `orden` desempata dentro del mismo día e `item_id` desempata dentro de la
+-- misma transacción: todas las líneas de un ingreso comparten `created_at`
+-- (Postgres devuelve el instante de inicio de la transacción), así que sin el
+-- tercer criterio el orden quedaría a merced del plan de ejecución y el saldo
+-- corriente cambiaría de una consulta a otra.
+order by m.fecha, m.orden, m.item_id
+"""
+
+
+async def get_product_kardex(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    product_id: UUID,
+    tz: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> list[Row[Any]]:
+    """Todos los movimientos del producto, en orden cronológico.
+
+    Devuelve la historia COMPLETA hasta `to_date` —sin recortar por
+    `from_date`— porque el saldo con el que arranca el rango solo se puede
+    saber sumando todo lo anterior. El servicio parte el resultado en "saldo
+    inicial" y "líneas del rango"; hacerlo en SQL con dos consultas obligaría a
+    repetir la unión de las cuatro fuentes.
+    """
+    filtro = "where m.fecha <= :to_date" if to_date is not None else ""
+    params: dict[str, Any] = {"cid": str(company_id), "pid": str(product_id), "tz": tz}
+    if to_date is not None:
+        params["to_date"] = to_date
+    # `from_date` no filtra la consulta: el servicio lo usa para separar lo que
+    # entra al saldo inicial de lo que se muestra como línea.
+    result = await db.execute(text(_KARDEX_SQL.format(filtro=filtro)), params)
+    return list(result.all())
+
+
 async def list_transformations(
     db: AsyncSession,
     *,

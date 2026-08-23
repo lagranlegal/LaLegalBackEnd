@@ -22,6 +22,8 @@ from app.modules.inventory.schemas import (
     ItemOut,
     ItemPublishIn,
     ItemUpdateIn,
+    KardexLineOut,
+    KardexOut,
     ProductOut,
     ProductPurchaseOut,
     ProductUpdateIn,
@@ -1228,6 +1230,99 @@ async def get_transformation(
         total_cost=entrada._mapping["total_cost"] if entrada is not None else Decimal("0"),
         consumed=[_row_to_item(r) for r in consumidos],
         produced=[_row_to_item(r) for r in producidos],
+    )
+
+
+async def get_product_kardex(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    product_id: UUID,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> KardexOut:
+    """Kardex del producto: su historia completa con saldo corriendo.
+
+    El saldo se acumula **desde el principio de los tiempos**, no desde
+    `from_date`: un kardex que arrancara en cero cada vez que se cambia el
+    filtro no sería un kardex, sería una lista de movimientos. Lo anterior al
+    rango se comprime en `opening_quantity`/`opening_value` y lo de adentro se
+    muestra línea por línea.
+    """
+    producto = await repository.get_product(db, company_id=company_id, product_id=product_id)
+    if producto is None:
+        raise NotFoundError("El producto no existe en esta empresa.")
+
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    tz = await platform_integration.get_company_timezone(db, company_id=company_id)
+    hasta = to_date or today
+    # Por defecto la historia ENTERA. Un kardex recortado a los últimos 30 días
+    # por omisión escondería justo lo que se va a buscar: de dónde salió el
+    # saldo. Es lo contrario al extracto de una cuenta, que sí arranca en los
+    # últimos 30 días porque ahí lo que se busca es conciliar el mes.
+    desde = from_date or date.min
+
+    rows = await repository.get_product_kardex(
+        db, company_id=company_id, product_id=product_id, tz=tz, to_date=hasta
+    )
+
+    cantidad = Decimal("0")
+    valor = Decimal("0")
+    entradas = Decimal("0")
+    salidas = Decimal("0")
+    apertura_cantidad = Decimal("0")
+    apertura_valor = Decimal("0")
+    lineas: list[KardexLineOut] = []
+
+    for row in rows:
+        m = row._mapping
+        cantidad += m["cantidad_in"] - m["cantidad_out"]
+        valor = quantize(valor + (m["cantidad_in"] - m["cantidad_out"]) * m["costo_unitario"])
+        if m["fecha"] < desde:
+            # Anterior al rango: se comprime en el saldo inicial y no se
+            # muestra, pero SÍ cuenta — es de donde sale ese saldo.
+            apertura_cantidad = cantidad
+            apertura_valor = valor
+            continue
+        entradas += m["cantidad_in"]
+        salidas += m["cantidad_out"]
+        lineas.append(
+            KardexLineOut(
+                date=m["fecha"],
+                kind=m["tipo"],
+                kind_detail=m["subtipo"],
+                reference_id=m["ref_id"],
+                reference_number=m["ref_number"],
+                detail=m["detalle"],
+                item_id=m["item_id"],
+                item_code=m["item_code"],
+                lot_number=m["lot_number"],
+                quantity_in=m["cantidad_in"],
+                quantity_out=m["cantidad_out"],
+                unit_cost=m["costo_unitario"],
+                running_quantity=cantidad,
+                running_value=valor,
+            )
+        )
+
+    p = producto._mapping
+    return KardexOut(
+        product_id=product_id,
+        name=p["name"],
+        unit=p["unit"],
+        unit_abbr=UNIT_ABBREVIATIONS.get(p["unit"], p["unit"]),
+        # Se devuelve el rango EFECTIVO, no el pedido: sin `from_date` el
+        # kardex arranca en el primer movimiento, y decir `0001-01-01` sería
+        # una fecha que no significa nada para quien la lee.
+        from_date=lineas[0].date if lineas else hasta,
+        to_date=hasta,
+        opening_quantity=apertura_cantidad,
+        opening_value=apertura_valor,
+        total_in=entradas,
+        total_out=salidas,
+        closing_quantity=cantidad,
+        closing_value=valor,
+        lines=lineas,
     )
 
 

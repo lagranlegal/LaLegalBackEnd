@@ -18,6 +18,7 @@ from app.modules.inventory.schemas import (
     ItemOut,
     ItemPublishIn,
     ItemUpdateIn,
+    KardexOut,
     ProductOut,
     ProductPurchaseOut,
     ProductUpdateIn,
@@ -295,6 +296,52 @@ async def update_product(
     """
     return await service.update_product(
         db, company_id=user.company_id, product_id=product_id, body=body
+    )
+
+
+@router.get("/products/{product_id}/kardex", response_model=KardexOut)
+async def get_product_kardex(
+    product_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    from_date: Annotated[
+        date | None, Query(description="Inclusivo. Por defecto, desde el primer movimiento.")
+    ] = None,
+    to_date: Annotated[date | None, Query(description="Inclusivo. Por defecto, hoy.")] = None,
+) -> KardexOut:
+    """**Kardex**: el libro auxiliar de inventario de un producto — su historia
+    completa en una sola línea de tiempo, con saldo de unidades y de costo
+    corriendo.
+
+    El dato existía; la pregunta no. Los movimientos viven en **tres tablas de
+    líneas** (`inventory_entry_line`, `inventory_exit_line`, `sale_line`) que
+    se consultan **hacia adelante**: dado un ingreso, qué artículos trajo.
+    *"¿Qué pasó con este producto?"* es la dirección contraria, y no la
+    respondía nadie.
+
+    Reúne cuatro clases de movimiento, y **una de ellas no existe como fila**:
+    anular una venta repone el stock pero no escribe ninguna línea inversa
+    —solo cambia el estado de la venta—, así que se sintetiza. Sin eso el
+    kardex mostraría una salida que nunca vuelve y su saldo no cuadraría contra
+    el stock real.
+
+    **La valoración es POR LOTE, nunca promediada** (identificación específica,
+    NIIF). Dos lotes del mismo producto comprados a precios distintos salen
+    cada uno con el suyo — por eso `running_value` **no** se puede derivar de
+    `running_quantity`: es la suma de lo que costó lo que queda.
+
+    Sin `from_date` devuelve la historia entera. Es a propósito y es lo
+    contrario del extracto de una cuenta, que arranca en los últimos 30 días:
+    ahí se busca conciliar el mes, acá se busca de dónde salió el saldo. El
+    saldo se acumula **desde el primer movimiento**; lo anterior al rango se
+    comprime en `opening_quantity`/`opening_value`.
+    """
+    return await service.get_product_kardex(
+        db,
+        company_id=user.company_id,
+        product_id=product_id,
+        from_date=from_date,
+        to_date=to_date,
     )
 
 

@@ -316,6 +316,83 @@ class TransformationOut(BaseModel):
     produced: list[ItemOut]
 
 
+#: Qué movió el stock. No son etiquetas cosméticas: cada uno se lee distinto y
+#: dos de ellos no existen como fila en ninguna tabla.
+#:   entry      ingreso (compra, inventario inicial, sobrante, remate, o lo
+#:              que produjo una transformación — `kind_detail` lo dice)
+#:   exit       egreso (ajuste, daño, pérdida, devolución a proveedor, consumo
+#:              interno, o lo que consumió una transformación)
+#:   sale       venta
+#:   sale_void  anulación de venta: repone el stock. Se SINTETIZA — anular no
+#:              escribe una línea inversa, solo cambia el estado de la venta.
+KardexKind = Literal["entry", "exit", "sale", "sale_void"]
+
+
+class KardexLineOut(BaseModel):
+    """Un movimiento del producto, con el saldo DESPUÉS de él."""
+
+    date: date
+    kind: KardexKind
+    #: El subtipo dentro de `kind`: `origin_type` del ingreso, `exit_type` del
+    #: egreso, `status` de la venta.
+    kind_detail: str
+    #: Documento que lo causó, para poder ir a verlo.
+    reference_id: UUID
+    reference_number: int
+    #: Notas del ingreso, motivo del egreso o de la anulación.
+    detail: str | None
+    #: LOTE que se movió. El kardex es del producto, pero el movimiento siempre
+    #: es de un lote concreto — y su costo es el del lote, nunca un promedio.
+    item_id: UUID
+    item_code: str | None
+    lot_number: int | None
+    quantity_in: Decimal
+    quantity_out: Decimal
+    #: Costo unitario del lote movido.
+    unit_cost: Decimal
+    #: Unidades en existencia después de este movimiento.
+    running_quantity: Decimal
+    #: Cuánto cuesta lo que queda después de este movimiento. NO es
+    #: `running_quantity × unit_cost`: cada lote conserva su costo, así que es
+    #: la suma de lo que costó cada unidad que sigue en inventario.
+    running_value: Decimal
+
+
+class KardexOut(BaseModel):
+    """Kardex: el libro auxiliar de inventario de un producto.
+
+    La historia completa en una sola línea de tiempo — cada ingreso, egreso,
+    venta y anulación— con saldo de unidades y de costo corriendo.
+
+    Existía el dato y no la pregunta: los movimientos viven en TRES tablas de
+    líneas (`inventory_entry_line`, `inventory_exit_line`, `sale_line`) que se
+    consultan **hacia adelante** (dado un documento, qué artículos trajo).
+    "¿Qué pasó con este producto?" es la dirección contraria, y no la
+    respondía nadie.
+
+    LA VALORACIÓN ES POR LOTE. Cada movimiento se valora al costo del lote que
+    se movió, nunca a un promedio: identificación específica (NIIF). Dos lotes
+    del mismo producto comprados a precios distintos salen cada uno con el
+    suyo, y por eso `running_value` no se puede derivar de `running_quantity`.
+    """
+
+    product_id: UUID
+    name: str
+    unit: str
+    unit_abbr: str
+    from_date: date
+    to_date: date
+
+    #: Saldo ANTES del rango — la suma de todo lo anterior a `from_date`.
+    opening_quantity: Decimal
+    opening_value: Decimal
+    total_in: Decimal
+    total_out: Decimal
+    closing_quantity: Decimal
+    closing_value: Decimal
+    lines: list[KardexLineOut]
+
+
 class TransformationSummaryOut(BaseModel):
     """Una fila del historial de transformaciones.
 
