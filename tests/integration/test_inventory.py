@@ -1947,6 +1947,14 @@ def test_melting_moves_the_cost_and_the_waste_raises_it(
     # Y con precio, nace vendible.
     assert oro["status"] == "available"
 
+    # El oro SABE de dónde salió (00039). Sin este puntero la única forma de
+    # llegar a la fundición desde el lote era item -> línea de ingreso ->
+    # ingreso -> transformación: cuatro saltos, ninguno expuesto por la API.
+    assert oro["source_transformation_id"] == cuerpo["id"]
+    # Y por eso su código lleva `T` de transformado y no la `P` genérica de
+    # "propio", que mezclaba oro fundido con mercancía del inventario inicial.
+    assert oro["code"].endswith("T"), oro["code"]
+
     # Las prendas dejaron de existir — pero NO como pérdida.
     for item_id in consumidos:
         consumido = client.get(
@@ -1954,6 +1962,26 @@ def test_melting_moves_the_cost_and_the_waste_raises_it(
         ).json()
         assert consumido["status"] == "written_off"
         assert Decimal(consumido["quantity"]) == 0
+        # El código NO se toca: es inmutable, y esa pieza existió. Borrarlo
+        # borraría la historia.
+        assert consumido["code"] is not None
+
+    # --- El historial: "¿de dónde salió este oro?" ----------------------
+    historial = client.get("/api/v1/inventory/transformations", headers=_headers(token))
+    assert historial.status_code == 200, historial.text
+    filas = historial.json()["items"]
+    assert len(filas) == 1
+    fila = filas[0]
+    assert fila["id"] == cuerpo["id"]
+    assert fila["reason"] == "Fundición de prendas rematadas sin rotación"
+    assert fila["input_count"] == 3
+    assert fila["output_count"] == 1
+    assert Decimal(fila["total_cost"]) == Decimal("600000.00")
+    assert Decimal(fila["extra_cost"]) == Decimal("25000.00")
+    # Se lee de corrido sin abrir el detalle — que es el punto de la lista.
+    assert "Oro 18k" in fila["output_names"]
+    for prenda in ("Anillo", "Cadena", "Dije"):
+        assert prenda in fila["input_names"]
 
 
 def test_transformation_splits_the_cost_across_several_outputs(

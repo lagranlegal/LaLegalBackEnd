@@ -37,6 +37,10 @@ class ItemOut(BaseModel):
     origin: str
     supplier_id: UUID | None
     source_contract_id: UUID | None
+    #: Solo si el lote lo PRODUJIMOS transformando (00039). Excluyente con
+    #: `supplier_id` y `source_contract_id`: son los tres orígenes posibles,
+    #: y ninguno de los tres significa mercancía propia sin documento.
+    source_transformation_id: UUID | None = None
     cost: Decimal
     sale_price: Decimal | None
     #: Decimal desde 00036: un producto medido en gramos o metros tiene stock
@@ -310,3 +314,35 @@ class TransformationOut(BaseModel):
     #: sin ir a buscar dos documentos por separado.
     consumed: list[ItemOut]
     produced: list[ItemOut]
+
+
+class TransformationSummaryOut(BaseModel):
+    """Una fila del historial de transformaciones.
+
+    Trae el resumen de las dos puntas —qué entró, qué salió— porque la
+    pregunta que se le hace a esta lista es "¿de dónde salió este oro?", y
+    obligar a abrir cada fila para responderla la volvería inútil.
+
+    No incluye `consumed`/`produced` completos a propósito: son dos consultas
+    por fila y en una lista de cincuenta transformaciones eso es un problema
+    de rendimiento sin nada a cambio. El detalle está en
+    `GET /inventory/transformations/{id}`.
+    """
+
+    id: UUID
+    number: int
+    transform_date: date
+    #: El motivo que se escribió al fundir/despiezar. Es el título de la fila.
+    reason: str
+    notes: str | None
+    #: Lo que cobró el tercero, ya capitalizado en el costo de lo producido.
+    extra_cost: Decimal
+    #: Costo total que viajó: lo consumido + `extra_cost`.
+    total_cost: Decimal
+    input_count: int
+    output_count: int
+    #: Nombres de producto separados por coma — para leer la fila de corrido.
+    input_names: str | None
+    output_names: str | None
+    created_by_name: str | None
+    created_at: datetime

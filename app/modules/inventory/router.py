@@ -23,6 +23,7 @@ from app.modules.inventory.schemas import (
     ProductUpdateIn,
     TransformationCreateIn,
     TransformationOut,
+    TransformationSummaryOut,
 )
 
 router = APIRouter(prefix="/api/v1/inventory", tags=["inventory"])
@@ -348,6 +349,45 @@ async def create_transformation(
         body=body,
         registered_by=user.id,
         idempotency_key=idempotency_key,
+    )
+
+
+@router.get("/transformations", response_model=CursorPage[TransformationSummaryOut])
+async def list_transformations(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    from_date: Annotated[date | None, Query()] = None,
+    to_date: Annotated[date | None, Query()] = None,
+) -> CursorPage[TransformationSummaryOut]:
+    """Historial de transformaciones — de la más reciente a la más vieja.
+
+    Fundir es la única operación donde **desaparece mercancía identificada y
+    aparece otra distinta**. Una venta deja comprobante y un remate deja
+    contrato; hasta acá, fundir no dejaba nada que se pudiera consultar, así
+    que la pregunta *"¿de dónde salieron estos gramos de oro?"* no tenía
+    respuesta dentro de la aplicación.
+
+    Importa por tres razones que no son técnicas:
+
+    · **Legal** — ese oro puede venir de la prenda de un cliente. Ante un
+      reclamo, la cadena tiene que poder recorrerse hacia atrás.
+    · **Contable** — el costo de lo producido salió de repartir el de lo
+      consumido. Un costo sin forma de auditar su origen es un número sin
+      respaldo, y es el que determina la utilidad de la venta.
+    · **Operativa** — entraron 34 g de prendas y salieron 31,2 g de oro. Esa
+      merma es información, y sin historial se perdía.
+
+    Basta `inventory.view`: es leer, no transformar.
+    """
+    return await service.list_transformations(
+        db,
+        company_id=user.company_id,
+        cursor=decode_cursor(cursor) if cursor else None,
+        limit=limit,
+        from_date=from_date,
+        to_date=to_date,
     )
 
 

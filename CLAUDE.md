@@ -43,7 +43,18 @@ Backend (FastAPI) de una plataforma SaaS **multi-tenant** para compraventas (cas
 `POST /contracts/{id}/auction` (permiso `contracts.auction`): en una transacción — contrato→`auctioned`, items→`auctioned`, crear `inventory_item` en `draft` (cost = saldo capital + intereses pendientes, `origin='auction'`, `source_contract_id`, vínculo en `contract_item.inventory_item_id`), crear `inventory_entry`, auditar. Luego `POST /inventory/items/{id}/publish` emite el código. Exige precio siempre y **foto solo en piezas únicas** — que es el caso del remate: la foto es la evidencia de qué prenda dejó el cliente. Para mercancía fungible la foto es opcional y vive en el producto, no en el lote (00034).
 
 ### Códigos de inventario
-`[letra cat1][cat2][cat3][consecutivo 4 dígitos][letra proveedor | 'R' si remate]` → `JOC0001I` / `JOC0001R`. Consecutivo por (company_id, prefijo) vía `next_counter()` (ya en migraciones, atómico). El código se emite AL PUBLICAR y es inmutable. Costos por identificación específica: cada pieza/lote conserva su costo real; nunca promediar.
+`[letra cat1][cat2][cat3][consecutivo 4 dígitos][letra de origen]` → `JOC0001I` / `JOC0001R`. Consecutivo por (company_id, prefijo) vía `next_counter()` (ya en migraciones, atómico). El código se emite AL PUBLICAR y es inmutable. Costos por identificación específica: cada pieza/lote conserva su costo real; nunca promediar.
+
+La **letra de origen** dice de dónde salió la pieza, y se deriva de sus punteros —nunca se digita:
+
+| Letra | Cuándo | Puntero |
+|---|---|---|
+| la del proveedor | se la compramos a alguien | `supplier_id` |
+| `R` | salió de un remate | `source_contract_id` |
+| `T` | la produjimos fundiendo, despiezando o armando (00039) | `source_transformation_id` |
+| `P` | propio: inventario inicial o sobrante de conteo (00033) | ninguno |
+
+Los tres punteros son **excluyentes**. `R`, `P` y `T` están reservadas: un proveedor no puede tomarlas (se valida al escribir, no hacia atrás — hay códigos impresos).
 
 ### Caja (acto único diario)
 - Una sesión por día por caja (fase 1: una caja por empresa, base ÚNICA de efectivo). Sin sesión `open` → toda operación de dinero se rechaza.

@@ -182,10 +182,15 @@ def test_create_and_update_supplier(client: TestClient, tenant: dict) -> None:
     create_resp = client.post(
         "/api/v1/catalogs/suppliers",
         headers=headers,
-        json={"name": "Proveedor Uno", "code_letter": "P"},
+        # `p` en minúscula a propósito: se normaliza a mayúscula al escribir.
+        # Antes convivían un proveedor `p` y otro `P` como dos distintos —el
+        # índice de unicidad distingue mayúsculas— y generaban códigos que solo
+        # se diferenciaban por algo invisible en una etiqueta impresa.
+        json={"name": "Proveedor Uno", "code_letter": "j"},
     )
     assert create_resp.status_code == 201, create_resp.text
     supplier = create_resp.json()
+    assert supplier["code_letter"] == "J"
 
     update_resp = client.patch(
         f"/api/v1/catalogs/suppliers/{supplier['id']}",
@@ -194,6 +199,46 @@ def test_create_and_update_supplier(client: TestClient, tenant: dict) -> None:
     )
     assert update_resp.status_code == 200
     assert update_resp.json()["phone"] == "3005551234"
+
+
+@pytest.mark.parametrize("letra", ["R", "P", "T"])
+def test_supplier_cannot_take_a_reserved_letter(
+    client: TestClient, tenant: dict, letra: str
+) -> None:
+    """`R`, `P` y `T` las emite el propio sistema como sufijo del código para
+    decir de dónde salió una pieza: remate, propio, transformado.
+
+    Sin esta reserva, un proveedor "Rodríguez" con letra `R` producía artículos
+    con código indistinguible de los rematados — y el remate es el caso donde
+    el origen tiene consecuencias legales, porque esa pieza fue la prenda de un
+    cliente.
+    """
+    resp = client.post(
+        "/api/v1/catalogs/suppliers",
+        headers=_headers(tenant["token"]),
+        json={"name": f"Proveedor {letra}", "code_letter": letra},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_category_may_take_a_letter_reserved_for_suppliers(
+    client: TestClient, tenant: dict
+) -> None:
+    """La reserva es SOLO de proveedores.
+
+    Las letras de categoría forman el PREFIJO del código (`JOC0001`) y la del
+    origen es el SUFIJO (`-01R`): no comparten posición, así que no colisionan.
+    Prohibirlas acá le quitaría a "Relojes" su inicial natural sin ninguna
+    razón.
+    """
+    resp = client.post(
+        "/api/v1/catalogs/categories",
+        headers=_headers(tenant["token"]),
+        json={"name": "Relojes", "code_letter": "R"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["code_letter"] == "R"
 
 
 def test_supplier_duplicate_code_letter_is_conflict(client: TestClient, tenant: dict) -> None:
@@ -215,7 +260,12 @@ def test_list_suppliers(client: TestClient, tenant: dict) -> None:
     created = client.post(
         "/api/v1/catalogs/suppliers",
         headers=headers,
-        json={"name": "Proveedor Lista", "code_letter": str(uuid4())[:1].upper()},
+        # Letra fija, no `uuid4()[:1]`: la primera posición de un uuid es
+        # hexadecimal, así que una de cada tres veces salía un DÍGITO. Pasaba
+        # solo porque el único filtro era el largo; con la validación de A-Z
+        # (00039) el test habría fallado al azar. La aleatoriedad no aportaba
+        # nada — este test verifica el listado, no la letra.
+        json={"name": "Proveedor Lista", "code_letter": "Z"},
     ).json()
 
     response = client.get("/api/v1/catalogs/suppliers", headers=headers)

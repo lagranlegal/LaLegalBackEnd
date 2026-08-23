@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # fotografiar lo mismo.
 _ITEM_COLUMNS = (
     "i.id, i.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description, "
-    "i.origin, i.supplier_id, i.source_contract_id, i.cost, p.sale_price, "
+    "i.origin, i.supplier_id, i.source_contract_id, i.source_transformation_id, "
+    "i.cost, p.sale_price, "
     "i.quantity, p.unit, "
     "i.status, "
     "case when jsonb_array_length(i.photos) > 0 then i.photos else p.photos end as photos, "
@@ -63,6 +64,7 @@ async def insert_item(
     photos: list[str],
     created_by: UUID | None,
     entry_date: date | None = None,
+    source_transformation_id: UUID | None = None,
 ) -> None:
     """Un lote. Desde 00022 no lleva nombre ni categoría ni precio: eso es del
     producto, y por eso `product_id` es obligatorio al insertar — un lote sin
@@ -75,6 +77,11 @@ async def insert_item(
     cualquier reporte que midiera antigüedad de inventario —cuánto lleva algo
     sin venderse— contaba desde el día de la digitación en vez del día en que
     la mercancía llegó. 00020 agregó la fecha al ingreso y nunca la propagó.
+
+    `source_transformation_id` (00039) es el tercer puntero de origen, junto a
+    `supplier_id` y `source_contract_id`, y los tres son excluyentes: dicen
+    respectivamente que la mercancía se compró, se remató o se produjo acá.
+    Ninguno de los tres = mercancía propia sin documento externo.
     """
     await db.execute(
         text(
@@ -82,11 +89,11 @@ async def insert_item(
             insert into public.inventory_item
                 (id, company_id, product_id, lot_number, origin,
                  supplier_id, source_contract_id, cost, quantity, photos, created_by,
-                 entry_date)
+                 entry_date, source_transformation_id)
             values
                 (:id, :company_id, :product_id, :lot_number, :origin,
                  :supplier_id, :source_contract_id, :cost, :quantity, cast(:photos as jsonb),
-                 :created_by, coalesce(:entry_date, current_date))
+                 :created_by, coalesce(:entry_date, current_date), :source_transformation_id)
             """
         ),
         {
@@ -102,6 +109,9 @@ async def insert_item(
             "photos": json.dumps(photos),
             "created_by": str(created_by) if created_by else None,
             "entry_date": entry_date,
+            "source_transformation_id": (
+                str(source_transformation_id) if source_transformation_id else None
+            ),
         },
     )
 
@@ -966,6 +976,77 @@ async def get_transformation(
         {"cid": str(company_id), "id": str(transformation_id)},
     )
     return result.first()
+
+
+async def list_transformations(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> list[Row[Any]]:
+    """Historial de transformaciones, de la más reciente a la más vieja.
+
+    Es la única operación de la app donde MERCANCÍA IDENTIFICADA DESAPARECE y
+    aparece otra distinta. Una venta deja comprobante, un remate deja
+    contrato; fundir no dejaba nada consultable, así que "¿de dónde salieron
+    estos 31 gramos de oro?" no tenía respuesta dentro de la aplicación aunque
+    el dato estuviera completo en la base.
+
+    Cada fila trae el resumen de las dos puntas —qué entró, qué salió— para no
+    tener que abrir el detalle solo para entender de qué se trató. Los nombres
+    salen del PRODUCTO, no del lote, porque es lo que la persona reconoce al
+    leer la lista.
+
+    ORDEN DESCENDENTE, al revés que el resto de listados del módulo: acá lo
+    último que se fundió es lo que se está buscando. El cursor sigue siendo el
+    `id` (contrato de `common.pagination`) y se traduce a su `number` en la
+    misma consulta — `number` sí ordena cronológicamente, un uuid4 no.
+    """
+    query = """
+        select
+            t.id, t.number, t.transform_date, t.extra_cost, t.notes, t.created_at,
+            x.reason,
+            e.total_cost,
+            u.full_name as created_by_name,
+            (select count(*) from public.inventory_exit_line l
+              where l.exit_id = t.exit_id) as input_count,
+            (select count(*) from public.inventory_entry_line l
+              where l.entry_id = t.entry_id) as output_count,
+            (select string_agg(distinct p.name, ', ')
+               from public.inventory_exit_line l
+               join public.inventory_item i on i.id = l.item_id
+               join public.product p on p.id = i.product_id
+              where l.exit_id = t.exit_id) as input_names,
+            (select string_agg(distinct p.name, ', ')
+               from public.inventory_entry_line l
+               join public.inventory_item i on i.id = l.item_id
+               join public.product p on p.id = i.product_id
+              where l.entry_id = t.entry_id) as output_names
+        from public.inventory_transformation t
+        join public.inventory_exit  x on x.id = t.exit_id  and x.company_id = t.company_id
+        join public.inventory_entry e on e.id = t.entry_id and e.company_id = t.company_id
+        left join public.app_user u on u.id = t.created_by and u.company_id = t.company_id
+        where t.company_id = :cid
+    """
+    params: dict[str, Any] = {"cid": str(company_id), "limit": limit + 1}
+    if from_date is not None:
+        query += " and t.transform_date >= :from_date"
+        params["from_date"] = from_date
+    if to_date is not None:
+        query += " and t.transform_date <= :to_date"
+        params["to_date"] = to_date
+    if cursor is not None:
+        query += (
+            " and t.number < (select number from public.inventory_transformation"
+            " where id = :cursor and company_id = :cid)"
+        )
+        params["cursor"] = str(cursor)
+    query += " order by t.number desc limit :limit"
+    result = await db.execute(text(query), params)
+    return list(result.all())
 
 
 async def list_items_for_exit(

@@ -27,6 +27,7 @@ from app.modules.inventory.schemas import (
     ProductUpdateIn,
     TransformationCreateIn,
     TransformationOut,
+    TransformationSummaryOut,
 )
 from app.modules.inventory.units import UNIT_ABBREVIATIONS
 from app.modules.platform import integration as platform_integration
@@ -47,6 +48,7 @@ def _row_to_item(row: Row[Any]) -> ItemOut:
         origin=m["origin"],
         supplier_id=m["supplier_id"],
         source_contract_id=m["source_contract_id"],
+        source_transformation_id=m["source_transformation_id"],
         cost=m["cost"],
         sale_price=m["sale_price"],
         quantity=m["quantity"],
@@ -617,20 +619,28 @@ async def publish_item(
         if supplier is None:
             raise AppError("El proveedor del artículo ya no existe; no se puede emitir el código.")
         suffix_letter = supplier._mapping["code_letter"]
+    elif m["source_transformation_id"] is not None:
+        # `T` de transformado: lo produjimos acá fundiendo, despiezando o
+        # armando (00037). No lo compramos ni lo rematamos — nació de otras
+        # piezas que dejaron de existir.
+        #
+        # Hasta 00039 esto caía en la `P` de abajo, así que una etiqueta no
+        # distinguía un lote de oro fundido de mercancía que ya estaba el día
+        # que la compraventa empezó a usar el sistema. Dos cosas con costo,
+        # origen y respaldo documental completamente distintos bajo la misma
+        # letra: la etiqueta decía menos de lo que el sistema sabía.
+        suffix_letter = "T"
     else:
-        # Mercancía sin proveedor externo: el inventario inicial de la empresa
-        # o un sobrante de conteo (00033). Antes esto era un error duro, y con
-        # los tipos nuevos se volvió un callejón sin salida: la mercancía que
-        # la compraventa ya tenía en la vitrina al arrancar con el sistema
-        # entraba y quedaba atrapada en borrador PARA SIEMPRE, sin código y
-        # sin poder venderse. O sea que el tipo creado justamente para poder
-        # cargarla no servía para nada.
+        # Mercancía sin documento de origen externo NI proceso propio: el
+        # inventario inicial de la empresa o un sobrante de conteo (00033).
+        # Antes esto era un error duro, y con los tipos nuevos se volvió un
+        # callejón sin salida: la mercancía que la compraventa ya tenía en la
+        # vitrina al arrancar con el sistema entraba y quedaba atrapada en
+        # borrador PARA SIEMPRE, sin código y sin poder venderse. O sea que el
+        # tipo creado justamente para poder cargarla no servía para nada.
         #
         # `P` de "propio", con la misma lógica que la `R` de remate: la letra
-        # dice de dónde salió la pieza. Un proveedor podría llamarse `P`
-        # también —las letras de proveedor no tienen reservas— pero eso no
-        # rompe nada: la unicidad del código la dan el SKU y el número de
-        # lote, y la letra es información de lectura.
+        # dice de dónde salió la pieza.
         suffix_letter = "P"
 
     # SKU del producto: se emite al publicar su PRIMER lote, no al crearlo.
@@ -1038,6 +1048,27 @@ async def create_transformation(
         entry_date=transform_date,
     )
 
+    # --- El documento, ANTES de los lotes que produce -------------------
+    # Va acá y no al final (donde estaba) porque cada lote producido guarda
+    # `source_transformation_id` (00039) y la llave foránea exige que la fila
+    # exista. De paso el choque de `Idempotency-Key` revienta temprano, antes
+    # de tocar stock — que es donde uno quiere que reviente.
+    transformation_id = uuid4()
+    number = await repository.next_counter(db, company_id=company_id, prefix="INV_TRANSFORM")
+    await repository.insert_transformation(
+        db,
+        transformation_id=transformation_id,
+        company_id=company_id,
+        number=number,
+        transform_date=transform_date,
+        extra_cost=body.extra_cost,
+        notes=body.notes,
+        exit_id=exit_id,
+        entry_id=entry_id,
+        created_by=registered_by,
+        idempotency_key=idempotency_key,
+    )
+
     # El costo se reparte entre las salidas proporcional a su valor estimado —
     # el MISMO mecanismo con el que el remate reparte el saldo del contrato
     # entre las prendas. Sin estimaciones, en partes iguales.
@@ -1091,6 +1122,9 @@ async def create_transformation(
             origin="other",
             supplier_id=None,
             source_contract_id=None,
+            # Lo que hace que este lote sepa de dónde salió — y, al publicarlo,
+            # que su código lleve `T` y no la `P` genérica de "propio" (00039).
+            source_transformation_id=transformation_id,
             cost=costo_unitario,
             quantity=salida.quantity,
             photos=[],
@@ -1148,21 +1182,6 @@ async def create_transformation(
             account_id=resolved.account_id,
         )
 
-    transformation_id = uuid4()
-    number = await repository.next_counter(db, company_id=company_id, prefix="INV_TRANSFORM")
-    await repository.insert_transformation(
-        db,
-        transformation_id=transformation_id,
-        company_id=company_id,
-        number=number,
-        transform_date=transform_date,
-        extra_cost=body.extra_cost,
-        notes=body.notes,
-        exit_id=exit_id,
-        entry_id=entry_id,
-        created_by=registered_by,
-        idempotency_key=idempotency_key,
-    )
     await identity_repo.insert_audit_log(
         db,
         company_id=company_id,
@@ -1209,4 +1228,45 @@ async def get_transformation(
         total_cost=entrada._mapping["total_cost"] if entrada is not None else Decimal("0"),
         consumed=[_row_to_item(r) for r in consumidos],
         produced=[_row_to_item(r) for r in producidos],
+    )
+
+
+async def list_transformations(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> CursorPage[TransformationSummaryOut]:
+    rows = await repository.list_transformations(
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    return CursorPage(
+        items=[
+            TransformationSummaryOut(
+                id=r._mapping["id"],
+                number=r._mapping["number"],
+                transform_date=r._mapping["transform_date"],
+                reason=r._mapping["reason"],
+                notes=r._mapping["notes"],
+                extra_cost=r._mapping["extra_cost"],
+                total_cost=r._mapping["total_cost"],
+                input_count=r._mapping["input_count"],
+                output_count=r._mapping["output_count"],
+                input_names=r._mapping["input_names"],
+                output_names=r._mapping["output_names"],
+                created_by_name=r._mapping["created_by_name"],
+                created_at=r._mapping["created_at"],
+            )
+            for r in page.items
+        ],
+        next_cursor=page.next_cursor,
     )
