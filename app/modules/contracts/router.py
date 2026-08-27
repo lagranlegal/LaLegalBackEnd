@@ -75,6 +75,7 @@ async def list_contracts(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     status: str | None = Query(default=None),
+    customer_id: Annotated[UUID | None, Query()] = None,
 ) -> CursorPage[ContractOut]:
     return await service.list_contracts(
         db,
@@ -82,6 +83,7 @@ async def list_contracts(
         cursor=decode_cursor(cursor) if cursor else None,
         limit=limit,
         status_filter=status,
+        customer_id=customer_id,
     )
 
 

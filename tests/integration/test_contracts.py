@@ -653,3 +653,53 @@ async def test_category_params_are_inherited_from_ancestors(
     # Y el LTV del nivel 1, porque el 2 no lo define: cada campo se resuelve
     # por separado, no en bloque.
     assert contrato["ltv_warning"] is True, "1.000.000 sobre 1.500.000 es 66%, supera el 50% del N1"
+
+
+async def test_list_contracts_filters_by_customer_id(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md #2: GET /contracts no tenía filtro
+    por cliente — la ficha de cliente traía la página de 200 más grande y
+    filtraba client-side, con el hueco documentado de perder contratos más
+    allá de esa ventana."""
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    other_customer_id = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.customer "
+                "(id, company_id, full_name, doc_type, doc_number, phone) "
+                "values (:id, :cid, 'Otro Cliente', 'cc', :doc, '3000000001')"
+            ),
+            {
+                "id": str(other_customer_id),
+                "cid": str(contract_tenant["company_id"]),
+                "doc": str(uuid4().int)[:10],
+            },
+        )
+
+    headers = _headers(contract_tenant["full_token"], idempotency_key=str(uuid4()))
+    mine = client.post(
+        "/api/v1/contracts", headers=headers, json=_contract_payload(contract_tenant)
+    )
+    assert mine.status_code == 201, mine.text
+
+    other_headers = _headers(contract_tenant["full_token"], idempotency_key=str(uuid4()))
+    other = client.post(
+        "/api/v1/contracts",
+        headers=other_headers,
+        json=_contract_payload(contract_tenant, customer_id=str(other_customer_id)),
+    )
+    assert other.status_code == 201, other.text
+
+    response = client.get(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"]),
+        params={"customer_id": str(contract_tenant["customer_id"])},
+    )
+    assert response.status_code == 200
+    ids = [c["id"] for c in response.json()["items"]]
+    assert mine.json()["id"] in ids
+    assert other.json()["id"] not in ids

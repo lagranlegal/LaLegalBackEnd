@@ -236,12 +236,16 @@ async def list_contracts(
     cursor: UUID | None,
     limit: int,
     status_filter: str | None,
+    customer_id: UUID | None = None,
 ) -> list[Row[Any]]:
     query = f"select {_CONTRACT_COLUMNS} from public.contract where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if status_filter:
         query += " and status = :status"
         params["status"] = status_filter
+    if customer_id is not None:
+        query += " and customer_id = :customer_id"
+        params["customer_id"] = str(customer_id)
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)

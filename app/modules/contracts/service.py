@@ -450,9 +450,15 @@ async def list_contracts(
     cursor: UUID | None,
     limit: int,
     status_filter: str | None,
+    customer_id: UUID | None = None,
 ) -> CursorPage[ContractOut]:
     rows = await repository.list_contracts(
-        db, company_id=company_id, cursor=cursor, limit=limit, status_filter=status_filter
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        status_filter=status_filter,
+        customer_id=customer_id,
     )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     items_out = []
