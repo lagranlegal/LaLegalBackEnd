@@ -13,8 +13,17 @@
 # (logs con un GET /api/v1/health cada 15s, machine sin parar nunca). En
 # dev el costo importa más que la detección activa de caídas.
 #
-# `bog` (Bogotá) está deprecada en Fly y ya no acepta recursos nuevos —
-# `gru` (São Paulo) es la región de Sudamérica más cercana disponible hoy.
+# `bog` (Bogotá) está deprecada en Fly y ya no acepta recursos nuevos.
+#
+# Región = `sjc` (San José, California), NO `gru` (São Paulo) — cambiado el
+# 27/08/2026. La base (Supabase) vive en AWS us-west-2 (Oregon): esta app
+# hace muchas consultas SQL por request (varias por endpoint), así que la
+# distancia app↔base pesa mucho más en la latencia sentida que la distancia
+# app↔usuario final (un solo salto por carga de página). `gru` quedaba al
+# otro lado del continente de la base; `sjc` es la región de Fly más
+# cercana a Oregon. Si en el futuro la base se muda a una región de
+# Sudamérica, este valor hay que revisarlo de nuevo — la lógica es "cerca
+# de la base", no "cerca de Colombia" a secas.
 #
 # Secretos (nunca acá — el DATABASE_URL de este ambiente apunta al proyecto
 # Supabase "dev", driyubkodnsqxbtxcmaz, ya existente):
@@ -29,7 +38,7 @@
 # independiente del fleet que gestiona `fly deploy`, apuntando a la misma
 # imagen ya construida:
 #   fly machine run registry.fly.io/compraventa-backend-dev:latest \
-#     --app compraventa-backend-dev --region gru --vm-size shared-cpu-1x \
+#     --app compraventa-backend-dev --region sjc --vm-size shared-cpu-1x \
 #     --schedule daily -- python -m app.jobs.nightly
 #
 # (el `--` importa: sin él, flyctl interpreta el `-m` de `python -m` como su
@@ -39,12 +48,24 @@
 # antes de encontrar `-- python -m app.jobs.nightly` con tokens separados)
 
 app = "compraventa-backend-dev"
-primary_region = "gru"
+primary_region = "sjc"
 
 [build]
 
 [env]
   ENVIRONMENT = "dev"
+
+# 256MB (el default de shared-cpu-1x) probaba justo para un solo worker de
+# uvicorn con SQLAlchemy async — sin margen para el pool de conexiones +
+# JWKS cache + imports de FastAPI bajo cualquier pico. Subido a 512MB
+# 27/08/2026 para ver si el margen extra de RAM cambia algo perceptible;
+# el sospechoso principal de la lentitud sentida sigue siendo el cold start
+# (min_machines_running=0, sin tocar a propósito) y la distancia de red hasta
+# la base (ver región abajo), no la RAM — este cambio es barato de probar y
+# de revertir, así que se prueba primero.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
 
 [http_service]
   internal_port = 8000
