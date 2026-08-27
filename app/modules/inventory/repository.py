@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _ITEM_COLUMNS = (
     "i.id, i.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description, "
     "i.origin, i.supplier_id, i.source_contract_id, i.source_transformation_id, "
+    "i.source_return_id, "
     "i.cost, p.sale_price, "
     "i.quantity, p.unit, "
     "i.status, "
@@ -65,6 +66,7 @@ async def insert_item(
     created_by: UUID | None,
     entry_date: date | None = None,
     source_transformation_id: UUID | None = None,
+    source_return_id: UUID | None = None,
 ) -> None:
     """Un lote. Desde 00022 no lleva nombre ni categoría ni precio: eso es del
     producto, y por eso `product_id` es obligatorio al insertar — un lote sin
@@ -89,11 +91,12 @@ async def insert_item(
             insert into public.inventory_item
                 (id, company_id, product_id, lot_number, origin,
                  supplier_id, source_contract_id, cost, quantity, photos, created_by,
-                 entry_date, source_transformation_id)
+                 entry_date, source_transformation_id, source_return_id)
             values
                 (:id, :company_id, :product_id, :lot_number, :origin,
                  :supplier_id, :source_contract_id, :cost, :quantity, cast(:photos as jsonb),
-                 :created_by, coalesce(:entry_date, current_date), :source_transformation_id)
+                 :created_by, coalesce(:entry_date, current_date), :source_transformation_id,
+                 :source_return_id)
             """
         ),
         {
@@ -112,6 +115,7 @@ async def insert_item(
             "source_transformation_id": (
                 str(source_transformation_id) if source_transformation_id else None
             ),
+            "source_return_id": str(source_return_id) if source_return_id else None,
         },
     )
 
@@ -1084,6 +1088,35 @@ movimientos as (
     join public.sale s on s.id = sl.sale_id and s.company_id = sl.company_id
     join lotes l on l.id = sl.item_id
     where sl.company_id = :cid and s.status = 'voided'
+
+    union all
+
+    -- DEVOLUCIÓN DE CLIENTE, CAMINO A (00042): el lote devuelto seguía
+    -- intacto, así que se reabre el MISMO `inventory_item` y —como
+    -- `sale_void`— eso tampoco escribe una línea inversa: hay que
+    -- sintetizarla. `srl.item_id = sl.item_id` es justo lo que distingue
+    -- este camino del B (lote nuevo): un camino B tiene `item_id` DISTINTO
+    -- al de la venta original, y ese ya aparece solo, gratis, por el
+    -- `union all` de 'entry' de arriba vía su `inventory_entry_line` real.
+    select
+        sr.return_date,
+        sr.created_at,
+        'sale_return',
+        sr.reason::text,
+        sr.id,
+        sr.number,
+        sr.notes,
+        srl.item_id,
+        srl.quantity,
+        cast(0 as numeric(14,3)),
+        l.cost
+    from public.sale_return_line srl
+    join public.sale_return sr on sr.id = srl.return_id and sr.company_id = srl.company_id
+    join public.sale_line sl on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
+    join lotes l on l.id = srl.item_id
+    where srl.company_id = :cid
+      and srl.restock
+      and srl.item_id = sl.item_id
 )
 select m.*, l.code as item_code, l.lot_number
 from movimientos m

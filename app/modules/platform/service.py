@@ -70,6 +70,11 @@ _MODERADOR_EXCLUDED_CODES = {
     # Transformar destruye inventario de forma irreversible (00037). Un
     # Moderador ya no hace egresos; fundir es más definitivo todavía.
     "inventory.transform",
+    # Saltar el plazo de devolución (00045) es la misma clase de excepción
+    # que sales.apply_discount: una excepción a una política comercial, no
+    # una operación rutinaria. sales.return SÍ se conserva, mismo criterio
+    # que sales.void.
+    "sales.return_override_time_limit",
 }
 
 

@@ -201,12 +201,12 @@ def test_create_and_update_supplier(client: TestClient, tenant: dict) -> None:
     assert update_resp.json()["phone"] == "3005551234"
 
 
-@pytest.mark.parametrize("letra", ["R", "P", "T"])
+@pytest.mark.parametrize("letra", ["R", "P", "T", "D"])
 def test_supplier_cannot_take_a_reserved_letter(
     client: TestClient, tenant: dict, letra: str
 ) -> None:
-    """`R`, `P` y `T` las emite el propio sistema como sufijo del código para
-    decir de dónde salió una pieza: remate, propio, transformado.
+    """`R`, `P`, `T` y `D` las emite el propio sistema como sufijo del código
+    para decir de dónde salió una pieza: remate, propio, transformado, devuelto.
 
     Sin esta reserva, un proveedor "Rodríguez" con letra `R` producía artículos
     con código indistinguible de los rematados — y el remate es el caso donde

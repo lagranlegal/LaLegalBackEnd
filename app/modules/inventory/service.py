@@ -51,6 +51,7 @@ def _row_to_item(row: Row[Any]) -> ItemOut:
         supplier_id=m["supplier_id"],
         source_contract_id=m["source_contract_id"],
         source_transformation_id=m["source_transformation_id"],
+        source_return_id=m["source_return_id"],
         cost=m["cost"],
         sale_price=m["sale_price"],
         quantity=m["quantity"],
@@ -632,6 +633,12 @@ async def publish_item(
         # origen y respaldo documental completamente distintos bajo la misma
         # letra: la etiqueta decía menos de lo que el sistema sabía.
         suffix_letter = "T"
+    elif m["source_return_id"] is not None:
+        # `D` de devuelto por cliente (00044): lo produjo el reingreso de una
+        # devolución cuyo lote original ya no era reabrible (se transformó o
+        # se dio de baja después de la venta). No lo compramos, no lo
+        # rematamos y no lo produjimos transformando otra cosa — volvió.
+        suffix_letter = "D"
     else:
         # Mercancía sin documento de origen externo NI proceso propio: el
         # inventario inicial de la empresa o un sobrante de conteo (00033).

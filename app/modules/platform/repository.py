@@ -33,6 +33,17 @@ async def get_company_timezone(db: AsyncSession, *, company_id: UUID) -> str:
     return str(result.scalar_one())
 
 
+async def get_return_window_days(db: AsyncSession, *, company_id: UUID) -> int:
+    result = await db.execute(
+        text(
+            "select coalesce((settings->>'return_window_days')::int, 30) "
+            "from public.company where id = :id"
+        ),
+        {"id": str(company_id)},
+    )
+    return int(result.scalar_one())
+
+
 async def get_plan_id_by_code(db: AsyncSession, *, code: str) -> UUID | None:
     result = await db.execute(
         text("select id from public.plan where code = :code and active"),

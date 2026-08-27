@@ -17,6 +17,7 @@ _SOLO_LETRAS = re.compile(r"^[A-Z]+$")
 #:   R  remate           (00006)
 #:   P  propio           inventario inicial o sobrante de conteo (00033)
 #:   T  transformado     fundido, despiezado o armado acá (00039)
+#:   D  devuelto         reingreso por devolución de cliente (00044)
 #:
 #: Sin esta reserva, un proveedor llamado "Rodríguez" con letra `R` producía
 #: artículos con código indistinguible de los rematados — y el remate es el
@@ -26,7 +27,7 @@ _SOLO_LETRAS = re.compile(r"^[A-Z]+$")
 #: Solo se valida al ESCRIBIR. Los proveedores que ya tuvieran una de estas
 #: letras siguen funcionando: prohibirlas hacia atrás rompería códigos ya
 #: impresos y pegados a la mercancía, que son inmutables por diseño.
-RESERVED_SUPPLIER_LETTERS = frozenset({"R", "P", "T"})
+RESERVED_SUPPLIER_LETTERS = frozenset({"R", "P", "T", "D"})
 
 
 def _normalizar_letra(valor: str) -> str:
@@ -50,7 +51,7 @@ def _letra_de_proveedor(valor: str) -> str:
     if valor in RESERVED_SUPPLIER_LETTERS:
         raise ValueError(
             f"La letra «{valor}» está reservada por el sistema para el origen de la "
-            "mercancía (R remate, P propio, T transformado). Elige otra."
+            "mercancía (R remate, P propio, T transformado, D devuelto). Elige otra."
         )
     return valor
 

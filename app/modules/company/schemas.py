@@ -37,6 +37,12 @@ class CompanySettingsOut(BaseModel):
     timezone: str
     currency: str
     documents: DocumentSettingsOut
+    #: Plazo de devolución de cliente, en días desde la venta. 0 = sin
+    #: límite. Es una ADVERTENCIA, no un bloqueo duro (no hay un plazo legal
+    #: fijo en Colombia para devoluciones en tienda física que justifique
+    #: prohibirlo del todo): pasado el plazo, la devolución se rechaza salvo
+    #: que quien la registra tenga `sales.return_override_time_limit`.
+    return_window_days: int
 
 
 class CompanySettingsUpdateIn(BaseModel):
@@ -53,3 +59,4 @@ class CompanySettingsUpdateIn(BaseModel):
     logo_url: str | None = None
     signature_url: str | None = None
     documents: DocumentSettingsIn | None = None
+    return_window_days: int | None = Field(default=None, ge=0)

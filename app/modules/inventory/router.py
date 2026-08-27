@@ -319,11 +319,11 @@ async def get_product_kardex(
     *"¿Qué pasó con este producto?"* es la dirección contraria, y no la
     respondía nadie.
 
-    Reúne cuatro clases de movimiento, y **una de ellas no existe como fila**:
-    anular una venta repone el stock pero no escribe ninguna línea inversa
-    —solo cambia el estado de la venta—, así que se sintetiza. Sin eso el
-    kardex mostraría una salida que nunca vuelve y su saldo no cuadraría contra
-    el stock real.
+    Reúne cinco clases de movimiento, y **dos de ellas no existen como fila**:
+    anular una venta y devolver un lote intacto reponen el stock pero no
+    escriben ninguna línea inversa —solo cambian estado/cantidad—, así que se
+    sintetizan. Sin eso el kardex mostraría una salida que nunca vuelve y su
+    saldo no cuadraría contra el stock real.
 
     **La valoración es POR LOTE, nunca promediada** (identificación específica,
     NIIF). Dos lotes del mismo producto comprados a precios distintos salen

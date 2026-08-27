@@ -15,6 +15,7 @@ from app.modules.identity import repository as identity_repo
 
 _DEFAULT_TIMEZONE = "America/Bogota"
 _DEFAULT_CURRENCY = "COP"
+_DEFAULT_RETURN_WINDOW_DAYS = 30
 
 
 def _row_to_settings(row: Row[Any]) -> CompanySettingsOut:
@@ -33,6 +34,7 @@ def _row_to_settings(row: Row[Any]) -> CompanySettingsOut:
         signature_url=m["signature_url"],
         timezone=settings.get("timezone", _DEFAULT_TIMEZONE),
         currency=settings.get("currency", _DEFAULT_CURRENCY),
+        return_window_days=settings.get("return_window_days", _DEFAULT_RETURN_WINDOW_DAYS),
         documents=DocumentSettingsOut(
             header_note=documents.get("header_note"),
             footer_note=documents.get("footer_note"),
@@ -61,17 +63,21 @@ async def update_settings(
 
     fields = body.model_dump(exclude_unset=True)
     documents_patch = fields.pop("documents", None)
+    return_window_days_patch = fields.pop("return_window_days", None)
 
     # Fusión explícita del jsonb, no un `||` a ciegas: `settings` guarda
     # también `timezone`, `currency` y `grace_days`, y perder cualquiera de
     # esos al guardar un pie de página sería un bug silencioso — la zona
     # horaria decide el "hoy" con el que se calculan mora y cierres.
     merged_settings: dict[str, Any] | None = None
-    if documents_patch is not None:
+    if documents_patch is not None or return_window_days_patch is not None:
         current = dict(row._mapping["settings"] or {})
-        current_documents = dict(current.get("documents") or {})
-        current_documents.update(documents_patch)
-        current["documents"] = current_documents
+        if documents_patch is not None:
+            current_documents = dict(current.get("documents") or {})
+            current_documents.update(documents_patch)
+            current["documents"] = current_documents
+        if return_window_days_patch is not None:
+            current["return_window_days"] = return_window_days_patch
         merged_settings = current
 
     await repository.update_company(
@@ -83,7 +89,13 @@ async def update_settings(
     # acción sensible (CLAUDE.md regla 6). Se audita QUÉ campos cambiaron, no
     # su contenido — un `legal_notice` de 1000 caracteres no aporta nada en el
     # log y lo vuelve ilegible.
-    changed = sorted([*fields.keys(), *(["documents"] if documents_patch is not None else [])])
+    changed = sorted(
+        [
+            *fields.keys(),
+            *(["documents"] if documents_patch is not None else []),
+            *(["return_window_days"] if return_window_days_patch is not None else []),
+        ]
+    )
     if changed:
         await identity_repo.insert_audit_log(
             db,

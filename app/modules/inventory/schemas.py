@@ -41,6 +41,10 @@ class ItemOut(BaseModel):
     #: `supplier_id` y `source_contract_id`: son los tres orígenes posibles,
     #: y ninguno de los tres significa mercancía propia sin documento.
     source_transformation_id: UUID | None = None
+    #: Solo si el lote lo produjo el REINGRESO de una devolución de cliente
+    #: cuyo lote original ya no era reabrible (00044). Cuarto puntero de
+    #: origen, excluyente con los otros tres.
+    source_return_id: UUID | None = None
     cost: Decimal
     sale_price: Decimal | None
     #: Decimal desde 00036: un producto medido en gramos o metros tiene stock
@@ -325,7 +329,12 @@ class TransformationOut(BaseModel):
 #:   sale       venta
 #:   sale_void  anulación de venta: repone el stock. Se SINTETIZA — anular no
 #:              escribe una línea inversa, solo cambia el estado de la venta.
-KardexKind = Literal["entry", "exit", "sale", "sale_void"]
+#:   sale_return  devolución de cliente con reingreso al MISMO lote (camino
+#:                A, 00042). Se SINTETIZA igual que sale_void: reponer
+#:                cantidad no escribe una línea inversa. El camino B (lote
+#:                nuevo porque el original ya no era reabrible) NO entra por
+#:                acá — aparece solo, gratis, vía el `entry` de arriba.
+KardexKind = Literal["entry", "exit", "sale", "sale_void", "sale_return"]
 
 
 class KardexLineOut(BaseModel):

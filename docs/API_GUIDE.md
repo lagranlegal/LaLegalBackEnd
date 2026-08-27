@@ -271,13 +271,24 @@ Publicar exige foto únicamente cuando `product.is_unique` — el caso del remat
 
 ## 10. Módulo `sales`
 
-No existe `sales.view` en el catálogo de permisos (seed.sql solo trae `sales.create`/`sales.void`/`sales.apply_discount`) — los `GET` quedan bajo `sales.create`, mismo criterio que `customers` en el paso 4.
+`sales.view` existe desde 00030 (derivado de `sales.create` en el otorgamiento retroactivo) y cubre los `GET`; `sales.create`/`sales.void` cada acción propia.
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `POST` | `/api/v1/sales` | `sales.create` (+`sales.apply_discount` si trae descuento) | Header **`Idempotency-Key` obligatorio**. Body: `{customer_id?, payment_method, lines: [{item_id, quantity, unit_price}], discount_amount?, discount_reason?}`. Cada ítem debe estar `available` con `quantity` suficiente. Descuenta stock (a 0 → `sold`); `cash_movement(concept='sale', direction='in', module='store')`. Acepta `account_id` opcional (§13); **solo exige sesión de caja abierta si el cobro cae en una cuenta `cash`** (`409 CASH_SESSION_NOT_OPEN`) — una venta por Sistecrédito o transferencia no pasa por el cajón. Reenviar la misma `Idempotency-Key` devuelve la misma venta (no duplica ni vuelve a descontar stock). |
-| `GET` | `/api/v1/sales`, `/{id}` | `sales.create` | `GET /sales` acepta `?customer_id=` y `?status=completed\|voided` (mismos filtros que `contracts`, para el historial de un cliente y para listar solo anuladas sin traer todo y filtrar en el front). |
-| `POST` | `/api/v1/sales/{id}/void` | `sales.void` | Body `{reason}` (obligatorio). Repone stock de cada línea, `cash_movement` contrario (`direction='out'`), auditado. `409` si la venta ya estaba anulada. |
+| `POST` | `/api/v1/sales` | `sales.create` (+`sales.apply_discount` si trae descuento) | Header **`Idempotency-Key` obligatorio**. Body: `{customer_id?, payment_method, lines: [{item_id, quantity, unit_price}], discount_amount?, discount_reason?, credit_note_id?, credit_note_amount?}`. Cada ítem debe estar `available` con `quantity` suficiente. Descuenta stock (a 0 → `sold`); `cash_movement(concept='sale', direction='in', module='store')` **solo por lo que queda por cobrar en efectivo/cuenta** — si `credit_note_id` viene, redime esa nota crédito (00043) por `min(saldo, total)` o por `credit_note_amount` si se especifica, y el movimiento de caja sale por la diferencia (`0` si la nota cubre el total entero: no exige caja abierta, igual que una venta 100% descontada). La nota debe ser del mismo `customer_id` de la venta. Acepta `account_id` opcional (§13); **solo exige sesión de caja abierta si el cobro en efectivo/cuenta cae en una cuenta `cash`** (`409 CASH_SESSION_NOT_OPEN`). Reenviar la misma `Idempotency-Key` devuelve la misma venta (no duplica ni vuelve a descontar stock ni a redimir la nota otra vez). |
+| `GET` | `/api/v1/sales`, `/{id}` | `sales.view` | `GET /sales` acepta `?customer_id=` y `?status=completed\|voided`. `SaleOut` trae `account_id` y `credit_note_redeemed_amount` (`null` si no se usó nota crédito). |
+| `POST` | `/api/v1/sales/{id}/void` | `sales.void` | Body `{reason}` (obligatorio). Repone stock de cada línea, `cash_movement` contrario (`direction='out'`), auditado. `409` si la venta ya estaba anulada. Distinto de una devolución (abajo): anular es "esto no debió pasar", mismo día, todo o nada. |
+
+### Devolución de cliente (00042-00045) y nota crédito (00043)
+
+La venta ocurrió, hubo ingreso, y días o semanas después sale plata (o un compromiso de plata) — por eso es un evento propio, no una variante de `void`. Soporta devolución **parcial** (una o varias líneas, cantidad parcial de una línea).
+
+| Método | Path | Permiso | Descripción |
+|---|---|---|---|
+| `POST` | `/api/v1/sales/{sale_id}/returns` | `sales.return` | Header **`Idempotency-Key` obligatorio**. Body: `{lines: [{sale_line_id, quantity, restock?}], reason: defect\|change_of_mind\|other, settlement_method: cash\|credit_note, customer_id?, notes?}`. `customer_id` se hereda de la venta si la tenía; obligatorio si `settlement_method='credit_note'` y la venta era de mostrador. Por línea: si el lote sigue `sold`/`available` (nadie lo tocó desde la venta) se reabre el MISMO lote; si ya no (`written_off` u otro estado — se transformó, se dio de baja) se crea un lote nuevo con letra de código `D`, al costo ya congelado en la línea de venta. `restock=false` (default `true`) es una devolución puramente financiera, sin reingreso de stock. `cash`: contra-movimiento en la sesión de caja **de hoy** (no la de la venta original, que puede estar en un cierre ya cerrado), `409 CASH_SESSION_NOT_OPEN` si no hay una abierta. `credit_note`: no toca caja, emite una nota crédito. **`400 SALE_ACCOUNT_NOT_SETTLED`** si `settlement_method='cash'` y la venta se cobró por una cuenta `settlement` (Sistecrédito) todavía sin liquidar — devolver en efectivo sacaría plata que el negocio nunca recibió. **`400 RETURN_TIME_LIMIT_EXCEEDED`** si pasó el plazo configurado (`company.settings.return_window_days`, default 30, `0`=sin límite) y el actor no tiene `sales.return_override_time_limit`; con el permiso, pasa igual y `time_limit_warning=true` en la respuesta (advierte, nunca bloquea duro). Excede lo disponible de una línea → `400` con `details.available`. |
+| `GET` | `/api/v1/sales/{sale_id}/returns`, `/{return_id}` | `sales.view` | `SaleReturnOut.total_amount` se deriva de las líneas × precio de venta, nunca guardado. `credit_note_id` viene si emitió nota. |
+| `GET` | `/api/v1/credit-notes` | `sales.view` | `?customer_id=`, paginado por cursor. `CreditNoteOut.redeemed_amount`/`balance` se derivan de `credit_note_redemption` en cada lectura — nunca una columna guardada (mismo patrón que §12 cuentas por pagar). |
+| `GET` | `/api/v1/credit-notes/{id}` | `sales.view` | Una nota puntual, mismo shape. |
 
 ## 11. Módulo `audit`
 
@@ -375,6 +386,9 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `IMPORT_CAPITAL_EXCEEDS_PRINCIPAL` | 422 | `POST /contracts/import` con `capital_balance ≤ 0` o `capital_balance > principal`. |
 | `IMPORT_DATES_MISALIGNED` | 422 | `POST /contracts/import` con `interest_paid_until` que no cae en un número entero de meses completos desde `start_date`. |
 | `ACCOUNT_CANNOT_FUND_PAYMENT` | 400 | Se intentó pagar (gasto, compra, desembolso) o trasladar desde una cuenta `settlement`. Es plata por cobrar, no un saldo disponible. |
+| `SALE_ACCOUNT_NOT_SETTLED` | 400 | Devolución en efectivo sobre una venta cobrada por una cuenta `settlement` (Sistecrédito) todavía sin liquidar. |
+| `RETURN_TIME_LIMIT_EXCEEDED` | 400 | Devolución pasado `company.settings.return_window_days`, sin el permiso `sales.return_override_time_limit`. |
+| `CREDIT_NOTE_INSUFFICIENT_BALANCE` | 400 | `POST /sales` con `credit_note_id` cuyo saldo no alcanza el monto solicitado. |
 | `IDEMPOTENCY_KEY_REQUIRED` | 400 | Falta el header `Idempotency-Key` en un endpoint de dinero. |
 | `VALIDATION_ERROR` | 422 | Body no cumple el schema Pydantic — `details.errors` trae el detalle campo por campo. |
 | `BAD_REQUEST` | 400 | Catch-all de reglas de negocio sin código más específico (p. ej. códigos de permiso inexistentes al armar una matriz de rol, categorías con distinto plazo en un mismo contrato, descuadre de caja sin justificación, stock insuficiente). |

@@ -40,6 +40,13 @@ insert into public.permission (code, module, action, is_special, description) va
   ('sales.create',         'sales', 'create',   false, 'Registrar ventas'),
   ('sales.void',           'sales', 'void',     true,  'Anular venta (repone stock)'),
   ('sales.apply_discount', 'sales', 'discount', true,  'Aplicar descuento en venta'),
+  -- 00042: devolución de cliente (efectivo o nota crédito). Mueve dinero Y
+  -- reversa stock a la vez, por eso va aparte de `create` y de `void`.
+  ('sales.return', 'sales', 'return', true,
+   'Registrar devolución de cliente (efectivo o nota crédito, con o sin reingreso de stock)'),
+  -- 00045: saltar el plazo de devolución configurado por la empresa.
+  ('sales.return_override_time_limit', 'sales', 'return_override_time_limit', true,
+   'Registrar una devolución fuera del plazo configurado por la empresa'),
   -- Caja
   ('cashbox.view',       'cashbox', 'view',    false, 'Ver movimientos del día'),
   -- Separado de `cashbox.view` (00031): quien maneja la caja necesita SU
@@ -82,8 +89,8 @@ on conflict (code) do nothing;
 --   Moderador:  todos MENOS inventory.create, inventory.exit,
 --               identity.manage_users, identity.manage_roles,
 --               cashbox.open_close, cashbox.reopen, payments.apply_discount,
---               sales.apply_discount, audit.view, company.configure,
---               contracts.import.
+--               sales.apply_discount, sales.return_override_time_limit,
+--               audit.view, company.configure, contracts.import.
 --   Asesor:     contracts.view/create, payments.create, customers.*,
 --               inventory.view, sales.view/create, catalogs.view,
 --               cashbox.view, accounts.view.
