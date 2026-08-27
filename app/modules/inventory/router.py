@@ -181,6 +181,10 @@ async def list_items(
     cat3_id: Annotated[UUID | None, Query()] = None,
     supplier_id: Annotated[UUID | None, Query()] = None,
     origin: Annotated[str | None, Query(description="supplier | auction | other")] = None,
+    ids: Annotated[
+        list[UUID] | None,
+        Query(description="Artículos puntuales (repetible: ?ids=..&ids=..). Ignora cursor."),
+    ] = None,
 ) -> CursorPage[ItemOut]:
     return await service.list_items(
         db,
@@ -194,6 +198,7 @@ async def list_items(
         cat3_id=cat3_id,
         supplier_id=supplier_id,
         origin=origin,
+        ids=ids,
     )
 
 

@@ -544,12 +544,16 @@ async def list_items(
     cat3_id: UUID | None = None,
     supplier_id: UUID | None = None,
     origin: str | None = None,
+    ids: list[UUID] | None = None,
 ) -> CursorPage[ItemOut]:
     rows = await repository.list_items(
         db,
         company_id=company_id,
         cursor=cursor,
-        limit=limit,
+        # Una lista de ids concreta puede traer más artículos que el límite
+        # por defecto (una venta de más de 50 líneas es rara, pero no
+        # imposible) — nunca menos de lo que se pidió.
+        limit=max(limit, len(ids)) if ids is not None else limit,
         status_filter=status_filter,
         # Se normaliza acá y no en el repositorio: un `?q=` con solo espacios
         # llega como string no vacío y armaría un `plainto_tsquery('')` que no
@@ -560,6 +564,7 @@ async def list_items(
         cat3_id=cat3_id,
         supplier_id=supplier_id,
         origin=origin,
+        ids=ids,
     )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     return CursorPage(items=[_row_to_item(r) for r in page.items], next_cursor=page.next_cursor)

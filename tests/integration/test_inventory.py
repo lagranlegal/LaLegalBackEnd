@@ -658,6 +658,37 @@ def test_search_items_by_name_fulltext(client: TestClient, inventory_tenant: dic
     assert [i["name"] for i in _search(client, token, q="anillo")] == ["Anillo de plata"]
 
 
+def test_list_items_by_ids_fetches_only_those_and_ignores_cursor(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """`?ids=` es lo que permite traer varios artículos puntuales de una sola
+    request (docs/PENDIENTES_FRONTEND.md #11: antes era un request por línea
+    de venta/devolución). No es una página más — una lista de ids concreta no
+    tiene "siguiente", así que ignora `cursor`.
+    """
+    token = inventory_tenant["token"]
+    headers = _headers(token)
+    a = client.post(
+        "/api/v1/inventory/entries",
+        headers=headers,
+        json=_entry_with(inventory_tenant, "Artículo A"),
+    ).json()["items"][0]
+    b = client.post(
+        "/api/v1/inventory/entries",
+        headers=headers,
+        json=_entry_with(inventory_tenant, "Artículo B"),
+    ).json()["items"][0]
+    client.post(
+        "/api/v1/inventory/entries",
+        headers=headers,
+        json=_entry_with(inventory_tenant, "Artículo C (no pedido)"),
+    )
+
+    items = _search(client, token, ids=[a["id"], b["id"]])
+    assert {i["id"] for i in items} == {a["id"], b["id"]}
+    assert all(i["name"] != "Artículo C (no pedido)" for i in items)
+
+
 def test_search_items_by_code_prefix_case_insensitive(
     client: TestClient, inventory_tenant: dict
 ) -> None:
@@ -2100,9 +2131,7 @@ def test_kardex_cuadra_con_el_stock_real_incluida_la_anulacion(
     product_id = primer_lote["product_id"]
 
     # 4 unidades: 2 a 100.000 + 2 a 160.000 = 520.000
-    kardex = client.get(
-        f"/api/v1/inventory/products/{product_id}/kardex", headers=_headers(token)
-    )
+    kardex = client.get(f"/api/v1/inventory/products/{product_id}/kardex", headers=_headers(token))
     assert kardex.status_code == 200, kardex.text
     cuerpo = kardex.json()
     assert Decimal(cuerpo["closing_quantity"]) == Decimal("4")
@@ -2115,9 +2144,7 @@ def test_kardex_cuadra_con_el_stock_real_incluida_la_anulacion(
         headers=_headers(token),
         json={
             "payment_method": "cash",
-            "lines": [
-                {"item_id": primer_lote["id"], "quantity": "1", "unit_price": "250000.00"}
-            ],
+            "lines": [{"item_id": primer_lote["id"], "quantity": "1", "unit_price": "250000.00"}],
         },
     )
     assert venta.status_code == 201, venta.text

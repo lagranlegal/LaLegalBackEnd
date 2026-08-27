@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -143,9 +143,17 @@ async def list_items(
     cat3_id: UUID | None = None,
     supplier_id: UUID | None = None,
     origin: str | None = None,
+    ids: list[UUID] | None = None,
 ) -> list[Row[Any]]:
     query = f"select {_ITEM_COLUMNS} {_ITEM_FROM} where i.company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
+    # Traer varios artículos puntuales de una sola vez — el caso de "esta
+    # venta tiene 6 líneas, cada una de un artículo distinto" que antes
+    # disparaba 6 requests en paralelo (docs/PENDIENTES_FRONTEND.md #11).
+    # Sin cursor: una lista de ids concreta no tiene "siguiente página".
+    if ids is not None:
+        query += " and i.id in :ids"
+        params["ids"] = [str(i) for i in ids]
     if status_filter:
         query += " and i.status = :status"
         params["status"] = status_filter
@@ -183,7 +191,10 @@ async def list_items(
         query += " and i.id > :cursor"
         params["cursor"] = str(cursor)
     query += " order by i.id limit :limit"
-    result = await db.execute(text(query), params)
+    stmt = text(query)
+    if ids is not None:
+        stmt = stmt.bindparams(bindparam("ids", expanding=True))
+    result = await db.execute(stmt, params)
     return list(result.all())
 
 
