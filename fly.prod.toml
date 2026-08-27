@@ -10,6 +10,16 @@
 # `bog` (Bogotá) está deprecada en Fly y ya no acepta recursos nuevos —
 # `gru` (São Paulo) es la región de Sudamérica más cercana disponible hoy.
 #
+# OJO al crear el proyecto Supabase de prod: en dev, la app terminó en
+# `gru` mientras la base quedó en AWS us-west-2 (Oregon) — un cruce de
+# continente en cada consulta SQL, corregido el 27/08/2026 moviendo dev a
+# `sjc` (la región de Fly más cercana a Oregon). Al elegir región para el
+# proyecto Supabase de prod, o se elige una cercana a `gru` (si existe) o
+# se ajusta `primary_region` acá para que coincida con donde termine la
+# base — la prioridad es la distancia app↔base, no app↔usuario (esta app
+# hace varias consultas por request; el usuario solo pega un salto por
+# carga de página).
+#
 # Secretos (nunca acá — este ambiente necesita su PROPIO proyecto Supabase
 # "prod", todavía no creado — ver docs/ARCHITECTURE.md §8):
 #   fly secrets set -a compraventa-backend-prod \
