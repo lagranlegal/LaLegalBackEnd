@@ -115,14 +115,14 @@ Datos de la propia empresa: nombre legal, NIT, logo, firma (se estampa en los do
 |---|---|---|---|
 | `GET`/`PATCH` | `/api/v1/company/settings` | `company.configure` | Datos de la empresa + `documents.{header_note,footer_note,legal_notice}` + `return_window_days`. `PATCH` parcial (`exclude_unset`) — mandar `null` explícito SÍ borra, omitir conserva. |
 
-**Plantillas de documentos** (agregado 27/08/2026) — editor enriquecido del CUERPO completo de un documento (contrato de empeño, y "paz y salvo" en `contracts` §7), no solo el encabezado/pie de arriba. `body` es un documento ProseMirror/Tiptap (JSON estructurado, nunca HTML crudo — así se evita XSS aunque cualquiera con `company.configure` escriba lo que quiera). Una sola plantilla **activa** por `(empresa, document_type)` a la vez; activar una nueva desactiva la anterior en la misma transacción (índice único parcial en la tabla, migración `00046`).
+**Plantillas de documentos** (agregado 27/08/2026) — editor enriquecido del CUERPO completo de un documento (contrato de empeño, y "paz y salvo" en `contracts` §7), no solo el encabezado/pie de arriba. `body` es un documento ProseMirror/Tiptap (JSON estructurado, nunca HTML crudo — así se evita XSS aunque cualquiera con `company.configure` escriba lo que quiera). Una sola plantilla **activa** por `(empresa, document_type)` a la vez; activar una nueva desactiva la anterior en la misma transacción (índice único parcial en la tabla, migración `00046`). `layout` (agregado 28/08/2026, migración `00047`) es la identidad VISUAL — tipografía/densidad/encabezado — independiente del texto: `classic` (default) `| modern | compact`.
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
 | `GET` | `/api/v1/company/document-templates?document_type=contract\|settlement` | `company.configure` | Lista todas las plantillas de ese tipo (activas e inactivas). |
 | `GET` | `/api/v1/company/document-templates/active?document_type=` | **`contracts.view`** | La plantilla ACTIVA (o `null` si ninguna). Permiso distinto a propósito: cualquier asesor que pueda imprimir un contrato necesita poder leer esto, no solo quien administra `/configuracion` — mismo criterio que ya usan `header_note`/`legal_notice`, que salen de `GET /me` (accesible a cualquiera). |
-| `POST` | `/api/v1/company/document-templates` | `company.configure` | Body `{document_type, name, body}` → 201. |
-| `PATCH` | `/api/v1/company/document-templates/{id}` | `company.configure` | Body parcial `{name?, body?}`. |
+| `POST` | `/api/v1/company/document-templates` | `company.configure` | Body `{document_type, name, body, layout?}` → 201. `layout` default `classic` si se omite. |
+| `PATCH` | `/api/v1/company/document-templates/{id}` | `company.configure` | Body parcial `{name?, body?, layout?}`. |
 | `DELETE` | `/api/v1/company/document-templates/{id}` | `company.configure` | `409 TEMPLATE_IS_ACTIVE` si es la plantilla activa — hay que activar otra primero (dejaría el documento sin nada que renderizar). |
 | `POST` | `/api/v1/company/document-templates/{id}/activate` | `company.configure` | Desactiva la que esté activa hoy para ese `document_type` y activa esta, en una sola transacción. |
 

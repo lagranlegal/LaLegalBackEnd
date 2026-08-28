@@ -123,6 +123,7 @@ def _row_to_template(row: Row[Any]) -> DocumentTemplateOut:
         document_type=m["document_type"],
         name=m["name"],
         body=m["body"],
+        layout=m["layout"],
         is_active=m["is_active"],
         created_at=m["created_at"],
         updated_at=m["updated_at"],
@@ -156,6 +157,7 @@ async def create_template(
         document_type=body.document_type,
         name=body.name,
         body=body.body,
+        layout=body.layout,
         created_by=actor_id,
     )
     await identity_repo.insert_audit_log(
@@ -166,7 +168,7 @@ async def create_template(
         action="create_document_template",
         entity_type="document_template",
         entity_id=template_id,
-        after={"document_type": body.document_type, "name": body.name},
+        after={"document_type": body.document_type, "name": body.name, "layout": body.layout},
     )
     row = await repository.get_template(db, company_id=company_id, template_id=template_id)
     assert row is not None

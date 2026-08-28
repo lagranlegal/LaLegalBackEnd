@@ -68,7 +68,7 @@ async def update_company(
     )
 
 
-_TEMPLATE_COLUMNS = "id, document_type, name, body, is_active, created_at, updated_at"
+_TEMPLATE_COLUMNS = "id, document_type, name, body, layout, is_active, created_at, updated_at"
 
 
 async def list_templates(
@@ -117,13 +117,15 @@ async def insert_template(
     document_type: str,
     name: str,
     body: dict[str, Any],
+    layout: str,
     created_by: UUID | None,
 ) -> None:
     await db.execute(
         text(
             "insert into public.document_template "
-            "(id, company_id, document_type, name, body, created_by) "
-            "values (:id, :company_id, :document_type, :name, cast(:body as jsonb), :created_by)"
+            "(id, company_id, document_type, name, body, layout, created_by) "
+            "values (:id, :company_id, :document_type, :name, cast(:body as jsonb), "
+            "cast(:layout as document_layout), :created_by)"
         ),
         {
             "id": str(template_id),
@@ -131,6 +133,7 @@ async def insert_template(
             "document_type": document_type,
             "name": name,
             "body": json.dumps(body),
+            "layout": layout,
             "created_by": str(created_by) if created_by else None,
         },
     )
@@ -151,6 +154,9 @@ async def update_template(
     if "body" in fields:
         assignments.append("body = cast(:body as jsonb)")
         params["body"] = json.dumps(fields["body"])
+    if "layout" in fields:
+        assignments.append("layout = cast(:layout as document_layout)")
+        params["layout"] = fields["layout"]
     if not assignments:
         return
     await db.execute(

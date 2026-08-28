@@ -65,6 +65,11 @@ class CompanySettingsUpdateIn(BaseModel):
 
 
 DocumentType = Literal["contract", "settlement"]
+#: Identidad visual de la plantilla — tipografía, tratamiento del
+#: encabezado, densidad — nunca el texto. "classic" es el default y el más
+#: parecido al look de siempre, así que una plantilla sin `layout` explícito
+#: no da sorpresas.
+DocumentLayout = Literal["classic", "modern", "compact"]
 
 
 class DocumentTemplateOut(BaseModel):
@@ -76,6 +81,7 @@ class DocumentTemplateOut(BaseModel):
     document_type: DocumentType
     name: str
     body: dict[str, Any]
+    layout: DocumentLayout
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -85,8 +91,10 @@ class DocumentTemplateCreateIn(BaseModel):
     document_type: DocumentType
     name: str = Field(min_length=1, max_length=100)
     body: dict[str, Any]
+    layout: DocumentLayout = "classic"
 
 
 class DocumentTemplateUpdateIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     body: dict[str, Any] | None = None
+    layout: DocumentLayout | None = None

@@ -416,6 +416,43 @@ async def test_document_template_activate_swaps_and_is_audited(
     assert len(rows) == 2
 
 
+def test_document_template_layout_defaults_and_round_trips(
+    client: TestClient, company_tenant: dict
+) -> None:
+    """`layout` es opcional al crear (default `classic`, el más parecido al
+    look de siempre) y se puede pedir explícito o actualizar después."""
+    headers = _headers(company_tenant["token"])
+
+    without_layout = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": "contract", "name": "Sin formato explícito", "body": _SAMPLE_BODY},
+    )
+    assert without_layout.status_code == 201, without_layout.text
+    assert without_layout.json()["layout"] == "classic"
+
+    with_layout = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={
+            "document_type": "contract",
+            "name": "Moderna",
+            "body": _SAMPLE_BODY,
+            "layout": "modern",
+        },
+    )
+    assert with_layout.status_code == 201, with_layout.text
+    assert with_layout.json()["layout"] == "modern"
+
+    updated = client.patch(
+        f"/api/v1/company/document-templates/{with_layout.json()['id']}",
+        headers=headers,
+        json={"layout": "compact"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["layout"] == "compact"
+
+
 def test_document_template_delete_blocked_while_active(
     client: TestClient, company_tenant: dict
 ) -> None:
