@@ -16,6 +16,7 @@ from app.modules.contracts.schemas import (
     PaymentCreateIn,
     PaymentOut,
     PaymentQuoteOut,
+    SettlementInfoOut,
 )
 
 router = APIRouter(prefix="/api/v1/contracts", tags=["contracts"])
@@ -153,6 +154,20 @@ async def list_payments(
         contract_id=contract_id,
         cursor=decode_cursor(cursor) if cursor else None,
         limit=limit,
+    )
+
+
+@router.get("/{contract_id}/settlement", response_model=SettlementInfoOut)
+async def get_settlement_info(
+    contract_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> SettlementInfoOut:
+    """Para el documento de paz y salvo. 404 si el contrato no está
+    `status='paid'` — no tiene sentido imprimir un paz y salvo de un
+    contrato que sigue vigente."""
+    return await service.get_settlement_info(
+        db, company_id=user.company_id, contract_id=contract_id
     )
 
 

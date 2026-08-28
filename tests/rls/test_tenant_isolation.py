@@ -75,3 +75,44 @@ async def test_tenant_without_claims_sees_nothing() -> None:
         await apply_tenant_claims(session, {"sub": str(uuid.uuid4())})
         rows = await session.execute(text("select id from public.company"))
         assert rows.all() == []
+
+
+async def test_document_template_isolated_between_tenants(
+    two_companies: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    company_a, _ = two_companies
+    template_id = uuid.uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        # Bypass de RLS (rol superusuario local) para el seed, igual que el
+        # resto de este archivo.
+        await session.execute(
+            text(
+                "insert into public.document_template (id, company_id, document_type, name, body) "
+                "values (:id, :cid, 'contract', 'Plantilla A', '{}'::jsonb)"
+            ),
+            {"id": str(template_id), "cid": str(company_a)},
+        )
+
+    try:
+        ids_as_a = await _document_template_ids_visible_as(company_a)
+        ids_as_b = await _document_template_ids_visible_as(two_companies[1])
+        assert ids_as_a == [template_id]
+        assert ids_as_b == []
+    finally:
+        # Sin esto, el teardown de `two_companies` (DELETE FROM company)
+        # falla por la FK de document_template.company_id — mismo criterio
+        # que ya siguen los demás archivos de test con tablas hijas.
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text("delete from public.document_template where id = :id"),
+                {"id": str(template_id)},
+            )
+
+
+async def _document_template_ids_visible_as(company_id: uuid.UUID) -> list[uuid.UUID]:
+    async with AsyncSessionLocal() as session, session.begin():
+        await apply_tenant_claims(
+            session, {"sub": str(uuid.uuid4()), "company_id": str(company_id)}
+        )
+        rows = await session.execute(text("select id from public.document_template"))
+        return [row[0] for row in rows]

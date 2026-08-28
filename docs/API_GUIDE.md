@@ -107,6 +107,27 @@ Todo tenant-scoped: solo ve/afecta datos de la empresa del usuario autenticado (
 
 **No implementado todavía** (a propósito, ver `docs/ARCHITECTURE.md`): eliminar o desactivar un rol. Los roles solo se crean, clonan, renombran y les cambian los permisos.
 
+## 4 bis. Módulo `company`
+
+Datos de la propia empresa: nombre legal, NIT, logo, firma (se estampa en los documentos), y textos configurables de los impresos (`documents.header_note/footer_note/legal_notice`). Todo bajo el permiso `company.configure`.
+
+| Método | Path | Permiso | Descripción |
+|---|---|---|---|
+| `GET`/`PATCH` | `/api/v1/company/settings` | `company.configure` | Datos de la empresa + `documents.{header_note,footer_note,legal_notice}` + `return_window_days`. `PATCH` parcial (`exclude_unset`) — mandar `null` explícito SÍ borra, omitir conserva. |
+
+**Plantillas de documentos** (agregado 27/08/2026) — editor enriquecido del CUERPO completo de un documento (contrato de empeño, y "paz y salvo" en `contracts` §7), no solo el encabezado/pie de arriba. `body` es un documento ProseMirror/Tiptap (JSON estructurado, nunca HTML crudo — así se evita XSS aunque cualquiera con `company.configure` escriba lo que quiera). Una sola plantilla **activa** por `(empresa, document_type)` a la vez; activar una nueva desactiva la anterior en la misma transacción (índice único parcial en la tabla, migración `00046`).
+
+| Método | Path | Permiso | Descripción |
+|---|---|---|---|
+| `GET` | `/api/v1/company/document-templates?document_type=contract\|settlement` | `company.configure` | Lista todas las plantillas de ese tipo (activas e inactivas). |
+| `GET` | `/api/v1/company/document-templates/active?document_type=` | **`contracts.view`** | La plantilla ACTIVA (o `null` si ninguna). Permiso distinto a propósito: cualquier asesor que pueda imprimir un contrato necesita poder leer esto, no solo quien administra `/configuracion` — mismo criterio que ya usan `header_note`/`legal_notice`, que salen de `GET /me` (accesible a cualquiera). |
+| `POST` | `/api/v1/company/document-templates` | `company.configure` | Body `{document_type, name, body}` → 201. |
+| `PATCH` | `/api/v1/company/document-templates/{id}` | `company.configure` | Body parcial `{name?, body?}`. |
+| `DELETE` | `/api/v1/company/document-templates/{id}` | `company.configure` | `409 TEMPLATE_IS_ACTIVE` si es la plantilla activa — hay que activar otra primero (dejaría el documento sin nada que renderizar). |
+| `POST` | `/api/v1/company/document-templates/{id}/activate` | `company.configure` | Desactiva la que esté activa hoy para ese `document_type` y activa esta, en una sola transacción. |
+
+Si no hay ninguna plantilla activa, el frontend sigue renderizando el documento con su JSX hardcodeado de siempre (fallback de código, no una plantilla sembrada en la base de datos) — cero riesgo de regresión para empresas que nunca toquen esto.
+
 ## 5. Módulo `customers`
 
 | Método | Path | Permiso | Descripción |
@@ -161,6 +182,7 @@ Requiere una **sesión de caja abierta** (fase 1: una caja por empresa) para des
 | `GET` | `/api/v1/contracts/{id}/payment-options` | `contracts.view` | Cotización: `{months_owed, monthly_interest, options: [{months, interest_amount, total, allows_capital}]}`. El front arma los botones de pago directo desde acá — nunca deja que el usuario escriba un monto de interés a mano. |
 | `POST` | `/api/v1/contracts/{id}/payments` | `payments.create` (+`payments.apply_discount` si trae descuento) | Header **`Idempotency-Key` obligatorio**. Body: `{months_covered, capital_amount?, payment_method, discount_amount?, discount_reason?}`. `capital_amount` solo se acepta si `months_covered` cubre TODOS los meses adeudados — si no, `422 PAYMENT_PARTIAL_INTEREST_REJECTED`. Reenviar la misma `Idempotency-Key` devuelve el mismo abono ya creado (no duplica). |
 | `GET` | `/api/v1/contracts/{id}/payments` | `contracts.view` | Historial de abonos (paginado). |
+| `GET` | `/api/v1/contracts/{id}/settlement` | `contracts.view` | Agregado 27/08/2026, para el documento de "paz y salvo" (§4 bis). `404` si el contrato no está `status='paid'`. `{settled_at, receipt_number}` — se DERIVA del abono con `new_capital_balance=0` (el que saldó), nunca una columna guardada aparte. |
 | `GET` | `/api/v1/contracts/ready-for-auction` | `contracts.auction` | Contratos en `in_extension` con la prórroga ya vencida — candidatos a Rematar. |
 | `POST` | `/api/v1/contracts/{id}/auction` | `contracts.auction` | **Rematar.** Exige `status='in_extension'` y prórroga vencida (`409 CONTRACT_NOT_READY_FOR_AUCTION` si no). Crea UN `inventory_item` en `draft` por cada prenda del contrato (`origin='auction'`, `source_contract_id`), repartiendo saldo capital + intereses pendientes proporcional a `item_appraisal` de cada prenda (si ninguna tiene tasación, partes iguales — ver `docs/ARCHITECTURE.md`). Contrato y prendas quedan `auctioned`; `contract_item.inventory_item_id` guarda el vínculo **y ya sale en la respuesta** (`items[].inventory_item_id` en `ContractOut`/`GET /contracts/{id}`, `null` mientras la prenda no se remata) — es el mismo vínculo que `ItemOut.source_contract_id` visto desde el otro lado, así que se puede navegar contrato→artículo y artículo→contrato sin adivinar por nombre/descripción. Los ítems creados salen en `draft`: usa `inventory` (§9) para publicarlos. |
 

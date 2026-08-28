@@ -95,6 +95,7 @@ async def _cleanup(company_id: str) -> None:
             pass
 
     await _try_delete("delete from public.audit_log where company_id = :cid")
+    await _try_delete("delete from public.document_template where company_id = :cid")
     await _try_delete("delete from public.app_user where company_id = :cid")
     await _try_delete(
         "delete from public.role_permission where role_id in "
@@ -261,3 +262,171 @@ async def test_tenant_cannot_change_its_own_status(
             )
         ).scalar_one()
     assert status == "active"
+
+
+# ---- document_template (plantillas editables de documentos) ----
+
+_SAMPLE_BODY = {
+    "type": "doc",
+    "content": [{"type": "paragraph", "content": [{"type": "text", "text": "hola"}]}],
+}
+
+
+def test_document_template_write_requires_company_configure(
+    client: TestClient, tenant_without_permission: dict
+) -> None:
+    """`tenant_without_permission` solo tiene `contracts.view` — el CRUD de
+    plantillas exige `company.configure`, distinto del endpoint de lectura
+    de la plantilla activa (ver test de abajo)."""
+    headers = _headers(tenant_without_permission["token"])
+    create = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": "contract", "name": "Mía", "body": _SAMPLE_BODY},
+    )
+    assert create.status_code == 403
+
+    listing = client.get(
+        "/api/v1/company/document-templates", headers=headers, params={"document_type": "contract"}
+    )
+    assert listing.status_code == 403
+
+
+async def test_document_template_active_read_allows_contracts_view_only(
+    client: TestClient, company_tenant: dict, rsa_keypair: tuple[str, object]
+) -> None:
+    """El hallazgo crítico del plan: `GET .../active` no puede exigir
+    `company.configure`, porque cualquier asesor con `contracts.view`
+    imprime contratos hoy — si este endpoint quedara detrás de
+    `company.configure`, esos asesores se quedarían sin poder imprimir en
+    cuanto una empresa active una plantilla.
+
+    Se necesita un SEGUNDO usuario en la MISMA empresa que `company_tenant`
+    (`company_tenant` solo tiene `company.configure`, no `contracts.view`),
+    con únicamente `contracts.view` — ni un administrador con todo, ni un
+    tenant distinto (eso probaría aislamiento de RLS, no el permiso).
+    """
+    private_pem, _ = rsa_keypair
+    company_id = company_tenant["company_id"]
+    advisor_role_id = uuid4()
+    advisor_user_id = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.role (id, company_id, name) values (:id, :cid, 'Asesor Test')"
+            ),
+            {"id": str(advisor_role_id), "cid": str(company_id)},
+        )
+        await session.execute(
+            text(
+                "insert into public.role_permission (role_id, permission_id) "
+                "select :role_id, id from public.permission where code = 'contracts.view'"
+            ),
+            {"role_id": str(advisor_role_id)},
+        )
+        await session.execute(
+            text(
+                "insert into public.app_user "
+                "(id, company_id, role_id, full_name, email, status) "
+                "values (:id, :cid, :role_id, 'Asesor Test', :email, 'active')"
+            ),
+            {
+                "id": str(advisor_user_id),
+                "cid": str(company_id),
+                "role_id": str(advisor_role_id),
+                "email": f"asesor-{advisor_user_id}@example.com",
+            },
+        )
+    advisor_token = make_token(
+        private_pem,
+        sub=str(advisor_user_id),
+        company_id=str(company_id),
+        role_id=str(advisor_role_id),
+    )
+
+    created = client.post(
+        "/api/v1/company/document-templates",
+        headers=_headers(company_tenant["token"]),
+        json={"document_type": "contract", "name": "Contrato v1", "body": _SAMPLE_BODY},
+    )
+    assert created.status_code == 201, created.text
+    activated = client.post(
+        f"/api/v1/company/document-templates/{created.json()['id']}/activate",
+        headers=_headers(company_tenant["token"]),
+    )
+    assert activated.status_code == 200, activated.text
+
+    # El asesor NO tiene company.configure — no podría crear ni activar,
+    # pero sí debe poder leer la plantilla activa para imprimir.
+    active = client.get(
+        "/api/v1/company/document-templates/active",
+        headers=_headers(advisor_token),
+        params={"document_type": "contract"},
+    )
+    assert active.status_code == 200, active.text
+    assert active.json()["id"] == created.json()["id"]
+
+    denied = client.post(
+        "/api/v1/company/document-templates",
+        headers=_headers(advisor_token),
+        json={"document_type": "contract", "name": "No debería poder", "body": _SAMPLE_BODY},
+    )
+    assert denied.status_code == 403
+
+
+async def test_document_template_activate_swaps_and_is_audited(
+    client: TestClient, company_tenant: dict
+) -> None:
+    headers = _headers(company_tenant["token"])
+    first = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": "contract", "name": "Primera", "body": _SAMPLE_BODY},
+    ).json()
+    second = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": "contract", "name": "Segunda", "body": _SAMPLE_BODY},
+    ).json()
+
+    client.post(f"/api/v1/company/document-templates/{first['id']}/activate", headers=headers)
+    activate_second = client.post(
+        f"/api/v1/company/document-templates/{second['id']}/activate", headers=headers
+    )
+    assert activate_second.status_code == 200, activate_second.text
+
+    listing = client.get(
+        "/api/v1/company/document-templates", headers=headers, params={"document_type": "contract"}
+    ).json()
+    by_id = {t["id"]: t for t in listing}
+    assert by_id[first["id"]]["is_active"] is False
+    assert by_id[second["id"]]["is_active"] is True
+
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "select action from public.audit_log "
+                    "where company_id = :cid and entity_type = 'document_template' "
+                    "and action = 'activate_document_template'"
+                ),
+                {"cid": str(company_tenant["company_id"])},
+            )
+        ).all()
+    assert len(rows) == 2
+
+
+def test_document_template_delete_blocked_while_active(
+    client: TestClient, company_tenant: dict
+) -> None:
+    headers = _headers(company_tenant["token"])
+    created = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": "settlement", "name": "Paz y salvo", "body": _SAMPLE_BODY},
+    ).json()
+    client.post(f"/api/v1/company/document-templates/{created['id']}/activate", headers=headers)
+
+    delete = client.delete(f"/api/v1/company/document-templates/{created['id']}", headers=headers)
+    assert delete.status_code == 409
+    assert delete.json()["code"] == "TEMPLATE_IS_ACTIVE"

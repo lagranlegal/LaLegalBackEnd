@@ -141,3 +141,12 @@ class PaymentOut(BaseModel):
     new_capital_balance: Decimal
     new_interest_paid_until: date
     created_at: datetime
+
+
+class SettlementInfoOut(BaseModel):
+    """Para el documento de paz y salvo — `settled_at` se deriva del abono
+    que saldó el contrato (`new_capital_balance=0`), nunca una columna
+    guardada aparte."""
+
+    settled_at: datetime
+    receipt_number: int

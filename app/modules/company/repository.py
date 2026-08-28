@@ -66,3 +66,131 @@ async def update_company(
         text(f"update public.company set {', '.join(assignments)} where id = :id"),
         params,
     )
+
+
+_TEMPLATE_COLUMNS = "id, document_type, name, body, is_active, created_at, updated_at"
+
+
+async def list_templates(
+    db: AsyncSession, *, company_id: UUID, document_type: str
+) -> list[Row[Any]]:
+    result = await db.execute(
+        text(
+            f"select {_TEMPLATE_COLUMNS} from public.document_template "
+            "where company_id = :company_id and document_type = :document_type "
+            "order by created_at desc"
+        ),
+        {"company_id": str(company_id), "document_type": document_type},
+    )
+    return list(result.all())
+
+
+async def get_template(db: AsyncSession, *, company_id: UUID, template_id: UUID) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            f"select {_TEMPLATE_COLUMNS} from public.document_template "
+            "where company_id = :company_id and id = :id"
+        ),
+        {"company_id": str(company_id), "id": str(template_id)},
+    )
+    return result.first()
+
+
+async def get_active_template(
+    db: AsyncSession, *, company_id: UUID, document_type: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            f"select {_TEMPLATE_COLUMNS} from public.document_template "
+            "where company_id = :company_id and document_type = :document_type and is_active"
+        ),
+        {"company_id": str(company_id), "document_type": document_type},
+    )
+    return result.first()
+
+
+async def insert_template(
+    db: AsyncSession,
+    *,
+    template_id: UUID,
+    company_id: UUID,
+    document_type: str,
+    name: str,
+    body: dict[str, Any],
+    created_by: UUID | None,
+) -> None:
+    await db.execute(
+        text(
+            "insert into public.document_template "
+            "(id, company_id, document_type, name, body, created_by) "
+            "values (:id, :company_id, :document_type, :name, cast(:body as jsonb), :created_by)"
+        ),
+        {
+            "id": str(template_id),
+            "company_id": str(company_id),
+            "document_type": document_type,
+            "name": name,
+            "body": json.dumps(body),
+            "created_by": str(created_by) if created_by else None,
+        },
+    )
+
+
+async def update_template(
+    db: AsyncSession, *, company_id: UUID, template_id: UUID, fields: dict[str, Any]
+) -> None:
+    """`fields` viene de `DocumentTemplateUpdateIn.model_dump(exclude_unset=True)`
+    en el servicio — solo puede traer `name`/`body`, nunca texto libre en la
+    posición de un nombre de columna.
+    """
+    assignments = []
+    params: dict[str, Any] = {"company_id": str(company_id), "id": str(template_id)}
+    if "name" in fields:
+        assignments.append("name = :name")
+        params["name"] = fields["name"]
+    if "body" in fields:
+        assignments.append("body = cast(:body as jsonb)")
+        params["body"] = json.dumps(fields["body"])
+    if not assignments:
+        return
+    await db.execute(
+        text(
+            f"update public.document_template set {', '.join(assignments)} "
+            "where company_id = :company_id and id = :id"
+        ),
+        params,
+    )
+
+
+async def delete_template(db: AsyncSession, *, company_id: UUID, template_id: UUID) -> None:
+    await db.execute(
+        text("delete from public.document_template where company_id = :company_id and id = :id"),
+        {"company_id": str(company_id), "id": str(template_id)},
+    )
+
+
+async def deactivate_active_template(
+    db: AsyncSession, *, company_id: UUID, document_type: str
+) -> None:
+    """Paso 1 del swap de `activate_template` (service.py): desactiva la que
+    esté activa hoy, si hay — SIEMPRE antes de activar la nueva, en la misma
+    transacción, para que el índice único parcial nunca se viole ni en un
+    punto intermedio.
+    """
+    await db.execute(
+        text(
+            "update public.document_template set is_active = false "
+            "where company_id = :company_id and document_type = :document_type and is_active"
+        ),
+        {"company_id": str(company_id), "document_type": document_type},
+    )
+
+
+async def activate_template(db: AsyncSession, *, company_id: UUID, template_id: UUID) -> None:
+    await db.execute(
+        text(
+            "update public.document_template set is_active = true "
+            "where company_id = :company_id and id = :id"
+        ),
+        {"company_id": str(company_id), "id": str(template_id)},
+    )

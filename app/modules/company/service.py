@@ -1,15 +1,18 @@
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import NotFoundError
+from app.core.errors import ConflictError, NotFoundError
 from app.modules.company import repository
 from app.modules.company.schemas import (
     CompanySettingsOut,
     CompanySettingsUpdateIn,
     DocumentSettingsOut,
+    DocumentTemplateCreateIn,
+    DocumentTemplateOut,
+    DocumentTemplateUpdateIn,
 )
 from app.modules.identity import repository as identity_repo
 
@@ -111,3 +114,157 @@ async def update_settings(
     updated = await repository.get_company(db, company_id=company_id)
     assert updated is not None
     return _row_to_settings(updated)
+
+
+def _row_to_template(row: Row[Any]) -> DocumentTemplateOut:
+    m = row._mapping
+    return DocumentTemplateOut(
+        id=m["id"],
+        document_type=m["document_type"],
+        name=m["name"],
+        body=m["body"],
+        is_active=m["is_active"],
+        created_at=m["created_at"],
+        updated_at=m["updated_at"],
+    )
+
+
+async def list_templates(
+    db: AsyncSession, *, company_id: UUID, document_type: str
+) -> list[DocumentTemplateOut]:
+    rows = await repository.list_templates(db, company_id=company_id, document_type=document_type)
+    return [_row_to_template(r) for r in rows]
+
+
+async def get_active_template(
+    db: AsyncSession, *, company_id: UUID, document_type: str
+) -> DocumentTemplateOut | None:
+    row = await repository.get_active_template(
+        db, company_id=company_id, document_type=document_type
+    )
+    return _row_to_template(row) if row is not None else None
+
+
+async def create_template(
+    db: AsyncSession, *, company_id: UUID, body: DocumentTemplateCreateIn, actor_id: UUID
+) -> DocumentTemplateOut:
+    template_id = uuid4()
+    await repository.insert_template(
+        db,
+        template_id=template_id,
+        company_id=company_id,
+        document_type=body.document_type,
+        name=body.name,
+        body=body.body,
+        created_by=actor_id,
+    )
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=actor_id,
+        module="company",
+        action="create_document_template",
+        entity_type="document_template",
+        entity_id=template_id,
+        after={"document_type": body.document_type, "name": body.name},
+    )
+    row = await repository.get_template(db, company_id=company_id, template_id=template_id)
+    assert row is not None
+    return _row_to_template(row)
+
+
+async def update_template(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    template_id: UUID,
+    body: DocumentTemplateUpdateIn,
+    actor_id: UUID,
+) -> DocumentTemplateOut:
+    existing = await repository.get_template(db, company_id=company_id, template_id=template_id)
+    if existing is None:
+        raise NotFoundError("La plantilla no existe.")
+
+    fields = body.model_dump(exclude_unset=True)
+    if fields:
+        await repository.update_template(
+            db, company_id=company_id, template_id=template_id, fields=fields
+        )
+        await identity_repo.insert_audit_log(
+            db,
+            company_id=company_id,
+            user_id=actor_id,
+            module="company",
+            action="update_document_template",
+            entity_type="document_template",
+            entity_id=template_id,
+            after={"changed_fields": sorted(fields.keys())},
+        )
+
+    row = await repository.get_template(db, company_id=company_id, template_id=template_id)
+    assert row is not None
+    return _row_to_template(row)
+
+
+async def delete_template(
+    db: AsyncSession, *, company_id: UUID, template_id: UUID, actor_id: UUID
+) -> None:
+    existing = await repository.get_template(db, company_id=company_id, template_id=template_id)
+    if existing is None:
+        raise NotFoundError("La plantilla no existe.")
+    if existing._mapping["is_active"]:
+        # Borrarla dejaría el documento sin nada que renderizar. Activar otra
+        # (o ninguna, cae al JSX de respaldo) es un paso explícito distinto.
+        raise ConflictError(
+            "No se puede eliminar la plantilla activa. Activa otra primero.",
+            code="TEMPLATE_IS_ACTIVE",
+        )
+    await repository.delete_template(db, company_id=company_id, template_id=template_id)
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=actor_id,
+        module="company",
+        action="delete_document_template",
+        entity_type="document_template",
+        entity_id=template_id,
+        after={
+            "document_type": existing._mapping["document_type"],
+            "name": existing._mapping["name"],
+        },
+    )
+
+
+async def activate_template(
+    db: AsyncSession, *, company_id: UUID, template_id: UUID, actor_id: UUID
+) -> DocumentTemplateOut:
+    existing = await repository.get_template(db, company_id=company_id, template_id=template_id)
+    if existing is None:
+        raise NotFoundError("La plantilla no existe.")
+
+    # Swap en dos pasos, misma transacción: desactivar la que esté activa HOY
+    # antes de activar la nueva — en ese orden el índice único parcial nunca
+    # se viola en ningún punto intermedio. Es un reemplazo (radio-button), no
+    # un conflicto que el usuario deba resolver a mano.
+    await repository.deactivate_active_template(
+        db, company_id=company_id, document_type=existing._mapping["document_type"]
+    )
+    await repository.activate_template(db, company_id=company_id, template_id=template_id)
+
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=actor_id,
+        module="company",
+        action="activate_document_template",
+        entity_type="document_template",
+        entity_id=template_id,
+        after={
+            "document_type": existing._mapping["document_type"],
+            "name": existing._mapping["name"],
+        },
+    )
+
+    row = await repository.get_template(db, company_id=company_id, template_id=template_id)
+    assert row is not None
+    return _row_to_template(row)

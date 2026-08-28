@@ -462,6 +462,27 @@ async def list_payments(
     return list(result.all())
 
 
+async def get_settlement_payment(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID
+) -> Row[Any] | None:
+    """El abono que saldó el contrato — el único con `new_capital_balance=0`.
+    Para paz y salvo: la fecha de cancelación SE DERIVA de acá, nunca se
+    guarda aparte (no hay columna `paid_at`/`settled_at` en `contract`
+    mismo) — mismo principio "los saldos se derivan" de todo el proyecto.
+    Como `status='paid'` bloquea nuevos abonos, es inequívoco cuál fue.
+    """
+    result = await db.execute(
+        text(
+            "select paid_at, receipt_number from public.contract_payment "
+            "where company_id = :company_id and contract_id = :contract_id "
+            "and new_capital_balance = 0 "
+            "order by paid_at desc limit 1"
+        ),
+        {"company_id": str(company_id), "contract_id": str(contract_id)},
+    )
+    return result.first()
+
+
 async def list_active_contracts_for_recompute(db: AsyncSession) -> list[Row[Any]]:
     """Todos los contratos no terminales de TODAS las empresas — para el job
     nocturno (`recompute_all_statuses`). Corre con la sesión de bypass

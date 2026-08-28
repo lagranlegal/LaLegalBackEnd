@@ -31,6 +31,7 @@ from app.modules.contracts.schemas import (
     PaymentOptionOut,
     PaymentOut,
     PaymentQuoteOut,
+    SettlementInfoOut,
 )
 from app.modules.customers import repository as customers_repo
 from app.modules.identity import repository as identity_repo
@@ -441,6 +442,29 @@ async def get_contract(db: AsyncSession, *, company_id: UUID, contract_id: UUID)
 
     items = await repository.list_contract_items(db, company_id=company_id, contract_id=contract_id)
     return _row_to_contract(row, _row_to_items(items))
+
+
+async def get_settlement_info(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID
+) -> SettlementInfoOut:
+    """Para el botón "Imprimir paz y salvo" — solo tiene sentido si el
+    contrato ya está saldado. `status='paid'` es un estado terminal que
+    `create_payment` fija explícitamente al saldar (no lo toca el recálculo
+    de `active→in_arrears→in_extension`), así que basta la fila cruda.
+    """
+    row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
+    if row is None:
+        raise NotFoundError("El contrato no existe en esta empresa.")
+    if row._mapping["status"] != "paid":
+        raise NotFoundError("El contrato todavía no está saldado.")
+
+    payment = await repository.get_settlement_payment(
+        db, company_id=company_id, contract_id=contract_id
+    )
+    assert payment is not None, "contrato 'paid' sin abono de saldo — inconsistencia real"
+    return SettlementInfoOut(
+        settled_at=payment._mapping["paid_at"], receipt_number=payment._mapping["receipt_number"]
+    )
 
 
 async def list_contracts(

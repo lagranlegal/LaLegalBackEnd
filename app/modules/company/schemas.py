@@ -1,3 +1,5 @@
+from datetime import datetime
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -60,3 +62,31 @@ class CompanySettingsUpdateIn(BaseModel):
     signature_url: str | None = None
     documents: DocumentSettingsIn | None = None
     return_window_days: int | None = Field(default=None, ge=0)
+
+
+DocumentType = Literal["contract", "settlement"]
+
+
+class DocumentTemplateOut(BaseModel):
+    """`body` es el documento ProseMirror/Tiptap completo (JSON estructurado,
+    nunca HTML crudo — esa es la mitigación de XSS: el renderer del frontend
+    solo emite las etiquetas que sus nodos conocidos definen)."""
+
+    id: UUID
+    document_type: DocumentType
+    name: str
+    body: dict[str, Any]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentTemplateCreateIn(BaseModel):
+    document_type: DocumentType
+    name: str = Field(min_length=1, max_length=100)
+    body: dict[str, Any]
+
+
+class DocumentTemplateUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    body: dict[str, Any] | None = None

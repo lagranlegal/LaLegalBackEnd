@@ -769,3 +769,44 @@ async def test_list_contracts_q_searches_number_and_customer(
     ids = [c["id"] for c in by_doc.json()["items"]]
     assert other.json()["id"] in ids
     assert mine.json()["id"] not in ids
+
+
+async def test_settlement_info_requires_paid_status_and_matches_the_payoff_payment(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Para el documento de paz y salvo: `settled_at` se deriva del abono
+    que saldó el contrato, nunca una columna guardada aparte."""
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    headers = _headers(contract_tenant["full_token"])
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
+    ).json()
+
+    not_yet_paid = client.get(f"/api/v1/contracts/{contract['id']}/settlement", headers=headers)
+    assert not_yet_paid.status_code == 404
+
+    quote = client.get(
+        f"/api/v1/contracts/{contract['id']}/payment-options", headers=headers
+    ).json()
+    assert quote["months_owed"] == 0, "contrato recién creado: nada adeudado todavía"
+
+    payoff = client.post(
+        f"/api/v1/contracts/{contract['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 0, "capital_amount": "1000000.00", "payment_method": "cash"},
+    )
+    assert payoff.status_code == 201, payoff.text
+    assert payoff.json()["new_capital_balance"] == "0.00"
+
+    updated = client.get(f"/api/v1/contracts/{contract['id']}", headers=headers).json()
+    assert updated["status"] == "paid"
+
+    settlement = client.get(f"/api/v1/contracts/{contract['id']}/settlement", headers=headers)
+    assert settlement.status_code == 200, settlement.text
+    body = settlement.json()
+    assert body["receipt_number"] == payoff.json()["receipt_number"]
+    assert body["settled_at"] == payoff.json()["paid_at"]
