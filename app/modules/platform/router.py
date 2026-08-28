@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.db import get_db
 from app.core.security import TokenClaims, require_super_admin
+from app.modules.audit.schemas import AuditLogOut
 from app.modules.platform import service
 from app.modules.platform.schemas import (
     CompanyCreateIn,
@@ -112,6 +113,39 @@ async def list_subscription_events(
         company_id=company_id,
         cursor=decode_cursor(cursor) if cursor else None,
         limit=limit,
+    )
+
+
+@router.get("/companies/{company_id}/audit-log", response_model=CursorPage[AuditLogOut])
+async def list_company_audit_log(
+    company_id: UUID,
+    _claims: Annotated[TokenClaims, Depends(require_super_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    module: Annotated[str | None, Query()] = None,
+    entity_type: Annotated[str | None, Query()] = None,
+    entity_id: Annotated[UUID | None, Query()] = None,
+    user_id: Annotated[UUID | None, Query()] = None,
+) -> CursorPage[AuditLogOut]:
+    """El registro de SEGURIDAD (roles, remates, anulaciones, cierres) de
+    CUALQUIER empresa — a diferencia de `/subscription/events` (histórico
+    COMERCIAL), que ya no tenía este hueco. `audit_log` tiene RLS forzado
+    (CLAUDE.md regla 1), así que un super-admin con `get_tenant_db` normal
+    nunca vería el de una empresa que no es la suya — de ahí `get_db`
+    (bypass explícito, mismo mecanismo que ya usa este router para
+    `/companies` y `/subscription/events`) con `company_id` siempre en el
+    WHERE de la query, nunca confiado a RLS.
+    """
+    return await service.list_company_audit_log(
+        db,
+        company_id=company_id,
+        cursor=decode_cursor(cursor) if cursor else None,
+        limit=limit,
+        module=module,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        user_id=user_id,
     )
 
 

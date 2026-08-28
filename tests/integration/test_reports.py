@@ -315,6 +315,36 @@ def test_dashboard_and_closing_history(client: TestClient, reports_tenant: dict)
     closed_entry = next(c for c in closings.json()["items"] if c["session_id"] == session_id)
     assert closed_entry["difference"] == "0.00"
 
+    # `/closings-breakdown`: la misma información de `/cashbox/sessions/{id}/report`
+    # (docs/PENDIENTES_FRONTEND.md #11 — antes el front pedía ese endpoint una
+    # vez POR SESIÓN del rango para armar Reportes), pero sumada sobre el
+    # rango completo en una sola consulta. Sin from_date/to_date: trae todo.
+    session_report = client.get(
+        f"/api/v1/cashbox/sessions/{session_id}/report", headers=headers
+    ).json()
+    breakdown = client.get("/api/v1/reports/closings-breakdown", headers=headers)
+    assert breakdown.status_code == 200, breakdown.text
+    breakdown_lines = breakdown.json()["lines"]
+    # Toda línea del desglose por rango trae la fecha de SU sesión — acá solo
+    # hay una, así que deben coincidir en fecha con el cierre de arriba.
+    assert all(line["session_date"] == closed_entry["session_date"] for line in breakdown_lines)
+    for session_line in session_report["lines"]:
+        match = next(
+            (
+                b
+                for b in breakdown_lines
+                if b["module"] == session_line["module"]
+                and b["concept"] == session_line["concept"]
+                and b["payment_method"] == session_line["payment_method"]
+                and b["account_id"] == session_line["account_id"]
+            ),
+            None,
+        )
+        assert match is not None, (
+            f"línea de la sesión no encontrada en el desglose por rango: {session_line}"
+        )
+        assert match["total"] == session_line["total"]
+
     audit = client.get(
         "/api/v1/audit-log", headers=headers, params={"module": "cashbox", "entity_id": session_id}
     )

@@ -76,6 +76,9 @@ async def list_contracts(
     limit: int = Query(default=50, ge=1, le=200),
     status: str | None = Query(default=None),
     customer_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[
+        str | None, Query(description="Número, código anterior o nombre/documento del cliente")
+    ] = None,
 ) -> CursorPage[ContractOut]:
     return await service.list_contracts(
         db,
@@ -84,6 +87,7 @@ async def list_contracts(
         limit=limit,
         status_filter=status,
         customer_id=customer_id,
+        q=q,
     )
 
 

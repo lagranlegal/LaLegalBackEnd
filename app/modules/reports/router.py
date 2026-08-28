@@ -9,6 +9,7 @@ from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.reports import service
 from app.modules.reports.schemas import (
     ClosingHistoryOut,
+    ClosingsBreakdownOut,
     DashboardOut,
     IncomeStatementOut,
     InventoryValuationOut,
@@ -64,6 +65,25 @@ async def list_closings(
         limit=limit,
         from_date=from_date,
         to_date=to_date,
+    )
+
+
+@router.get("/closings-breakdown", response_model=ClosingsBreakdownOut)
+async def get_closings_breakdown(
+    user: Annotated[CurrentUser, Depends(_closings)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    from_date: Annotated[date | None, Query()] = None,
+    to_date: Annotated[date | None, Query()] = None,
+) -> ClosingsBreakdownOut:
+    """Módulo × concepto × medio × cuenta × día, sumado sobre TODAS las
+    sesiones cerradas del rango en una sola consulta — reemplaza el patrón
+    del front de pedir `GET /cashbox/sessions/{id}/report` una vez por cada
+    sesión del rango (hasta 90 requests para 90 días, docs/PENDIENTES_
+    FRONTEND.md #11). Mismos dos permisos que `/closings`: es un reporte del
+    histórico de caja.
+    """
+    return await service.get_closings_breakdown(
+        db, company_id=user.company_id, from_date=from_date, to_date=to_date
     )
 
 

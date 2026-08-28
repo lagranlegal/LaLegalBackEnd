@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
 from app.core.errors import NotFoundError
+from app.modules.audit import repository as audit_repo
+from app.modules.audit.schemas import AuditLogOut
 from app.modules.identity import integration as identity_integration
 from app.modules.identity import repository as identity_repo
 from app.modules.platform import integration as platform_integration
@@ -313,6 +315,54 @@ async def list_subscription_events(
                 amount=r._mapping["amount"],
                 notes=r._mapping["notes"],
                 created_by=r._mapping["created_by"],
+                created_at=r._mapping["created_at"],
+            )
+            for r in page.items
+        ],
+        next_cursor=page.next_cursor,
+    )
+
+
+async def list_company_audit_log(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    cursor: UUID | None,
+    limit: int,
+    module: str | None,
+    entity_type: str | None,
+    entity_id: UUID | None,
+    user_id: UUID | None,
+) -> CursorPage[AuditLogOut]:
+    """Reusa `audit.repository.list_audit_log` tal cual — esa consulta ya
+    filtra `where company_id = :company_id` de forma explícita en el SQL
+    (no confía en RLS para acotar), así que sirve igual con la sesión sin
+    claims de `get_db` que con la de un tenant normal.
+    """
+    if await repository.get_company(db, company_id=company_id) is None:
+        raise NotFoundError("La empresa no existe.")
+    rows = await audit_repo.list_audit_log(
+        db,
+        company_id=company_id,
+        cursor=cursor,
+        limit=limit,
+        module=module,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        user_id=user_id,
+    )
+    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    return CursorPage(
+        items=[
+            AuditLogOut(
+                id=r._mapping["id"],
+                user_id=r._mapping["user_id"],
+                module=r._mapping["module"],
+                action=r._mapping["action"],
+                entity_type=r._mapping["entity_type"],
+                entity_id=r._mapping["entity_id"],
+                before=r._mapping["before"],
+                after=r._mapping["after"],
                 created_at=r._mapping["created_at"],
             )
             for r in page.items

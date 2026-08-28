@@ -128,6 +128,50 @@ async def list_closings(
     return list(result.all())
 
 
+async def closings_breakdown(
+    db: AsyncSession, *, company_id: UUID, from_date: date | None, to_date: date | None
+) -> list[Row[Any]]:
+    """Módulo × concepto × medio × cuenta × DÍA, sumado sobre todas las
+    sesiones cerradas del rango — una sola consulta en vez de pedir el acta
+    sesión por sesión (`GET /cashbox/sessions/{id}/report` × N, lo que hacía
+    el front hasta ahora para armar Reportes).
+
+    Se agrupa por `session_date`, no por `session_id`: la regla de negocio
+    ("una sesión por caja por día") garantiza que nunca hay dos sesiones
+    cerradas el mismo día, así que agrupar por fecha es exactamente lo mismo
+    que agrupar por sesión, con una columna menos.
+
+    A diferencia de `cashbox.repository.movement_breakdown` (usada para
+    calcular `expected_cash` de UNA sesión), acá NO se filtra por
+    `account_type='cash'` — esa cuenta es "cuánto debería haber en el cajón
+    HOY", sin sentido sumado sobre varios días. El front decide qué hacer
+    con cada línea, igual que ya hace con las de una sola sesión.
+    """
+    query = (
+        "select m.module, m.direction, m.concept, m.payment_method, "
+        "       a.id as account_id, a.name as account_name, a.type as account_type, "
+        "       cs.session_date, sum(m.amount) as total "
+        "from public.cash_movement m "
+        "join public.account a on a.id = m.account_id "
+        "join public.cash_session cs on cs.id = m.session_id "
+        "where m.company_id = :company_id and cs.status = 'closed'"
+    )
+    params: dict[str, Any] = {"company_id": str(company_id)}
+    if from_date is not None:
+        query += " and cs.session_date >= :from_date"
+        params["from_date"] = from_date
+    if to_date is not None:
+        query += " and cs.session_date <= :to_date"
+        params["to_date"] = to_date
+    query += (
+        " group by m.module, m.direction, m.concept, m.payment_method, a.id, a.name, a.type,"
+        " cs.session_date"
+        " order by cs.session_date, a.type, a.name, m.module, m.direction, m.concept"
+    )
+    result = await db.execute(text(query), params)
+    return list(result.all())
+
+
 async def profit_summary(
     db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
 ) -> Row[Any]:

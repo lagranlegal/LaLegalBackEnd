@@ -53,6 +53,22 @@ class ClosingHistoryOut(BaseModel):
     closed_at: datetime
 
 
+class ClosingsBreakdownLineOut(BaseModel):
+    module: str
+    direction: str
+    concept: str
+    payment_method: str | None
+    account_id: UUID
+    account_name: str
+    account_type: str
+    session_date: date
+    total: Decimal
+
+
+class ClosingsBreakdownOut(BaseModel):
+    lines: list[ClosingsBreakdownLineOut]
+
+
 class ProfitSummaryOut(BaseModel):
     """Utilidad BRUTA (ingreso por ventas − costo de ventas). NO es la
     utilidad neta: no descuenta gastos operativos, que viven en caja y ya se

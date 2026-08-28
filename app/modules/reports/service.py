@@ -14,6 +14,8 @@ from app.modules.reports import repository
 from app.modules.reports.schemas import (
     CashboxKpisOut,
     ClosingHistoryOut,
+    ClosingsBreakdownLineOut,
+    ClosingsBreakdownOut,
     ContractKpisOut,
     DashboardOut,
     IncomeStatementOut,
@@ -104,6 +106,30 @@ async def list_closings(
         to_date=to_date,
     )
     return make_page([_row_to_closing(r) for r in rows], limit, lambda o: o.session_id)
+
+
+async def get_closings_breakdown(
+    db: AsyncSession, *, company_id: UUID, from_date: date | None, to_date: date | None
+) -> ClosingsBreakdownOut:
+    rows = await repository.closings_breakdown(
+        db, company_id=company_id, from_date=from_date, to_date=to_date
+    )
+    return ClosingsBreakdownOut(
+        lines=[
+            ClosingsBreakdownLineOut(
+                module=r._mapping["module"],
+                direction=r._mapping["direction"],
+                concept=r._mapping["concept"],
+                payment_method=r._mapping["payment_method"],
+                account_id=r._mapping["account_id"],
+                account_name=r._mapping["account_name"],
+                account_type=r._mapping["account_type"],
+                session_date=r._mapping["session_date"],
+                total=r._mapping["total"],
+            )
+            for r in rows
+        ]
+    )
 
 
 _MAX_PROFIT_RANGE_DAYS = 366

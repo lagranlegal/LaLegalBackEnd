@@ -424,6 +424,81 @@ def test_subscription_events_for_unknown_company_is_404(
     assert response.status_code == 404
 
 
+async def _insert_audit_row(*, company_id: uuid.UUID, action: str) -> uuid.UUID:
+    row_id = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.audit_log (id, company_id, module, action, entity_type) "
+                "values (:id, :cid, 'identity', :action, 'role')"
+            ),
+            {"id": str(row_id), "cid": str(company_id), "action": action},
+        )
+    return row_id
+
+
+def test_company_audit_log_requires_super_admin(
+    client: TestClient, created_company: dict, tenant_token: str
+) -> None:
+    # `tenant_token` no trae claim de plataforma — mismo caso que ya cubre
+    # `test_require_super_admin_rejects_tenant_token` para otras rutas.
+    response = client.get(
+        f"/api/v1/platform/companies/{created_company['id']}/audit-log",
+        headers={"Authorization": f"Bearer {tenant_token}"},
+    )
+    assert response.status_code == 403
+
+
+def test_company_audit_log_for_unknown_company_is_404(
+    client: TestClient, super_admin_token: str
+) -> None:
+    response = client.get(
+        f"/api/v1/platform/companies/{uuid4()}/audit-log",
+        headers={"Authorization": f"Bearer {super_admin_token}"},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_company_audit_log_lets_super_admin_read_any_company_and_stays_scoped(
+    client: TestClient, created_company: dict, super_admin_token: str
+) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md: `audit_log` tiene RLS forzado, así
+    que un super-admin con la sesión normal (tenant) nunca podía ver el de
+    una empresa que no es la suya — el histórico COMERCIAL de suscripciones
+    ya se resolvió aparte; este es el de SEGURIDAD (roles, remates,
+    anulaciones)."""
+    company_id = uuid.UUID(created_company["id"])
+    other_company_id = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("insert into public.company (id, name) values (:id, 'Otra empresa — audit test')"),
+            {"id": str(other_company_id)},
+        )
+    try:
+        mine_id = await _insert_audit_row(company_id=company_id, action="update_role_permissions")
+        other_id = await _insert_audit_row(
+            company_id=other_company_id, action="update_role_permissions"
+        )
+
+        response = client.get(
+            f"/api/v1/platform/companies/{company_id}/audit-log",
+            headers={"Authorization": f"Bearer {super_admin_token}"},
+        )
+        assert response.status_code == 200, response.text
+        ids = [item["id"] for item in response.json()["items"]]
+        assert str(mine_id) in ids
+        assert str(other_id) not in ids, "no debe filtrar auditoría de otra empresa"
+    finally:
+        # audit_log es inmutable (trigger forbid_change bloquea también
+        # DELETE, no solo UPDATE) y no tiene FK hacia company — se deja
+        # huérfano a propósito, mismo criterio que ya usa `_cleanup_company`.
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text("delete from public.company where id = :cid"), {"cid": str(other_company_id)}
+            )
+
+
 @pytest.mark.asyncio
 async def test_onboarding_completo_de_una_empresa_nueva(
     client: TestClient,

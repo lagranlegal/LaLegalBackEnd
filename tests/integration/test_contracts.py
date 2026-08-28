@@ -703,3 +703,69 @@ async def test_list_contracts_filters_by_customer_id(
     ids = [c["id"] for c in response.json()["items"]]
     assert mine.json()["id"] in ids
     assert other.json()["id"] not in ids
+
+
+async def test_list_contracts_q_searches_number_and_customer(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """docs/PENDIENTES_BACKEND_INFRA.md #2: `GET /contracts` no tenía `?q=`
+    — el buscador de la UI era un parche client-side de 200 registros que
+    nunca encontraba nada por nombre de cliente."""
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    other_customer_id = uuid4()
+    other_doc = str(uuid4().int)[:10]
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.customer "
+                "(id, company_id, full_name, doc_type, doc_number, phone) "
+                "values (:id, :cid, 'Roberto Gomez Bolaños', 'cc', :doc, '3000000002')"
+            ),
+            {
+                "id": str(other_customer_id),
+                "cid": str(contract_tenant["company_id"]),
+                "doc": other_doc,
+            },
+        )
+
+    mine = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
+    )
+    assert mine.status_code == 201, mine.text
+
+    other = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant, customer_id=str(other_customer_id)),
+    )
+    assert other.status_code == 201, other.text
+
+    headers = _headers(contract_tenant["full_token"])
+
+    # Por número del contrato de "other".
+    by_number = client.get(
+        "/api/v1/contracts", headers=headers, params={"q": str(other.json()["number"])}
+    )
+    assert by_number.status_code == 200
+    ids = [c["id"] for c in by_number.json()["items"]]
+    assert other.json()["id"] in ids
+    assert mine.json()["id"] not in ids
+
+    # Por nombre del cliente (full-text, un fragmento) — encuentra "other",
+    # no "mine" (cuyo cliente es "Cliente Test").
+    by_name = client.get("/api/v1/contracts", headers=headers, params={"q": "Gomez"})
+    assert by_name.status_code == 200
+    ids = [c["id"] for c in by_name.json()["items"]]
+    assert other.json()["id"] in ids
+    assert mine.json()["id"] not in ids
+
+    # Por documento del cliente (prefijo).
+    by_doc = client.get("/api/v1/contracts", headers=headers, params={"q": other_doc[:6]})
+    assert by_doc.status_code == 200
+    ids = [c["id"] for c in by_doc.json()["items"]]
+    assert other.json()["id"] in ids
+    assert mine.json()["id"] not in ids

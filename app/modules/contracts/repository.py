@@ -237,19 +237,44 @@ async def list_contracts(
     limit: int,
     status_filter: str | None,
     customer_id: UUID | None = None,
+    q: str | None = None,
 ) -> list[Row[Any]]:
-    query = f"select {_CONTRACT_COLUMNS} from public.contract where company_id = :company_id"
+    # `q` necesita el cliente (nombre/documento) que `contract` no tiene —
+    # LEFT JOIN incondicional en vez de armar dos formas de query distintas
+    # según si `q` viene o no; `customer_id` es NOT NULL así que en la
+    # práctica siempre resuelve, LEFT por si acaso.
+    columns = ", ".join(f"c.{col.strip()}" for col in _CONTRACT_COLUMNS.split(","))
+    query = (
+        f"select {columns} from public.contract c "
+        "left join public.customer cu on cu.id = c.customer_id "
+        "where c.company_id = :company_id"
+    )
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if status_filter:
-        query += " and status = :status"
+        query += " and c.status = :status"
         params["status"] = status_filter
     if customer_id is not None:
-        query += " and customer_id = :customer_id"
+        query += " and c.customer_id = :customer_id"
         params["customer_id"] = str(customer_id)
+    if q:
+        # Número: prefijo sobre el texto (se tipea completo o casi completo).
+        # legacy_code: prefijo, sin distinguir mayúsculas — se imprimía o se
+        # heredaba del sistema anterior con cualquier capitalización. Cliente:
+        # mismo criterio que `customers.list_customers` (nombre full-text,
+        # documento por prefijo) — es la misma pregunta ("¿quién es?") hecha
+        # desde el lado del contrato en vez del cliente.
+        query += (
+            " and (c.number::text like :q_prefix"
+            " or c.legacy_code ilike :q_prefix"
+            " or to_tsvector('spanish', cu.full_name) @@ plainto_tsquery('spanish', :q)"
+            " or cu.doc_number like :q_prefix)"
+        )
+        params["q"] = q
+        params["q_prefix"] = f"{q}%"
     if cursor is not None:
-        query += " and id > :cursor"
+        query += " and c.id > :cursor"
         params["cursor"] = str(cursor)
-    query += " order by id limit :limit"
+    query += " order by c.id limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
 
