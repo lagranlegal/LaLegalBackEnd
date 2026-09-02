@@ -465,6 +465,61 @@ async def test_list_sales_filters_by_customer_and_status(
     assert with_customer["id"] not in completed_ids
 
 
+async def test_list_sales_filters_by_date_range_in_company_timezone(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    """`from_date`/`to_date` acotan por `sold_at` en la zona de la EMPRESA,
+    no en UTC. Una venta de las 7pm en Bogotá es UTC del día SIGUIENTE — si
+    el filtro comparara en UTC, esa venta se escaparía del día en que
+    realmente ocurrió (el mismo bug de ventana de 5 horas que ya sufrió el
+    cálculo de "hoy" del backend).
+    """
+    await _open_cash_session(
+        company_id=sales_tenant["company_id"], register_id=sales_tenant["register_id"]
+    )
+    sale = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "lines": [
+                {"item_id": str(sales_tenant["item_id"]), "quantity": 1, "unit_price": "500000.00"}
+            ],
+        },
+    ).json()
+
+    # 19:00 en Bogotá del 10/03 = 00:00 UTC del 11/03: el filtro tiene que
+    # devolverla el 10, no el 11.
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.sale set sold_at = '2026-03-11T00:00:00+00' where id = :id"),
+            {"id": sale["id"]},
+        )
+
+    headers = _headers(sales_tenant["full_token"])
+
+    same_day = client.get(
+        "/api/v1/sales",
+        headers=headers,
+        params={"from_date": "2026-03-10", "to_date": "2026-03-10"},
+    )
+    assert same_day.status_code == 200
+    assert sale["id"] in [s["id"] for s in same_day.json()["items"]]
+
+    next_day = client.get(
+        "/api/v1/sales",
+        headers=headers,
+        params={"from_date": "2026-03-11", "to_date": "2026-03-11"},
+    )
+    assert sale["id"] not in [s["id"] for s in next_day.json()["items"]]
+
+    # Los dos extremos son independientes: solo `from_date` también acota.
+    before = client.get("/api/v1/sales", headers=headers, params={"to_date": "2026-03-09"})
+    assert sale["id"] not in [s["id"] for s in before.json()["items"]]
+    after = client.get("/api/v1/sales", headers=headers, params={"from_date": "2026-03-10"})
+    assert sale["id"] in [s["id"] for s in after.json()["items"]]
+
+
 async def test_void_sale_restores_stock_and_blocks_double_void(
     client: TestClient, sales_tenant: dict
 ) -> None:

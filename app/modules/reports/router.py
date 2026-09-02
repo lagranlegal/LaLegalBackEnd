@@ -13,6 +13,7 @@ from app.modules.reports.schemas import (
     DashboardOut,
     IncomeStatementOut,
     InventoryValuationOut,
+    MonthlySeriesOut,
     PawnPerformanceOut,
     PayablesOut,
     ProfitSummaryOut,
@@ -212,3 +213,24 @@ async def get_income_statement(
     return await service.get_income_statement(
         db, company_id=user.company_id, from_date=from_date, to_date=to_date
     )
+
+
+@router.get("/series", response_model=MonthlySeriesOut)
+async def get_monthly_series(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    months: Annotated[
+        int, Query(ge=1, le=36, description="Meses hacia atrás, incluyendo el actual.")
+    ] = 12,
+) -> MonthlySeriesOut:
+    """Serie mensual de ingresos operativos (interés + ventas) y gastos.
+
+    La gráfica de tendencia de `/reportes` se arma hoy con el desglose de caja,
+    que solo cubre sesiones CERRADAS y está topado a 90 días por el N+1 de
+    gastos por categoría. Esta serie sale de los DOCUMENTOS (`contract_payment`,
+    `sale`, `expense`), así que incluye lo de hoy y no necesita ese tope.
+
+    Los meses sin actividad vienen en cero, no se omiten: un hueco haría que la
+    gráfica uniera dos meses no consecutivos con una recta.
+    """
+    return await service.monthly_series(db, company_id=user.company_id, months=months)

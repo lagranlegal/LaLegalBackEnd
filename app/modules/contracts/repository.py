@@ -263,12 +263,21 @@ async def list_contracts(
         # mismo criterio que `customers.list_customers` (nombre full-text,
         # documento por prefijo) — es la misma pregunta ("¿quién es?") hecha
         # desde el lado del contrato en vez del cliente.
-        query += (
-            " and (c.number::text like :q_prefix"
-            " or c.legacy_code ilike :q_prefix"
-            " or to_tsvector('spanish', cu.full_name) @@ plainto_tsquery('spanish', :q)"
-            " or cu.doc_number like :q_prefix)"
-        )
+        #
+        # El documento se busca SOLO con 5+ caracteres: los números de
+        # contrato son cortos (1, 2, 17…) y las cédulas tienen 8-10 dígitos,
+        # así que buscar "5" hacía match por prefijo contra el documento de
+        # CUALQUIER cliente que empezara por 5 — un contrato ajeno aparecía
+        # como si fuera el buscado. Con 5+ caracteres la consulta ya no puede
+        # confundirse con un número de contrato.
+        clauses = [
+            "c.number::text like :q_prefix",
+            "c.legacy_code ilike :q_prefix",
+            "to_tsvector('spanish', cu.full_name) @@ plainto_tsquery('spanish', :q)",
+        ]
+        if len(q) >= 5:
+            clauses.append("cu.doc_number like :q_prefix")
+        query += " and (" + " or ".join(clauses) + ")"
         params["q"] = q
         params["q_prefix"] = f"{q}%"
     if cursor is not None:

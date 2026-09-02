@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
 from app.common.tenant_time import today_in
 from app.core.errors import AppError
@@ -22,6 +23,8 @@ from app.modules.reports.schemas import (
     InventoryKpisOut,
     InventoryValuationCategoryOut,
     InventoryValuationOut,
+    MonthlySeriesOut,
+    MonthlySeriesPointOut,
     PawnPerformanceOut,
     PayablesOut,
     ProfitSummaryOut,
@@ -391,4 +394,31 @@ async def get_income_statement(
         capital_disbursed=_dec(e["capital_disbursed"]),
         capital_recovered=_dec(e["capital_recovered"]),
         inventory_purchased=compras,
+    )
+
+
+async def monthly_series(db: AsyncSession, *, company_id: UUID, months: int) -> MonthlySeriesOut:
+    """Serie mensual de ingresos operativos y gastos, para la gráfica de
+    tendencia (`docs/PENDIENTES_BACKEND_INFRA.md` §7).
+
+    No define ninguna regla nueva: el interés y la venta se miden igual que en
+    `pawn_performance`/`profit_summary`, y el gasto igual que en
+    `operating_expenses`. Si esa definición cambia, tiene que cambiar en un
+    solo lugar — por eso esto se apoya en la misma consulta y no inventa otra.
+    """
+    tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
+    rows = await repository.monthly_series(
+        db, company_id=company_id, tz_name=tz_name, months=months
+    )
+    return MonthlySeriesOut(
+        months=months,
+        points=[
+            MonthlySeriesPointOut(
+                month=row._mapping["month"],
+                interest_revenue=quantize(row._mapping["interest_revenue"]),
+                sales_revenue=quantize(row._mapping["sales_revenue"]),
+                expenses=quantize(row._mapping["expenses"]),
+            )
+            for row in rows
+        ],
     )

@@ -725,3 +725,87 @@ def test_income_statement_keeps_capital_and_purchases_out_of_the_result(
     # Y sin ingresos el margen es `null`, no 0% — "no vendí" no es "vendí sin
     # ganar".
     assert body["margin_pct"] is None
+
+
+def test_monthly_series_includes_empty_months_and_uses_document_dates(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """`GET /reports/series` (docs/PENDIENTES_BACKEND_INFRA.md §7).
+
+    Dos cosas que la gráfica necesita y que es fácil romper:
+    1. Los meses SIN actividad vienen en cero, no faltan. Un hueco haría que
+       la línea uniera dos meses no consecutivos y mostrara una tendencia que
+       nunca existió.
+    2. El ingreso sale de los DOCUMENTOS (venta/abono), no del desglose de
+       caja — así incluye lo de hoy, con la sesión todavía abierta.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "500000.00"}
+    )
+
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "purchase",
+            "supplier_id": str(reports_tenant["supplier_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "name": "Cadena de la serie",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit_cost": "300000.00",
+                    "photos": ["http://example.com/x.jpg"],
+                    "sale_price": "500000.00",
+                }
+            ],
+        },
+    ).json()
+    client.post(
+        "/api/v1/sales",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "lines": [
+                {"item_id": entry["items"][0]["id"], "quantity": "1", "unit_price": "500000.00"}
+            ],
+        },
+    )
+
+    resp = client.get("/api/v1/reports/series", headers=headers, params={"months": 6})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["months"] == 6
+    # Seis meses, ninguno omitido, en orden cronológico.
+    assert len(body["points"]) == 6
+    months = [p["month"] for p in body["points"]]
+    assert months == sorted(months)
+
+    # La venta de hoy (sesión de caja todavía ABIERTA) ya cuenta: el ingreso
+    # sale del documento, no del cierre.
+    assert Decimal(body["points"][-1]["sales_revenue"]) >= Decimal("500000.00")
+
+    # Los meses anteriores no tienen actividad de este tenant, pero vienen.
+    for punto in body["points"][:-1]:
+        assert Decimal(punto["sales_revenue"]) == Decimal("0.00")
+        assert Decimal(punto["interest_revenue"]) == Decimal("0.00")
+
+
+def test_monthly_series_rejects_an_out_of_range_months_value(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """`months` acotado: sin tope, alguien pide 500 meses y la consulta arma
+    una serie que nadie va a graficar."""
+    headers = _headers(reports_tenant["token"])
+    assert (
+        client.get("/api/v1/reports/series", headers=headers, params={"months": 0}).status_code
+        == 422
+    )
+    assert (
+        client.get("/api/v1/reports/series", headers=headers, params={"months": 37}).status_code
+        == 422
+    )

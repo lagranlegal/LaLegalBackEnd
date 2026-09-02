@@ -283,3 +283,30 @@ class IncomeStatementOut(BaseModel):
     #: convirtió en inventario. Se vuelve gasto cuando se VENDE, y ahí ya está
     #: contado en `cost_of_goods_sold`.
     inventory_purchased: Decimal
+
+
+class MonthlySeriesPointOut(BaseModel):
+    """Un mes de la serie histórica. `month` es el PRIMER día del mes, en la
+    zona horaria de la empresa.
+    """
+
+    month: date
+    #: Intereses cobrados (`contract_payment`) — el ingreso del empeño.
+    interest_revenue: Decimal
+    #: Ventas netas de descuento, solo `completed` — el ingreso de la tienda.
+    sales_revenue: Decimal
+    #: Gastos operativos (`expense`). NO incluye compras de mercancía ni
+    #: capital desembolsado: ninguno de los dos es gasto.
+    expenses: Decimal
+
+
+class MonthlySeriesOut(BaseModel):
+    """Serie mensual para la gráfica de tendencia del dashboard/reportes.
+
+    Incluye los meses sin actividad en cero — un mes faltante haría que la
+    gráfica uniera dos meses no consecutivos con una recta y mostrara una
+    tendencia que nunca existió.
+    """
+
+    months: int
+    points: list[MonthlySeriesPointOut]

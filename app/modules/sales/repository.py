@@ -17,9 +17,7 @@ _RETURN_COLUMNS = (
     "return_date, created_at"
 )
 _RETURN_LINE_COLUMNS = "id, sale_line_id, item_id, quantity, unit_cost, restock"
-_CREDIT_NOTE_COLUMNS = (
-    "id, number, customer_id, sale_return_id, amount, notes, created_at"
-)
+_CREDIT_NOTE_COLUMNS = "id, number, customer_id, sale_return_id, amount, notes, created_at"
 
 
 async def next_number(db: AsyncSession, *, company_id: UUID) -> int:
@@ -161,6 +159,9 @@ async def list_sales(
     limit: int,
     customer_id: UUID | None,
     status_filter: str | None,
+    tz_name: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> list[Row[Any]]:
     query = f"select {_SALE_COLUMNS} from public.sale where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
@@ -170,6 +171,18 @@ async def list_sales(
     if status_filter:
         query += " and status = :status"
         params["status"] = status_filter
+    # `sold_at` es timestamptz; el rango que manda el front son fechas del
+    # calendario de la EMPRESA, no UTC — mismo criterio que ya usan los
+    # reportes (`(sold_at at time zone :tz)::date`). Sin el `at time zone`,
+    # una venta de las 7pm en Bogotá caería en el día siguiente.
+    if from_date is not None:
+        query += " and (sold_at at time zone :tz)::date >= :from_date"
+        params["from_date"] = from_date
+        params["tz"] = tz_name
+    if to_date is not None:
+        query += " and (sold_at at time zone :tz)::date <= :to_date"
+        params["to_date"] = to_date
+        params["tz"] = tz_name
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)

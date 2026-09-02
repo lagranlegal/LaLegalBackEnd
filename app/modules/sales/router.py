@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Annotated
 from uuid import UUID
 
@@ -46,7 +47,13 @@ async def list_sales(
     limit: int = Query(default=50, ge=1, le=200),
     customer_id: Annotated[UUID | None, Query()] = None,
     status: str | None = Query(default=None),
+    from_date: Annotated[date | None, Query()] = None,
+    to_date: Annotated[date | None, Query()] = None,
 ) -> CursorPage[SaleOut]:
+    """`from_date`/`to_date` acotan por `sold_at` en la zona horaria de la
+    empresa (no UTC), mismo criterio que los reportes. Ambos opcionales e
+    independientes — sin ellos, el comportamiento es el de siempre.
+    """
     return await service.list_sales(
         db,
         company_id=user.company_id,
@@ -54,6 +61,8 @@ async def list_sales(
         limit=limit,
         customer_id=customer_id,
         status_filter=status,
+        from_date=from_date,
+        to_date=to_date,
     )
 
 

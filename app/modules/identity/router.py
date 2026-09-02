@@ -11,6 +11,7 @@ from app.modules.identity.schemas import (
     InvitedUserOut,
     InviteUserIn,
     MeOut,
+    MeUpdateIn,
     PermissionOut,
     RecoveryLinkOut,
     RoleCreateIn,
@@ -38,6 +39,26 @@ async def get_me(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> MeOut:
     return await service.get_me(db, user=user)
+
+
+@router_me.patch("/me", response_model=MeOut)
+async def update_me(
+    body: MeUpdateIn,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> MeOut:
+    """El usuario edita su propio perfil: nombre y foto.
+
+    Sin `require_permission` a propósito, igual que `GET /me`: editarse a uno
+    mismo no es gestionar usuarios. Lo que impide que esto sea un agujero es
+    el schema — `MeUpdateIn` no acepta `role_id` ni `status`, así que no hay
+    forma de ascenderse desde acá (eso sigue exigiendo
+    `identity.manage_users` en `PATCH /identity/users/{id}/role`).
+
+    Devuelve el `MeOut` completo y ya actualizado: el front rehidrata su
+    estado con la misma respuesta, sin un segundo `GET /me`.
+    """
+    return await service.update_me(db, user=user, body=body)
 
 
 @router.get("/users", response_model=CursorPage[UserOut])

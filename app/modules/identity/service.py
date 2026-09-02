@@ -17,6 +17,7 @@ from app.modules.identity.schemas import (
     MePlanOut,
     MeRoleOut,
     MeSubscriptionOut,
+    MeUpdateIn,
     MeUserOut,
     PermissionOut,
     RecoveryLinkOut,
@@ -347,12 +348,24 @@ async def get_me(db: AsyncSession, *, user: CurrentUser) -> MeOut:
 
     permissions = await get_cached_role_permissions(db, user.role_id)
 
+    # El nombre y la foto se leen de la BD, no de `user` (CurrentUser): ese
+    # viene de un cache de 30s, así que justo después de `PATCH /me` el
+    # usuario vería todavía su nombre viejo. La empresa y el rol sí pueden
+    # venir del cache — no los cambia el propio usuario.
+    user_row = await repository.get_user(db, company_id=user.company_id, user_id=user.id)
+    um = user_row._mapping if user_row is not None else None
+
     cm = company_row._mapping
     sm = subscription_row._mapping
     company_settings = cm["settings"] or {}
     documents = company_settings.get("documents") or {}
     return MeOut(
-        user=MeUserOut(id=user.id, full_name=user.full_name, email=user.email),
+        user=MeUserOut(
+            id=user.id,
+            full_name=um["full_name"] if um else user.full_name,
+            email=um["email"] if um else user.email,
+            photo_url=um["photo_url"] if um else None,
+        ),
         company=MeCompanyOut(
             id=cm["id"],
             name=cm["name"],
@@ -416,3 +429,24 @@ async def generate_recovery_link(
         after={"email": email},
     )
     return RecoveryLinkOut(user_id=user_id, email=email, recovery_link=link)
+
+
+async def update_me(db: AsyncSession, *, user: CurrentUser, body: MeUpdateIn) -> MeOut:
+    """El usuario edita SU PROPIO perfil: nombre y foto, nada más.
+
+    Sin permiso de identidad — editarse a uno mismo no es gestionar usuarios.
+    Justamente por eso el schema (`MeUpdateIn`) no admite `role_id` ni
+    `status`: si los admitiera, cualquiera se ascendería a admin desde su
+    perfil, rodeando `identity.manage_users` por otra URL.
+
+    No audita: cambiarse el nombre propio no es una acción sensible de las que
+    lista CLAUDE.md (descuentos, remates, anulaciones, cambios de rol). El
+    `updated_at` de la fila queda como rastro.
+    """
+    fields = body.model_dump(exclude_unset=True)
+    if fields:
+        await repository.update_me(db, company_id=user.company_id, user_id=user.id, fields=fields)
+        # El cache de `CurrentUser` (30s) todavía tiene el nombre viejo; el
+        # `get_me` de abajo lee la fila de la BD, así que la respuesta ya sale
+        # con el valor nuevo aunque el cache no haya expirado.
+    return await get_me(db, user=user)

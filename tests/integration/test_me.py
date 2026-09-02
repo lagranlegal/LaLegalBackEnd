@@ -148,3 +148,65 @@ def test_me_returns_user_company_role_permissions_subscription_plan(
     assert body["subscription"]["status"] == "active"
     assert body["plan"]["code"] == "full"
     assert body["plan"]["name"] == "Completo"
+
+
+def test_patch_me_updates_own_name_and_photo(client: TestClient, me_tenant: dict) -> None:
+    """`PATCH /me` (docs/PENDIENTES_BACKEND_INFRA.md #15): no había pantalla
+    de perfil porque no había endpoint. Un usuario edita SU nombre y SU foto
+    sin permisos de identidad — editarse a uno mismo no es gestionar usuarios.
+    """
+    headers = {"Authorization": f"Bearer {me_tenant['token']}"}
+
+    resp = client.patch(
+        "/api/v1/me",
+        headers=headers,
+        json={"full_name": "Asesor Renombrado", "photo_url": "company-files/perfil.jpg"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # La respuesta ya trae el valor nuevo, sin un segundo GET: el `MeOut` se
+    # arma leyendo la fila, no el cache de 30s de `CurrentUser`.
+    assert body["user"]["full_name"] == "Asesor Renombrado"
+    assert body["user"]["photo_url"] == "company-files/perfil.jpg"
+
+    # Y persiste.
+    again = client.get("/api/v1/me", headers=headers).json()
+    assert again["user"]["full_name"] == "Asesor Renombrado"
+
+    # PATCH parcial: omitir un campo lo conserva.
+    solo_foto = client.patch("/api/v1/me", headers=headers, json={"photo_url": None})
+    assert solo_foto.status_code == 200
+    assert solo_foto.json()["user"]["full_name"] == "Asesor Renombrado"
+    # `null` explícito SÍ borra.
+    assert solo_foto.json()["user"]["photo_url"] is None
+
+
+def test_patch_me_cannot_change_role_or_status(client: TestClient, me_tenant: dict) -> None:
+    """La razón por la que este endpoint puede vivir sin `require_permission`:
+    el schema no admite `role_id` ni `status`. Si los admitiera, cualquiera se
+    ascendería a admin desde su propio perfil, rodeando
+    `identity.manage_users` por otra URL.
+    """
+    headers = {"Authorization": f"Bearer {me_tenant['token']}"}
+    otro_rol = str(uuid4())
+
+    resp = client.patch(
+        "/api/v1/me",
+        headers=headers,
+        json={"full_name": "Intento", "role_id": otro_rol, "status": "active"},
+    )
+    assert resp.status_code == 200, resp.text
+    # El nombre sí cambió; el rol NO — los campos de más se ignoran, no se
+    # escriben.
+    assert resp.json()["user"]["full_name"] == "Intento"
+    assert resp.json()["role"]["id"] == str(me_tenant["role_id"])
+    assert resp.json()["role"]["id"] != otro_rol
+
+
+def test_patch_me_rejects_an_empty_name(client: TestClient, me_tenant: dict) -> None:
+    headers = {"Authorization": f"Bearer {me_tenant['token']}"}
+    assert client.patch("/api/v1/me", headers=headers, json={"full_name": ""}).status_code == 422
+
+
+def test_patch_me_without_token_is_401(client: TestClient) -> None:
+    assert client.patch("/api/v1/me", json={"full_name": "X"}).status_code == 401

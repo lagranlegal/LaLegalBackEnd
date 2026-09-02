@@ -54,7 +54,7 @@ async def get_user(db: AsyncSession, *, company_id: UUID, user_id: UUID) -> Row[
     result = await db.execute(
         text(
             """
-            select id, full_name, email, role_id, status, created_at
+            select id, full_name, email, photo_url, role_id, status, created_at
             from public.app_user
             where company_id = :company_id and id = :user_id
             """
@@ -299,4 +299,28 @@ async def insert_audit_log(
             "before": json.dumps(before) if before is not None else None,
             "after": json.dumps(after) if after is not None else None,
         },
+    )
+
+
+async def update_me(
+    db: AsyncSession, *, company_id: UUID, user_id: UUID, fields: dict[str, Any]
+) -> None:
+    """`fields` viene de `MeUpdateIn.model_dump(exclude_unset=True)` en
+    service.py — las claves son nombres de columna fijos y conocidos
+    (`full_name`, `photo_url`), nunca texto del usuario, así que interpolarlas
+    es seguro. Mismo patrón que `customers.update_customer`.
+
+    El `where` lleva `company_id` Y `id`: un usuario solo se edita a sí mismo,
+    y el filtro por empresa es la misma defensa en profundidad que el resto
+    del repositorio (además de RLS).
+    """
+    if not fields:
+        return
+    assignments = ", ".join(f"{key} = :{key}" for key in fields)
+    params = {**fields, "company_id": str(company_id), "id": str(user_id)}
+    await db.execute(
+        text(
+            f"update public.app_user set {assignments} where company_id = :company_id and id = :id"
+        ),
+        params,
     )

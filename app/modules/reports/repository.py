@@ -489,3 +489,92 @@ async def inventory_purchased(
         {"company_id": str(company_id), "from_date": from_date, "to_date": to_date},
     )
     return Decimal(str(result.scalar_one() or 0))
+
+
+async def monthly_series(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, months: int
+) -> list[Row[Any]]:
+    """Serie mensual de ingresos operativos y gastos, últimos `months` meses.
+
+    Misma semántica de ingreso que el resto de los reportes, no una tercera
+    definición: el interés sale de `contract_payment` (el documento) y la
+    venta de `sale_line.subtotal` menos el descuento de la venta, solo
+    `completed`. El capital abonado NO entra — recuperar capital reduce la
+    cartera, no es ingreso — ni las compras de mercancía, que son un activo.
+
+    `generate_series` arma los meses ANTES de agregar: un mes sin ventas ni
+    abonos tiene que aparecer en cero, no faltar. Si faltara, la gráfica
+    uniría dos meses no consecutivos con una línea recta y mostraría una
+    tendencia que nunca existió.
+
+    Todo se agrupa por el mes en la zona de la EMPRESA (`at time zone :tz`),
+    igual que los demás reportes — un abono de las 7pm en Bogotá pertenece a
+    ese mes, aunque en UTC ya sea el siguiente.
+    """
+    result = await db.execute(
+        text(
+            """
+            with meses as (
+                select generate_series(
+                    date_trunc('month', (now() at time zone :tz)::date)
+                        - make_interval(months => :months - 1),
+                    date_trunc('month', (now() at time zone :tz)::date),
+                    interval '1 month'
+                )::date as month
+            ),
+            intereses as (
+                select
+                  date_trunc('month', (paid_at at time zone :tz)::date)::date as month,
+                  coalesce(sum(interest_amount), 0)                           as total
+                from public.contract_payment
+                where company_id = :company_id
+                group by 1
+            ),
+            ventas as (
+                select
+                  s.id,
+                  date_trunc('month', (s.sold_at at time zone :tz)::date)::date as month,
+                  s.discount_amount
+                from public.sale s
+                where s.company_id = :company_id and s.status = 'completed'
+            ),
+            -- Bruto y descuento se agregan POR SEPARADO y se restan al final:
+            -- el descuento vive en `sale`, no en la línea, así que un join
+            -- plano con las líneas lo repetiría una vez por línea de la venta
+            -- (mismo motivo por el que `profit_summary` los separa).
+            ventas_bruto as (
+                select v.month, coalesce(sum(sl.subtotal), 0) as bruto
+                from ventas v
+                join public.sale_line sl
+                  on sl.sale_id = v.id and sl.company_id = :company_id
+                group by v.month
+            ),
+            ventas_descuento as (
+                select month, coalesce(sum(discount_amount), 0) as descuento
+                from ventas
+                group by month
+            ),
+            gastos as (
+                select
+                  date_trunc('month', (created_at at time zone :tz)::date)::date as month,
+                  coalesce(sum(amount), 0)                                       as total
+                from public.expense
+                where company_id = :company_id
+                group by 1
+            )
+            select
+              m.month,
+              coalesce(i.total, 0)                                as interest_revenue,
+              coalesce(vb.bruto, 0) - coalesce(vd.descuento, 0)   as sales_revenue,
+              coalesce(g.total, 0)                                as expenses
+            from meses m
+            left join intereses i          on i.month  = m.month
+            left join ventas_bruto vb      on vb.month = m.month
+            left join ventas_descuento vd  on vd.month = m.month
+            left join gastos g             on g.month  = m.month
+            order by m.month
+            """
+        ),
+        {"company_id": str(company_id), "tz": tz_name, "months": months},
+    )
+    return list(result.all())

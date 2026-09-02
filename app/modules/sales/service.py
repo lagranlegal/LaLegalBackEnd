@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -312,7 +313,17 @@ async def list_sales(
     limit: int,
     customer_id: UUID | None = None,
     status_filter: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> CursorPage[SaleOut]:
+    # El rango de fechas se interpreta en la zona de la EMPRESA (misma regla
+    # que el resto de la app) — se resuelve acá y no en el repositorio para
+    # no pedirla cuando no hay filtro de fecha.
+    tz_name = (
+        await platform_integration.get_company_timezone(db, company_id=company_id)
+        if from_date is not None or to_date is not None
+        else "UTC"
+    )
     rows = await repository.list_sales(
         db,
         company_id=company_id,
@@ -320,6 +331,9 @@ async def list_sales(
         limit=limit,
         customer_id=customer_id,
         status_filter=status_filter,
+        tz_name=tz_name,
+        from_date=from_date,
+        to_date=to_date,
     )
     page = make_page(rows, limit, lambda r: r._mapping["id"])
     out = []
@@ -449,9 +463,7 @@ async def create_return(
         and sale_customer_id is not None
         and body.customer_id != sale_customer_id
     ):
-        raise AppError(
-            "La devolución no puede atribuirse a un cliente distinto del que compró."
-        )
+        raise AppError("La devolución no puede atribuirse a un cliente distinto del que compró.")
     customer_id = body.customer_id or sale_customer_id
     if body.settlement_method == "credit_note" and customer_id is None:
         raise AppError("La nota crédito exige un cliente identificado.")

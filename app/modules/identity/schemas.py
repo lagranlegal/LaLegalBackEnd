@@ -90,6 +90,26 @@ class MeUserOut(BaseModel):
     id: UUID
     full_name: str
     email: str
+    #: Foto de perfil del usuario (bucket privado, el front resuelve la URL
+    #: firmada). La edita el propio usuario desde `PATCH /me`.
+    photo_url: str | None = None
+
+
+class MeUpdateIn(BaseModel):
+    """Lo que un usuario puede cambiar DE SÍ MISMO, sin permisos de
+    identidad: su nombre y su foto. Nada más.
+
+    Fuera a propósito: `email` es la identidad de Supabase Auth y cambiarlo
+    es un flujo aparte (verificación incluida); `role_id`/`status` son
+    gestión de identidad y exigen `identity.manage_users` — si se pudieran
+    tocar acá, cualquiera se ascendería a admin editando su perfil.
+
+    PATCH parcial (`exclude_unset`): omitir un campo lo conserva, mandar
+    `null` explícito en `photo_url` borra la foto.
+    """
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=120)
+    photo_url: str | None = None
 
 
 class MeCompanyOut(BaseModel):
