@@ -10,6 +10,7 @@ from app.core.security import TokenClaims, require_super_admin
 from app.modules.audit.schemas import AuditLogOut
 from app.modules.platform import service
 from app.modules.platform.schemas import (
+    CompanyCreatedOut,
     CompanyCreateIn,
     CompanyOut,
     PlanOut,
@@ -20,12 +21,12 @@ from app.modules.platform.schemas import (
 router = APIRouter(prefix="/api/v1/platform", tags=["platform"])
 
 
-@router.post("/companies", response_model=CompanyOut, status_code=201)
+@router.post("/companies", response_model=CompanyCreatedOut, status_code=201)
 async def create_company(
     body: CompanyCreateIn,
     _claims: Annotated[TokenClaims, Depends(require_super_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> CompanyOut:
+) -> CompanyCreatedOut:
     return await service.create_company_defaults(
         db,
         name=body.name,
@@ -33,6 +34,7 @@ async def create_company(
         subscription_expires_at=body.subscription_expires_at,
         first_admin_email=body.first_admin_email,
         first_admin_full_name=body.first_admin_full_name,
+        send_email=body.send_email,
     )
 
 

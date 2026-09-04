@@ -500,6 +500,43 @@ async def test_company_audit_log_lets_super_admin_read_any_company_and_stays_sco
 
 
 @pytest.mark.asyncio
+def test_crear_empresa_devuelve_el_enlace_del_primer_admin(
+    client: TestClient, super_admin_token: str, mocked_invite: list[str]
+) -> None:
+    """El alta era el ÚNICO camino que dependía sí o sí del correo de Supabase.
+
+    Invitaba al primer admin con `send_email=True` y tiraba el enlace a la
+    basura. Si ese correo no llegaba —cuota agotada, spam, o un escáner que lo
+    quemó antes de que lo abrieran— el cliente nuevo se quedaba con una empresa
+    creada y sin forma de entrar, y nadie podía rescatarlo: para generarle otro
+    enlace hay que estar dentro de esa empresa, y él era el único que iba a
+    poder estarlo.
+
+    Cerrado el 04/09/2026, cuando se vio que las plantillas de correo de
+    Supabase no se podían modificar en el plan actual del proyecto.
+    """
+    response = client.post(
+        "/api/v1/platform/companies",
+        headers={"Authorization": f"Bearer {super_admin_token}"},
+        json={
+            "name": "Compraventa Sin Correo",
+            "plan_code": "full",
+            "subscription_expires_at": "2027-01-01",
+            "first_admin_email": "primer-admin@example.com",
+            "first_admin_full_name": "Primer Admin",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # El fake devuelve enlace SOLO cuando `send_email=False`, igual que el
+    # real: que venga uno prueba las dos cosas a la vez — que no se mandó
+    # correo, y que el enlace llega a quien está dando de alta al cliente.
+    assert body["admin_invite_link"], (
+        "sin el enlace, el primer admin depende de un correo que puede no llegar"
+    )
+    assert mocked_invite == ["primer-admin@example.com"]
+
+
 async def test_onboarding_completo_de_una_empresa_nueva(
     client: TestClient,
     created_company: dict,

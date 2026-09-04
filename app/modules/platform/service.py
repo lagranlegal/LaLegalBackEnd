@@ -14,7 +14,12 @@ from app.modules.identity import integration as identity_integration
 from app.modules.identity import repository as identity_repo
 from app.modules.platform import integration as platform_integration
 from app.modules.platform import repository
-from app.modules.platform.schemas import CompanyOut, PlanOut, SubscriptionEventOut
+from app.modules.platform.schemas import (
+    CompanyCreatedOut,
+    CompanyOut,
+    PlanOut,
+    SubscriptionEventOut,
+)
 
 # Matriz de roles semilla — literal del comentario de seed.sql (referencia
 # para create_company_defaults; el admin de cada empresa puede editarla
@@ -110,7 +115,8 @@ async def create_company_defaults(
     subscription_expires_at: date,
     first_admin_email: str,
     first_admin_full_name: str,
-) -> CompanyOut:
+    send_email: bool = False,
+) -> CompanyCreatedOut:
     plan_id = await repository.get_plan_id_by_code(db, code=plan_code)
     if plan_id is None:
         raise NotFoundError("El plan indicado no existe o está inactivo.")
@@ -141,13 +147,14 @@ async def create_company_defaults(
             admin_role_id = role_id
     assert admin_role_id is not None
 
-    await identity_integration.invite_user(
+    _, invite_link = await identity_integration.invite_user(
         db,
         company_id=company_id,
         role_id=admin_role_id,
         email=first_admin_email,
         full_name=first_admin_full_name,
         invited_by=None,
+        send_email=send_email,
     )
 
     await identity_repo.insert_audit_log(
@@ -175,7 +182,10 @@ async def create_company_defaults(
 
     row = await repository.get_company(db, company_id=company_id)
     assert row is not None
-    return _row_to_company(row)
+    return CompanyCreatedOut(
+        **_row_to_company(row).model_dump(),
+        admin_invite_link=invite_link,
+    )
 
 
 async def list_companies(
