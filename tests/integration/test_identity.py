@@ -4,7 +4,7 @@ primer login. Requiere Postgres real (se salta si no hay).
 """
 
 from collections.abc import AsyncGenerator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -127,6 +127,7 @@ async def tenant(
         "basic_role_id": basic_role_id,
         "admin_user_id": admin_user_id,
         "admin_token": admin_token,
+        "admin_email": f"admin-{admin_user_id}@example.com",
         "private_pem": private_pem,
     }
 
@@ -203,6 +204,61 @@ def test_invite_por_enlace_no_manda_correo_y_devuelve_el_link(
     assert body["role_id"] == str(tenant["basic_role_id"])
     # …y además vuelve el enlace para entregarlo a mano.
     assert body["invite_link"] == "https://supabase.test/verify?token=fake"
+
+
+def test_reinvitar_a_alguien_ya_invitado_explica_que_hacer(
+    client: TestClient, tenant: dict, mocked_invite: list[str]
+) -> None:
+    """Invitar dos veces al mismo correo es NORMAL: "no le llegó, mándaselo otra vez".
+
+    Antes el segundo intento reventaba el índice único de `app_user` y salía
+    un **500 en texto plano** — ni siquiera el envelope de error, así que el
+    front lo mostraba como "Ocurrió un error inesperado". Y encima Supabase ya
+    había regenerado el enlace, dejando muerto el primero, que el admin quizá
+    ya había mandado por WhatsApp.
+
+    Encontrado auditando los flujos de identidad el 04/09/2026, después de que
+    un cliente reportara "no se pueden crear usuarios".
+    """
+    cuerpo = {
+        "email": "repetido@example.com",
+        "full_name": "Repetido",
+        "role_id": str(tenant["basic_role_id"]),
+        "send_email": False,
+    }
+    primera = client.post(
+        "/api/v1/identity/invitations", headers=_headers(tenant["admin_token"]), json=cuerpo
+    )
+    assert primera.status_code == 201, primera.text
+
+    segunda = client.post(
+        "/api/v1/identity/invitations", headers=_headers(tenant["admin_token"]), json=cuerpo
+    )
+    assert segunda.status_code == 409, segunda.text
+    body = segunda.json()
+    assert body["code"] == "USER_ALREADY_INVITED"
+    # El mensaje tiene que nombrar la acción correcta, no solo negar la que se
+    # intentó: la salida es generar el enlace desde su ficha.
+    assert "activación" in body["message"]
+
+
+def test_invitar_a_alguien_ya_activo_no_lo_pisa(
+    client: TestClient, tenant: dict, mocked_invite: list[str]
+) -> None:
+    """El admin de la empresa ya existe y está activo: invitarlo de nuevo es un
+    error del admin, no una falla del sistema."""
+    response = client.post(
+        "/api/v1/identity/invitations",
+        headers=_headers(tenant["admin_token"]),
+        json={
+            "email": tenant["admin_email"],
+            "full_name": "Duplicado",
+            "role_id": str(tenant["basic_role_id"]),
+            "send_email": False,
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "USER_ALREADY_EXISTS"
 
 
 def test_invite_por_correo_no_devuelve_enlace(
@@ -314,12 +370,76 @@ def test_create_and_clone_role(client: TestClient, tenant: dict) -> None:
     assert perms_resp.json() == ["inventory.view"]
 
 
+async def _crear_invitado(tenant: dict) -> UUID:
+    invited_user_id = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.app_user "
+                "(id, company_id, role_id, full_name, email, status) "
+                "values (:id, :company_id, :role_id, 'Invitado Test', :email, 'invited')"
+            ),
+            {
+                "id": str(invited_user_id),
+                "company_id": str(tenant["company_id"]),
+                "role_id": str(tenant["admin_role_id"]),
+                "email": f"invitado-{invited_user_id}@example.com",
+            },
+        )
+    return invited_user_id
+
+
+async def _estado(user_id: UUID) -> str:
+    async with AsyncSessionLocal() as session, session.begin():
+        return str(
+            (
+                await session.execute(
+                    text("select status from public.app_user where id = :id"),
+                    {"id": str(user_id)},
+                )
+            ).scalar_one()
+        )
+
+
+async def test_abrir_el_enlace_NO_activa_al_invitado(
+    client: TestClient,
+    tenant: dict,
+    rsa_keypair: tuple[str, object],
+) -> None:
+    """Abrir la invitación no prueba que exista ninguna contraseña.
+
+    BUG REAL (04/09/2026): el usuario pasaba a `active` con cualquier JWT
+    válido, y la sesión que produce el enlace YA es válida antes de que la
+    persona elija su clave. Comprobado contra el proyecto dev: canjear el
+    enlace y hacer un solo request dejaba al usuario en `active` sin
+    contraseña — y después no podía entrar. El admin veía "Activo" en la
+    lista, todo en orden, mientras esa persona estaba bloqueada para siempre.
+
+    `amr` distingue los dos casos: `otp` para una sesión de enlace,
+    `password` para un login de verdad.
+    """
+    invited_user_id = await _crear_invitado(tenant)
+    token = make_token(
+        tenant["private_pem"],
+        sub=str(invited_user_id),
+        company_id=str(tenant["company_id"]),
+        role_id=str(tenant["admin_role_id"]),
+        amr=[{"method": "otp", "timestamp": 1788496665}],
+    )
+
+    # Se le deja pasar: esa sesión es la que necesita para poner su clave.
+    assert client.get("/api/v1/identity/users", headers=_headers(token)).status_code == 200
+    assert await _estado(invited_user_id) == "invited"
+
+
 async def test_invited_user_activates_on_first_login(
     client: TestClient,
     tenant: dict,
     monkeypatch: pytest.MonkeyPatch,
     rsa_keypair: tuple[str, object],
 ) -> None:
+    """Entrar con su propia contraseña sí lo activa — que es lo que `active`
+    debe significar para el admin: esta persona ya puede entrar sola."""
     private_pem = tenant["private_pem"]
     invited_user_id = uuid4()
 
@@ -343,6 +463,7 @@ async def test_invited_user_activates_on_first_login(
         sub=str(invited_user_id),
         company_id=str(tenant["company_id"]),
         role_id=str(tenant["admin_role_id"]),
+        amr=[{"method": "password", "timestamp": 1788496531}],
     )
     response = client.get("/api/v1/identity/users", headers=_headers(token))
     assert response.status_code == 200

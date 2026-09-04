@@ -7,6 +7,25 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+async def find_user_by_email(db: AsyncSession, *, company_id: UUID, email: str) -> Row[Any] | None:
+    """El usuario de ESTA empresa con ese correo, si ya existe.
+
+    Sirve para responder "ya está invitado" antes de tocar Supabase Auth, en
+    vez de dejar que reviente el índice único de `app_user` y salga un 500.
+    """
+    result = await db.execute(
+        text(
+            """
+            select id, full_name, email, role_id, status, created_at
+            from public.app_user
+            where company_id = :company_id and lower(email) = lower(:email)
+            """
+        ),
+        {"company_id": str(company_id), "email": email},
+    )
+    return result.first()
+
+
 async def insert_app_user(
     db: AsyncSession,
     *,

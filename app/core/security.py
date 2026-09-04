@@ -116,6 +116,23 @@ class CurrentUser:
 _current_user_cache: TTLCache[UUID, CurrentUser] = TTLCache(maxsize=2048, ttl=30)
 
 
+def _sesion_con_contrasena(claims: TokenClaims) -> bool:
+    """¿Esta sesión nació de un login con contraseña?
+
+    `amr` viene así en el token de Supabase:
+
+        login normal      → [{"method": "password", ...}]
+        enlace/invitación → [{"method": "otp", ...}]
+
+    Se mira el método y no la ausencia de `otp` para que cualquier método
+    futuro (SSO, passkey) tenga que declararse a propósito en vez de colarse.
+    """
+    amr = claims.raw.get("amr")
+    if not isinstance(amr, list):
+        return False
+    return any(isinstance(m, dict) and m.get("method") == "password" for m in amr)
+
+
 async def get_current_user(
     claims: Annotated[TokenClaims, Depends(get_verified_claims)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
@@ -150,12 +167,32 @@ async def get_current_user(
     if row is None or row["company_status"] != "active":
         raise UnauthorizedError("Usuario o empresa inactivos.")
     if row["user_status"] == "invited":
-        # Si llegó hasta acá con un JWT válido, ya completó el flujo de
-        # invitación (puso contraseña / usó Google) — se activa solo.
-        await db.execute(
-            text("update public.app_user set status = 'active' where id = :user_id"),
-            {"user_id": str(claims.sub)},
-        )
+        # Se activa SOLO si entró con su propia contraseña, no con cualquier
+        # JWT válido.
+        #
+        # BUG REAL (04/09/2026): acá decía "si llegó con un JWT válido ya
+        # completó la invitación (puso contraseña)". Es falso — abrir el
+        # enlace de invitación YA produce un JWT válido, antes de que exista
+        # ninguna contraseña. Comprobado: canjear el enlace y hacer un solo
+        # request dejaba al usuario en `active` sin haber puesto nunca una
+        # clave, y después no podía entrar (Supabase devuelve 400). El admin
+        # veía "Activo" en la lista —todo en orden— mientras esa persona
+        # estaba bloqueada para siempre, y nada en la pantalla lo delataba.
+        #
+        # `amr` (Authentication Methods References) distingue exactamente los
+        # dos casos: `otp` cuando la sesión viene de un enlace, `password`
+        # cuando viene de un login de verdad. Con esto, `active` pasa a
+        # significar lo único que le sirve al admin: **esta persona ya puede
+        # entrar por su cuenta**.
+        #
+        # Al invitado se le deja pasar igual mientras siga `invited`: esa
+        # sesión del enlace es legítima y es justamente la que necesita para
+        # poner su contraseña.
+        if _sesion_con_contrasena(claims):
+            await db.execute(
+                text("update public.app_user set status = 'active' where id = :user_id"),
+                {"user_id": str(claims.sub)},
+            )
     elif row["user_status"] != "active":
         raise UnauthorizedError("Usuario o empresa inactivos.")
     if row["subscription_status"] != "active":

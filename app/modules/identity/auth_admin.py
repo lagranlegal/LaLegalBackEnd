@@ -20,6 +20,23 @@ class AuthAdminError(AppError):
     code = "AUTH_ADMIN_ERROR"
 
 
+class EmailAlreadyRegisteredError(AppError):
+    """Ese correo ya tiene cuenta en la plataforma (puede ser de OTRA empresa).
+
+    Caso aparte de `AuthAdminError` por lo mismo que `InviteRateLimitedError`:
+    no hay nada roto. Un 502 "No se pudo invitar al usuario en Supabase Auth"
+    se lee como una falla del sistema y manda al admin a reintentar una y otra
+    vez — que es exactamente la forma que toma el reporte "no se pueden crear
+    usuarios". Acá la acción correcta es otra: usar otro correo, o pedirle a
+    quien administra la plataforma que revise dónde está esa cuenta.
+
+    Supabase lo devuelve como 422 con `error_code: "email_exists"`.
+    """
+
+    status_code = 409
+    code = "EMAIL_ALREADY_REGISTERED"
+
+
 class InviteRateLimitedError(AppError):
     """Supabase limitó el envío de correos (429).
 
@@ -35,6 +52,21 @@ class InviteRateLimitedError(AppError):
 
     status_code = 429
     code = "INVITE_RATE_LIMITED"
+
+
+def _es_correo_ya_registrado(response: httpx.Response) -> bool:
+    """Supabase responde 422 con `error_code: "email_exists"`.
+
+    Se mira el `error_code` y no el texto: el `msg` está en inglés y cambia
+    entre versiones de GoTrue.
+    """
+    if response.status_code not in (400, 409, 422):
+        return False
+    try:
+        cuerpo = response.json()
+    except ValueError:
+        return False
+    return isinstance(cuerpo, dict) and cuerpo.get("error_code") == "email_exists"
 
 
 @dataclass(frozen=True)
@@ -163,6 +195,13 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
         raise InviteRateLimitedError(
             "Supabase limitó el envío de correos. Espera unos minutos e invita de nuevo.",
             details={"body": response.text},
+        )
+    if _es_correo_ya_registrado(response):
+        raise EmailAlreadyRegisteredError(
+            "Ese correo ya tiene una cuenta en la plataforma. Si la persona ya "
+            "trabaja en esta empresa, genera el enlace desde su ficha en "
+            "Usuarios; si no, invítala con otro correo.",
+            details={"email": email},
         )
     if response.status_code >= 400:
         raise AuthAdminError(

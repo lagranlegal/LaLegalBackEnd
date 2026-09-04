@@ -545,8 +545,16 @@ async def test_onboarding_completo_de_una_empresa_nueva(
     assert rol == "Admin"
 
     role_id = await _role_id_de(company_id, "Admin")
+    # `amr: password` porque el front, apenas la persona guarda su contraseña
+    # en `/auth/callback`, entra con ella (`useSetPassword`). La distinción
+    # importa: con la sesión del ENLACE (`amr: otp`) el usuario NO se activa,
+    # justamente porque abrir un enlace no prueba que exista una contraseña.
     token = make_token(
-        private_pem, sub=str(admin_id), company_id=str(company_id), role_id=str(role_id)
+        private_pem,
+        sub=str(admin_id),
+        company_id=str(company_id),
+        role_id=str(role_id),
+        amr=[{"method": "password", "timestamp": 1788496531}],
     )
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -567,7 +575,7 @@ async def test_onboarding_completo_de_una_empresa_nueva(
                 text("select status from public.app_user where id = :id"), {"id": str(admin_id)}
             )
         ).scalar_one()
-    assert estado_final == "active", "el primer request lo activa (invited -> active)"
+    assert estado_final == "active", "entrar con su propia contraseña lo activa (invited -> active)"
 
     # Y desde ahí YA PUEDE OPERAR: invitar a alguien sin depender del correo.
     invitacion = client.post(

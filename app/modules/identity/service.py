@@ -77,6 +77,37 @@ async def invite_user(
     if role is None:
         raise NotFoundError("El rol indicado no existe en esta empresa.")
 
+    # Invitar dos veces al mismo correo es lo NORMAL: "el enlace no le llegó,
+    # mándaselo otra vez". Sin esta comprobación el segundo intento reventaba
+    # el índice único de `app_user` y salía un **500 en texto plano** (ni
+    # siquiera el envelope de error), que el front muestra como "Ocurrió un
+    # error inesperado". Y encima Supabase ya había regenerado el enlace, así
+    # que el primero —el que el admin quizá ya mandó por WhatsApp— quedaba
+    # muerto sin que nadie lo supiera.
+    #
+    # La acción correcta no es invitar de nuevo: es generar el enlace desde la
+    # ficha de esa persona, que es lo que dice el mensaje.
+    existente = await repository.find_user_by_email(db, company_id=company_id, email=email)
+    if existente is not None:
+        estado = existente._mapping["status"]
+        if estado == "invited":
+            raise ConflictError(
+                "Ya invitaste a esta persona y todavía no ha entrado. Para volver a "
+                "darle acceso, abre su ficha en Usuarios y usa «Generar enlace de "
+                "activación» — invitarla otra vez anularía el enlace anterior.",
+                code="USER_ALREADY_INVITED",
+            )
+        if estado == "inactive":
+            raise ConflictError(
+                "Esta persona ya existe en la empresa pero está inactiva. "
+                "Reactívala desde su ficha en Usuarios en vez de invitarla de nuevo.",
+                code="USER_ALREADY_EXISTS",
+            )
+        raise ConflictError(
+            "Ya hay un usuario activo con ese correo en esta empresa.",
+            code="USER_ALREADY_EXISTS",
+        )
+
     user_id, link = await integration.invite_user(
         db,
         company_id=company_id,
