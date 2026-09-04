@@ -37,6 +37,22 @@ class EmailAlreadyRegisteredError(AppError):
     code = "EMAIL_ALREADY_REGISTERED"
 
 
+class AuthAccountMissingError(AppError):
+    """La fila existe en `app_user` pero la cuenta ya no está en Supabase Auth.
+
+    Pasa si alguien borra el usuario desde el panel de Supabase: la lista de
+    Usuarios lo sigue mostrando —con su estado y todo— y cualquier intento de
+    darle acceso muere con un 502 "no se pudo generar el enlace", que se lee
+    como una falla del sistema. Es un dato descuadrado, y hay que decirlo así
+    para que alguien lo arregle en vez de reintentar.
+
+    Supabase lo devuelve como 404 con `error_code: "user_not_found"`.
+    """
+
+    status_code = 409
+    code = "AUTH_ACCOUNT_MISSING"
+
+
 class InviteRateLimitedError(AppError):
     """Supabase limitó el envío de correos (429).
 
@@ -54,19 +70,20 @@ class InviteRateLimitedError(AppError):
     code = "INVITE_RATE_LIMITED"
 
 
-def _es_correo_ya_registrado(response: httpx.Response) -> bool:
-    """Supabase responde 422 con `error_code: "email_exists"`.
+def _tiene_error_code(response: httpx.Response, codigo: str) -> bool:
+    """¿Supabase devolvió este `error_code`?
 
-    Se mira el `error_code` y no el texto: el `msg` está en inglés y cambia
-    entre versiones de GoTrue.
+    Se mira el `error_code` y NUNCA el texto: el `msg` está en inglés y cambia
+    entre versiones de GoTrue — la misma regla que el front aplica con los
+    códigos de este backend.
     """
-    if response.status_code not in (400, 409, 422):
+    if response.status_code < 400:
         return False
     try:
         cuerpo = response.json()
     except ValueError:
         return False
-    return isinstance(cuerpo, dict) and cuerpo.get("error_code") == "email_exists"
+    return isinstance(cuerpo, dict) and cuerpo.get("error_code") == codigo
 
 
 @dataclass(frozen=True)
@@ -196,7 +213,7 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
             "Supabase limitó el envío de correos. Espera unos minutos e invita de nuevo.",
             details={"body": response.text},
         )
-    if _es_correo_ya_registrado(response):
+    if _tiene_error_code(response, "email_exists"):
         raise EmailAlreadyRegisteredError(
             "Ese correo ya tiene una cuenta en la plataforma. Si la persona ya "
             "trabaja en esta empresa, genera el enlace desde su ficha en "
@@ -265,6 +282,13 @@ async def generate_recovery_link(email: str) -> str:
             params=params,
         )
 
+    if _tiene_error_code(response, "user_not_found"):
+        raise AuthAccountMissingError(
+            "Este usuario ya no tiene cuenta de acceso: aparece en la lista de la "
+            "empresa pero fue eliminado del sistema de autenticación. Desactívalo e "
+            "invita de nuevo a esa persona con su correo.",
+            details={"email": email},
+        )
     if response.status_code >= 400:
         raise AuthAdminError(
             "No se pudo generar el enlace de recuperación en Supabase Auth.",

@@ -175,6 +175,17 @@ async def _set_user_active_status(
     if user is None:
         raise NotFoundError("El usuario no existe en esta empresa.")
 
+    # NADIE SE DESACTIVA A SÍ MISMO. La UI ya lo oculta, pero ocultar no es
+    # proteger (CLAUDE.md regla 7): sin esto, un admin que no sea el último
+    # podía dejarse fuera de su propia empresa con un request a mano, y la
+    # única salida sería que otro lo reactivara.
+    if not active and user_id == acting_user_id:
+        raise ConflictError(
+            "No puedes desactivar tu propia cuenta. Si te vas de la empresa, "
+            "pídele a otro administrador que lo haga.",
+            code="CANNOT_DEACTIVATE_SELF",
+        )
+
     if not active and await _role_has_admin_permission(db, user._mapping["role_id"]):
         remaining = await repository.count_active_admins(
             db, company_id=company_id, exclude_user_id=user_id

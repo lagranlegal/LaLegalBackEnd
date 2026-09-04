@@ -312,12 +312,49 @@ def test_list_users_includes_admin(client: TestClient, tenant: dict) -> None:
     assert str(tenant["admin_user_id"]) in ids
 
 
-def test_deactivate_last_admin_is_blocked(client: TestClient, tenant: dict) -> None:
+async def test_deactivate_last_admin_is_blocked(client: TestClient, tenant: dict) -> None:
+    """Dejar a la empresa sin ningún administrador activo la deja sin dueño.
+
+    Lo intenta OTRA persona, no el propio admin: quien tiene
+    `identity.manage_users` pero no `identity.manage_roles` puede gestionar
+    usuarios sin ser administrador, y es el único camino por el que se llega
+    a este safeguard desde que desactivarse a uno mismo se rechaza antes
+    (`CANNOT_DEACTIVATE_SELF`).
+    """
+    gestor_id = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.role_permission (role_id, permission_id) "
+                "select :role_id, id from public.permission where code = 'identity.manage_users'"
+            ),
+            {"role_id": str(tenant["basic_role_id"])},
+        )
+        await session.execute(
+            text(
+                "insert into public.app_user "
+                "(id, company_id, role_id, full_name, email, status) "
+                "values (:id, :company_id, :role_id, 'Gestor Test', :email, 'active')"
+            ),
+            {
+                "id": str(gestor_id),
+                "company_id": str(tenant["company_id"]),
+                "role_id": str(tenant["basic_role_id"]),
+                "email": f"gestor-{gestor_id}@example.com",
+            },
+        )
+
+    token = make_token(
+        tenant["private_pem"],
+        sub=str(gestor_id),
+        company_id=str(tenant["company_id"]),
+        role_id=str(tenant["basic_role_id"]),
+    )
     response = client.post(
         f"/api/v1/identity/users/{tenant['admin_user_id']}/deactivate",
-        headers=_headers(tenant["admin_token"]),
+        headers=_headers(token),
     )
-    assert response.status_code == 409
+    assert response.status_code == 409, response.text
     assert response.json()["code"] == "LAST_ADMIN_SAFEGUARD"
 
 
@@ -368,6 +405,21 @@ def test_create_and_clone_role(client: TestClient, tenant: dict) -> None:
     )
     assert perms_resp.status_code == 200
     assert perms_resp.json() == ["inventory.view"]
+
+
+def test_no_puedes_desactivarte_a_ti_mismo(client: TestClient, tenant: dict) -> None:
+    """La UI ya oculta el botón, pero ocultar no es proteger.
+
+    Sin este guard un admin que no fuera el último podía dejarse fuera de su
+    propia empresa con un request a mano, y la única salida sería que otro lo
+    reactivara. Encontrado auditando los flujos de identidad (04/09/2026).
+    """
+    response = client.post(
+        f"/api/v1/identity/users/{tenant['admin_user_id']}/deactivate",
+        headers=_headers(tenant["admin_token"]),
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "CANNOT_DEACTIVATE_SELF"
 
 
 async def _crear_invitado(tenant: dict) -> UUID:
