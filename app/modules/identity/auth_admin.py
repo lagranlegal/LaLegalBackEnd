@@ -49,6 +49,48 @@ class Invitation:
     link: str | None
 
 
+def _app_link(hashed_token: str, verification_type: str) -> str | None:
+    """Enlace a NUESTRA app en vez del `action_link` que devuelve GoTrue.
+
+    BUG REAL, reproducido el 03/09/2026 contra el proyecto dev: el
+    `action_link` es un **GET de un solo uso** (`/auth/v1/verify?token=...`).
+    Cualquier cosa que *abra la URL sin que nadie la toque* lo quema:
+
+        curl -A "WhatsApp/2.23" "$ACTION_LINK"   → 302 con #access_token=...
+        curl "$ACTION_LINK"                      → 302 con #error_code=otp_expired
+
+    Eso es exactamente lo que hacen los generadores de vista previa de
+    WhatsApp, Telegram y Slack, y los escáneres de correo (Gmail, Outlook Safe
+    Links, antivirus corporativos). El admin manda el enlace por WhatsApp, el
+    crawler lo consume al instante para armar la tarjetita de la previa, y
+    cuando la persona por fin lo toca ya está muerto: entra sin sesión, ve el
+    formulario de contraseña igual, y al guardar recibe un error. Ese era el
+    "no se pudo guardar la contraseña, intenta de nuevo" que nadie podía
+    reproducir — porque a quien lo probaba abriendo el enlace de una sí le
+    funcionaba.
+
+    Deja rastro en la BD que confunde todavía más: `last_sign_in_at` queda
+    puesto (lo puso el crawler) pero la persona nunca tuvo contraseña.
+
+    La salida es no poner el token de un solo uso en una URL que alguien pueda
+    pedir por GET. `generate_link` también devuelve `hashed_token`, que se
+    canjea por **POST** (`supabase.auth.verifyOtp({ token_hash, type })`). Un
+    crawler que hace GET sobre este enlace solo se baja el HTML de la SPA y no
+    quema nada.
+
+    De paso desaparece el otro problema del `action_link`: acá no hay redirect
+    de por medio, así que ya no importa si la URL está o no en la lista de
+    "Redirect URLs" permitidas del proyecto Supabase (cuando no lo está,
+    Supabase la reemplaza en silencio por la Site URL y la persona entra a la
+    app sin que nadie le pida contraseña).
+    """
+    settings = get_settings()
+    if not settings.frontend_url:
+        return None
+    base = settings.frontend_url.rstrip("/")
+    return f"{base}/auth/callback?token_hash={hashed_token}&type={verification_type}"
+
+
 async def invite_user(email: str, full_name: str, *, send_email: bool = True) -> Invitation:
     """Crea el usuario en Supabase Auth.
 
@@ -129,7 +171,17 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
         )
 
     body = response.json()
-    return Invitation(user_id=UUID(body["id"]), link=body.get("action_link"))
+    # `hashed_token` solo viene por `generate_link` (send_email=False), que es
+    # justo el camino donde nosotros entregamos el enlace. Con `invite` el
+    # enlace lo arma Supabase dentro del correo y no pasa por acá — ese sigue
+    # expuesto al prefetch de los escáneres de correo hasta que la plantilla
+    # use `{{ .TokenHash }}` (ver frontend-starter/docs/DEPLOY.md).
+    hashed_token = body.get("hashed_token")
+    # El `or` importa: sin `FRONTEND_URL` no hay a dónde apuntar, y un enlace
+    # frágil sigue siendo mejor que ninguno — la alternativa es dejar al admin
+    # sin forma de dar de alta a nadie.
+    link = (_app_link(hashed_token, "invite") if hashed_token else None) or body.get("action_link")
+    return Invitation(user_id=UUID(body["id"]), link=link)
 
 
 async def generate_recovery_link(email: str) -> str:
@@ -180,7 +232,11 @@ async def generate_recovery_link(email: str) -> str:
             details={"status_code": response.status_code, "body": response.text},
         )
 
-    link = response.json().get("action_link")
+    body = response.json()
+    hashed_token = body.get("hashed_token")
+    link = (_app_link(hashed_token, "recovery") if hashed_token else None) or body.get(
+        "action_link"
+    )
     if not link:
         raise AuthAdminError("Supabase no devolvió el enlace de recuperación.")
     return str(link)

@@ -213,3 +213,73 @@ async def test_no_frontend_url_sends_no_redirect_anywhere(monkeypatch: pytest.Mo
 
     assert _FakeClient.captured["params"] == {}
     assert "redirect_to" not in _FakeClient.captured["json"]
+
+
+class _FakeLinkResponse(_FakeResponse):
+    """Lo que devuelve `/admin/generate_link` de verdad: trae `hashed_token`."""
+
+    def json(self) -> dict[str, Any]:
+        return {
+            "id": self._user_id,
+            "action_link": "https://proyecto.supabase.co/auth/v1/verify?token=abc&type=invite",
+            "hashed_token": "abc123hash",
+        }
+
+
+class _FakeLinkClient(_FakeClient):
+    async def post(
+        self, url: str, headers: dict, json: dict, params: dict | None = None
+    ) -> _FakeResponse:
+        await super().post(url, headers=headers, json=json, params=params)
+        return _FakeLinkResponse(str(uuid4()))
+
+
+@pytest.mark.asyncio
+async def test_invite_link_points_to_the_app_not_to_gotrue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El enlace entregado NO puede ser el `action_link` de GoTrue.
+
+    `action_link` es un GET de un solo uso: cualquier crawler de vista previa
+    (WhatsApp, Telegram, Gmail) lo quema con solo pedir la URL, y la persona
+    llega a un enlace muerto. Reproducido contra el proyecto dev el
+    03/09/2026 — ver `auth_admin._app_link`.
+
+    El `token_hash` en cambio se canjea por POST, así que un GET del crawler
+    solo se baja el HTML de la SPA.
+    """
+    monkeypatch.setenv("FRONTEND_URL", "https://app.example.com")
+    monkeypatch.setattr(auth_admin.httpx, "AsyncClient", _FakeLinkClient)
+
+    invitacion = await auth_admin.invite_user("nuevo@example.com", "Nuevo", send_email=False)
+
+    assert (
+        invitacion.link == "https://app.example.com/auth/callback?token_hash=abc123hash&type=invite"
+    )
+    assert "/auth/v1/verify" not in (invitacion.link or "")
+
+
+@pytest.mark.asyncio
+async def test_recovery_link_points_to_the_app_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recuperar contraseña usa el mismo endpoint, así que hereda el mismo bug."""
+    monkeypatch.setenv("FRONTEND_URL", "https://app.example.com")
+    monkeypatch.setattr(auth_admin.httpx, "AsyncClient", _FakeLinkClient)
+
+    link = await auth_admin.generate_recovery_link("olvidadizo@example.com")
+
+    assert link == "https://app.example.com/auth/callback?token_hash=abc123hash&type=recovery"
+
+
+@pytest.mark.asyncio
+async def test_without_frontend_url_falls_back_to_the_gotrue_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin `FRONTEND_URL` no hay a dónde apuntar, y un enlace frágil es mejor
+    que ninguno: la alternativa sería dejar al admin sin forma de dar de alta
+    a nadie."""
+    monkeypatch.setenv("FRONTEND_URL", "")
+    monkeypatch.setattr(auth_admin.httpx, "AsyncClient", _FakeLinkClient)
+
+    invitacion = await auth_admin.invite_user("sin@example.com", "Sin URL", send_email=False)
+
+    assert invitacion.link == "https://proyecto.supabase.co/auth/v1/verify?token=abc&type=invite"
