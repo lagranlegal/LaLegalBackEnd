@@ -52,6 +52,33 @@ class CashSessionNotOpenError(AppError):
     code = "CASH_SESSION_NOT_OPEN"
 
 
+class NoOpenCashSessionError(NotFoundError):
+    """ "No hay caja abierta" CONSULTADO, no intentado.
+
+    Es un 404 —se preguntó por la sesión en curso y no hay ninguna— pero lleva
+    el código de dominio `CASH_SESSION_NOT_OPEN`, no el `NOT_FOUND` genérico.
+
+    BUG REAL (03/09/2026): `GET /cashbox/sessions/current` devolvía
+    `NOT_FOUND`, y el front buscaba exactamente `CASH_SESSION_NOT_OPEN` para
+    traducirlo a "caja cerrada". Como nunca coincidía, la franja global caía
+    en su rama de error y mostraba **"No se pudo consultar el estado de la
+    caja"** — un fallo del sistema— en vez de "Caja cerrada — no se pueden
+    registrar operaciones de dinero" con el botón para abrirla. Toda la rama
+    de caja cerrada del banner era código muerto.
+
+    Efecto en la vida real: una empresa estuvo once días sin poder crear un
+    solo contrato (el desembolso en efectivo exige sesión abierta) porque
+    nadie supo nunca que lo que faltaba era abrir la caja. La app decía que
+    no podía averiguarlo.
+
+    Se distingue a propósito del otro 404 de este endpoint —"la empresa no
+    tiene una caja activa configurada"—, que sí es un problema de
+    configuración y debe seguir viéndose como falla.
+    """
+
+    code = "CASH_SESSION_NOT_OPEN"
+
+
 class PaymentPartialInterestRejectedError(AppError):
     status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
     code = "PAYMENT_PARTIAL_INTEREST_REJECTED"

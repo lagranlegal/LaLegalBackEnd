@@ -142,10 +142,24 @@ def test_open_session_twice_is_conflict(client: TestClient, cashbox_tenant: dict
 
 
 def test_get_current_session_404_when_none_open(client: TestClient, cashbox_tenant: dict) -> None:
+    """Sin caja abierta: 404 **con el código de dominio**, no con `NOT_FOUND`.
+
+    El código es la parte que importa y es la que faltaba acá. El front
+    traduce `CASH_SESSION_NOT_OPEN` a "Caja cerrada — no se pueden registrar
+    operaciones de dinero" con su botón para abrirla; cualquier otro código
+    cae en "No se pudo consultar el estado de la caja", que se lee como una
+    falla del sistema.
+
+    Este test solo miraba el status, así que el endpoint pudo devolver
+    `NOT_FOUND` durante meses sin que nadie lo notara: una empresa estuvo
+    once días sin poder crear un contrato porque nunca supo que lo que
+    faltaba era abrir la caja.
+    """
     response = client.get(
         "/api/v1/cashbox/sessions/current", headers=_headers(cashbox_tenant["token"])
     )
     assert response.status_code == 404
+    assert response.json()["code"] == "CASH_SESSION_NOT_OPEN"
 
 
 def test_close_session_with_no_movements_matches_opening_balance(

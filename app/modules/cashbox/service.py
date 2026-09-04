@@ -11,6 +11,7 @@ from app.core.errors import (
     AppError,
     CashSessionNotOpenError,
     ConflictError,
+    NoOpenCashSessionError,
     NotFoundError,
     PermissionDeniedError,
 )
@@ -101,7 +102,10 @@ async def get_current_session(db: AsyncSession, *, company_id: UUID) -> SessionO
         raise NotFoundError("La empresa no tiene una caja activa configurada.")
     row = await repository.get_open_session_for_register(db, register_id=register._mapping["id"])
     if row is None:
-        raise NotFoundError("No hay una sesión de caja abierta.")
+        # `NoOpenCashSessionError`, no `NotFoundError`: el front distingue
+        # "caja cerrada" (estado normal, con su CTA de abrirla) de "no se pudo
+        # consultar" (falla) por el CÓDIGO del error. Ver la clase.
+        raise NoOpenCashSessionError("No hay una sesión de caja abierta.")
     full_row = await repository.get_session(
         db, company_id=company_id, session_id=row._mapping["id"]
     )
