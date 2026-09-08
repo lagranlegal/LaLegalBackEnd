@@ -17,7 +17,7 @@
 | **0** · Laboratorio | Empresas espejo, usuarios por rol, arsenal de scripts, mapa de endpoints | ✅ 08/09/2026 |
 | **1** · Identidad, permisos y aislamiento | Matriz completa de permisos, roles, ciclo de vida del usuario, multi-tenancy, guards de UI | ✅ 08/09/2026 |
 | **2** · Dinero y caja | Ciclo diario, arqueo sin tolerancia, reapertura, cuentas, traslados, idempotencia | 🟡 08/09/2026 — cerrada salvo lo que nace de contratos y ventas, que va con las fases 3-4 |
-| **3** · Contratos | Snapshot legal, herencia de categoría, meses completos, máquina de estados, remate, import | ⏳ |
+| **3** · Contratos | Snapshot legal, herencia de categoría, meses completos, máquina de estados, remate, import | ✅ 08/09/2026 |
 | **4** · Inventario y tienda | Códigos y letras, producto vs lote, unidades, transformaciones, kardex, ventas, devoluciones | ⏳ |
 | **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ⏳ |
 | **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ⏳ |
@@ -29,6 +29,85 @@
 - **Cada permiso se prueba dos veces:** en la pantalla (¿oculta?) y en la API pelada con el JWT de ese rol (¿403?). La UI oculta, no protege.
 - **Un test que pasa no prueba nada hasta que se ve fallar sin el fix.** Todo test nuevo de esta auditoría se ejecutó con el arreglo revertido, para confirmar que falla con el error exacto.
 
+
+
+---
+
+## Fase 3 — Contratos (08/09/2026)
+
+**Veredicto: es el módulo más sólido auditado hasta ahora.** Un solo hallazgo, y no está en el cálculo del dinero sino en lo que el sistema deja pasar antes de calcularlo. Las reglas que definen el negocio —interés sobre saldo, meses completos, snapshot legal, reparto del remate— se cumplen al peso, incluidos los ejemplos textuales de `CLAUDE.md`.
+
+### F3-01 · Prestar y gastar no validan que haya efectivo; trasladar sí — MEDIA, abierto
+
+Con el cajón en 240.000 esperados, presté 1.000.000 dos veces. Ambos desembolsos pasaron. Siguiendo desde un esperado ya negativo:
+
+```
+saldo esperado en el cajón: -2.260.000
+
+traslado de 10.000        → 400  "No se puede trasladar más de lo que hay en la cuenta de origen"
+gasto en efectivo 10.000  → 201  (esperado: -2.270.000)
+préstamo de 5.000.000     → 201  (esperado: -7.270.000)
+```
+
+**La misma app dice «no puedes mover 10.000 porque no hay» y a la vez «sí puedes prestar 5.000.000».** Solo los traslados comprueban disponibilidad; las dos operaciones que más plata sacan del cajón —el gasto y el desembolso del préstamo— no.
+
+**Por qué importa:** `expected_cash` queda negativo, que es un imposible físico — el sistema espera que en el cajón haya menos siete millones. Y al cerrar, la política es «sin tolerancia, justificación obligatoria», así que el cajero tiene que justificar a mano un descuadre **que el propio sistema fabricó**. Es el mismo espíritu del hallazgo #21 del backlog (las compras que no generaban movimiento y obligaban a justificar un descuadre inventado), visto desde el otro lado.
+
+**No es obvio que deba bloquearse, y por eso es una pregunta de negocio.** Un argumento razonable para no validar: durante el día entra efectivo por ventas y abonos, y si el registro no es cronológico, validar estricto bloquearía operaciones legítimas. Pero entonces el traslado tampoco debería validar. **La inconsistencia es el hallazgo, más que la decisión.**
+
+Tres salidas posibles: (a) validar en las tres operaciones, (b) no validar en ninguna y dejar que el arqueo lo revele, (c) advertir sin bloquear, como ya se hace con el LTV. La (c) encaja con el criterio que el proyecto ya tomó para un caso análogo.
+
+### Lo que se probó y está bien
+
+**La herencia de parámetros de categoría, incluido el caso sutil.** El árbol se sembró a propósito para exigirla:
+
+| Categoría del artículo | Plazo | Ventana | De dónde salen |
+|---|---|---|---|
+| *Cadena* (n3, sin datos) → *Oro* (n2, sin datos) → *Joyería* (n1) | 4 | 4 | Ambos del **abuelo**: sube dos niveles |
+| *Gama alta* (n3, sin datos) → *Celulares* (n2: plazo) → *Tecnología* (n1: ventana) | 1 | 1 | Plazo del **padre**, ventana del **abuelo** — resolución **por campo**, no por categoría |
+
+Y rechaza lo que debe: mezclar en un contrato artículos con distinto plazo (`400`), o clasificar en categorías de nivel 1 o 2 (`400`).
+
+**El snapshot legal.** Cambié *Joyería* de plazo 4 / ventana 4 a plazo 12 / ventana 9 con un contrato vivo colgando de ella: el contrato conservó 4 y 4; el siguiente contrato nació con 12 y 9.
+
+**La aritmética del interés, con el ejemplo textual de `CLAUDE.md`:**
+
+```
+capital 1.000.000 al 5%   → interés mensual 50.000
+abono de 3 meses (150.000) + 200.000 a capital
+capital 800.000            → interés mensual 40.000     ✓
+```
+
+| Comprobación | Resultado |
+|---|---|
+| `payment-options` con 5 meses adeudados | 5 opciones, interés = N × 50.000, y **solo la que cubre todos los meses** permite capital |
+| Capital con 2 de 5 meses · con 0 meses | `422 PAYMENT_PARTIAL_INTEREST_REJECTED` |
+| Pagar 9 meses debiendo 5 | `400` — «Solo se adeudan 5 mes(es) de interés» |
+| Abono válido | `interest_paid_until` avanza exactamente N meses; el estado se recalcula (salió de prórroga a `active`) |
+| Descuento sobre intereses | `total = interés − descuento`; motivo obligatorio (`400` sin él); no puede superar el interés del abono |
+| Permisos | Asesor abona (`201`) pero no descuenta (`403`); Bodega no abona (`403`) |
+| Saldar el contrato | `paid`, prendas `returned`, y `GET /settlement` pasa de `404` a devolver `settled_at` + `receipt_number` **derivados** del abono que lo saldó |
+| Abonar sobre un contrato `paid` o `auctioned` | `400 CONTRACT_CLOSED` |
+| `PATCH /contracts/{id}` con `status`, `capital_balance`, `principal`, `interest_rate_pct` | Los ignora; solo aplica avalúo y notas. Sin `contracts.edit`, `403` |
+| LTV muy por encima del máximo | `ltv_warning: true` y el contrato se crea igual — advierte, no bloquea |
+| Buscador `?q=` | Encuentra por `legacy_code`, número, nombre y documento. `q='5'` devuelve el contrato #5, **no** todos los clientes con cédula que empieza en 5 (el fix del 02/09 aguanta) |
+
+**El remate, que es el flujo más cruzado del sistema.** Contrato con dos prendas tasadas en 900.000 y 300.000, capital 1.000.000 y 7 meses de interés pendientes:
+
+```
+deuda = 1.000.000 + 7 × 50.000 = 1.350.000
+Cadena grande  (75%)  → artículo draft, costo 1.012.500
+Anillo pequeño (25%)  → artículo draft, costo   337.500
+                                       suma  1.350.000  ✓
+```
+
+Y con ello: contrato y prendas a `auctioned`; `origin='auction'` con `source_contract_id`; **las fotos de la prenda heredadas al artículo** (el fix documentado funciona — sin él, toda pieza rematada quedaba bloqueada esperando que alguien refotografiara algo ya fotografiado); el vínculo navegable en los dos sentidos (`contract_item.inventory_item_id` ↔ `ItemOut.source_contract_id`); y **cero movimiento de caja**, que es lo correcto: el dinero salió cuando se desembolsó el préstamo. Rematar un contrato vigente da `409 CONTRACT_NOT_READY_FOR_AUCTION`, y sin `contracts.auction`, `403`.
+
+**El import de contratos preexistentes.** Crea el contrato con el estado ya recalculado (`in_arrears` desde la primera respuesta), y **el efectivo esperado no se mueve ni un peso** — el préstamo ya se entregó en el sistema viejo. Las cinco validaciones responden con su código propio: `CONTRACT_LEGACY_CODE_EXISTS`, `IMPORT_CAPITAL_EXCEEDS_PRINCIPAL` (por exceso y por cero), `IMPORT_DATES_MISALIGNED`, `400` para una fecha de inicio futura, y `403` sin `contracts.import`.
+
+**La auditoría cubre el ciclo entero:** `create_contract`, `import_contract`, `update_contract`, `create_payment`, `apply_payment_discount` (con monto y motivo) y `auction_contract`.
+
+> **Nota sobre el descuento de intereses (H-04).** Esta fase confirma que del lado del backend está completo y funcionando: calcula, valida, exige motivo y audita en dos entradas. Lo único que falta es la pantalla — ver `frontend-starter/docs/DECISIONES_PENDIENTES.md`.
 
 ---
 
