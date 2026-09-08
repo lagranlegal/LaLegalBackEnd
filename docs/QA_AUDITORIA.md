@@ -16,7 +16,7 @@
 |---|---|---|
 | **0** · Laboratorio | Empresas espejo, usuarios por rol, arsenal de scripts, mapa de endpoints | ✅ 08/09/2026 |
 | **1** · Identidad, permisos y aislamiento | Matriz completa de permisos, roles, ciclo de vida del usuario, multi-tenancy, guards de UI | ✅ 08/09/2026 |
-| **2** · Dinero y caja | Ciclo diario, arqueo sin tolerancia, reapertura, cuentas, traslados, idempotencia | ⏳ siguiente |
+| **2** · Dinero y caja | Ciclo diario, arqueo sin tolerancia, reapertura, cuentas, traslados, idempotencia | 🟡 08/09/2026 — cerrada salvo lo que nace de contratos y ventas, que va con las fases 3-4 |
 | **3** · Contratos | Snapshot legal, herencia de categoría, meses completos, máquina de estados, remate, import | ⏳ |
 | **4** · Inventario y tienda | Códigos y letras, producto vs lote, unidades, transformaciones, kardex, ventas, devoluciones | ⏳ |
 | **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ⏳ |
@@ -28,6 +28,94 @@
 - **Toda aserción de error va contra el `code`, nunca contra el status solo.** Un test que mira el status y no el código no cubre nada — le costó once días de trabajo a un cliente.
 - **Cada permiso se prueba dos veces:** en la pantalla (¿oculta?) y en la API pelada con el JWT de ese rol (¿403?). La UI oculta, no protege.
 - **Un test que pasa no prueba nada hasta que se ve fallar sin el fix.** Todo test nuevo de esta auditoría se ejecutó con el arreglo revertido, para confirmar que falla con el error exacto.
+
+
+---
+
+## Fase 2 — Dinero y caja (08/09/2026)
+
+**Veredicto: el motor de caja hace lo que promete.** El arqueo cuenta solo el efectivo, el descuadre no tiene tolerancia ni de un peso, la sesión cerrada es inmutable, el ciclo diario es único, y las reglas de las cuentas se cumplen por todos sus caminos. Los tres hallazgos son de **mensajes y documentación**, no de dinero mal calculado.
+
+Queda fuera, para las fases 3-4: los movimientos que nacen de un contrato o una venta, y la liquidación de un convenio con saldo real (necesita una venta por Sistecrédito).
+
+### Los dos pendientes de la Fase 1, cerrados
+
+**El histórico de caja no se rodea por ninguna de sus cinco puertas.** Con una sesión cerrada de ayer sembrada en la base, el Asesor (solo `cashbox.view`) accede a su turno de hoy y se le niega todo lo demás:
+
+| Puerta | Admin (`view` + `view_history`) | Asesor (solo `view`) |
+|---|---|---|
+| `/cashbox/sessions/current` · `/today` | 200 | 200 |
+| `/cashbox/sessions/{de hoy}` y su `/report` | 200 | 200 |
+| `/cashbox/sessions` (listado) | 200 | **403** |
+| `/cashbox/sessions/{de ayer}` y su `/report` | 200 | **403** |
+| `/reports/closings` | 200 | **403** |
+| `/reports/closings-breakdown` | 200 | **403** |
+
+El corte es la **fecha de la sesión**, no su estado: la de hoy ya cerrada sigue siendo el turno de quien la cerró. *«Si un permiso se puede rodear por otra URL, no es un permiso»* — se cumple.
+
+**Las cuentas de otra empresa se rechazan también con la caja abierta.** En la Fase 1 el `409 CASH_SESSION_NOT_OPEN` se adelantaba y tapaba la validación; con caja abierta, un gasto o un traslado contra una cuenta de la empresa B responde `404`.
+
+### F2-01 · Con la caja cerrada, un traslado dice "no hay plata" en vez de "no hay caja" — MEDIA, abierto
+
+```
+POST /accounts/transfers  (desde el cajón, con la caja cerrada)
+  → 400 BAD_REQUEST  "No se puede trasladar más de lo que hay en la cuenta de origen."
+     saldo reportado de la cuenta cash: 0.00     (el cajón tenía 250.000)
+```
+
+`API_GUIDE` §13 promete otra cosa: *«Si toca efectivo **exige caja abierta** (`409 CASH_SESSION_NOT_OPEN`)»*. Lo que ocurre es que sin sesión abierta el saldo de una cuenta `cash` se reporta como `0.00` —correcto y documentado— y la validación de saldo se adelanta a la de sesión.
+
+**Por qué importa, y no es cosmético:** es el mismo patrón que costó once días con los contratos. El cajero lee *«no hay plata en la caja»* cuando la caja tiene 250.000 y lo que pasa es que está cerrada, así que va a buscar un problema que no existe. Y el front no puede ofrecer el modal de «Abrir caja», porque ese comportamiento está mapeado a `CASH_SESSION_NOT_OPEN` y acá llega `BAD_REQUEST`.
+
+**Arreglo sugerido:** comprobar la sesión antes que el saldo cuando el origen es una cuenta `cash`.
+
+### F2-02 · Un gasto pagado por transferencia se bloquea si la caja está cerrada — MEDIA-BAJA, abierto
+
+```
+POST /cashbox/expenses  (payment_method: transfer, cuenta bancaria, caja cerrada)
+  → 409 CASH_SESSION_NOT_OPEN
+```
+
+**La documentación se contradice consigo misma:**
+
+- §8 (cashbox): *«Siempre contra la sesión abierta actual — `409 CASH_SESSION_NOT_OPEN` si no hay ninguna»* → coincide con el código.
+- §13 (accounts): *«Quién exige sesión de caja: el **tipo de cuenta**, no la operación… una transferencia no pasa por el cajón y no se bloquea si nadie abrió caja»* → lo contrario.
+
+El código es coherente con el **esquema**: `expense.session_id` es `NOT NULL`, así que un gasto está estructuralmente atado a una sesión y sin ella no hay dónde anclarlo. (`cash_movement.session_id` sí es opcional desde 00026 — la restricción viene solo de `expense`.)
+
+Así que no es un bug de implementación, pero sí una **limitación funcional real**: pagar el arriendo por transferencia un domingo, o antes de abrir la caja, no se puede registrar. El gasto existió; el sistema no lo admite. Decidir si se cambia es de negocio: cambiarlo pide hacer `session_id` opcional y decidir a qué corte contable pertenece un gasto sin sesión.
+
+### F2-03 · La misma clave de idempotencia con otro cuerpo devuelve el documento viejo sin avisar — BAJA, abierto
+
+```
+POST /accounts/transfers  key=K  monto 10.000  → 201  #2  (10.000)
+POST /accounts/transfers  key=K  monto 77.777  → 201  #2  (10.000)   ← el monto pedido se ignora
+```
+
+Devolver el resultado original es el comportamiento seguro y estándar (no duplica ni cobra de más), y el riesgo real es bajo porque el front genera un UUID por acción de usuario. Pero un cliente que reutilice una clave por error recibe un `201` con un monto distinto al que pidió, y nada se lo dice. Un `409` sería más honesto.
+
+### F2-04 · La auditoría se documentaba al revés — BAJA, **corregido**
+
+`API_GUIDE` §11 decía *«paginado por cursor, más reciente al final»*. Es descendente: **lo más reciente va primero**. La frase era cierta cuando el orden era `order by id` sobre UUID aleatorios —o sea, ningún orden— y quedó sin actualizar tras el fix del 08/09. Corregido.
+
+### Lo que se probó y está bien
+
+| Comprobación | Resultado |
+|---|---|
+| El arqueo cuenta **solo** el efectivo | 500.000 base − 200.000 traslado − 50.000 gasto en efectivo = **250.000**; el gasto de 80.000 por transferencia no lo toca |
+| Descuadre de **un peso** sin justificación | `400` — *«Todo descuadre exige justificación (sin tolerancia)»* |
+| Cerrar sin `cashbox.open_close` | `403` |
+| Sesión cerrada = inmutable (cerrar, gastar, trasladar sobre ella) | `409 CASH_SESSION_NOT_OPEN` |
+| Abrir una segunda sesión el mismo día | `409 CASH_SESSION_ALREADY_CLOSED_TODAY` |
+| Reabrir sin `cashbox.reopen` / sin motivo / con motivo | `403` · `422` · `200` |
+| Traslados: origen = destino, desde o hacia `settlement`, más de lo disponible, fecha futura, monto 0 o negativo | Los seis rechazados, con mensaje propio |
+| `settlement` como fuente de pago de un gasto | `400 ACCOUNT_CANNOT_FUND_PAYMENT` |
+| Liquidación: sin saldo, hacia sí misma, recibiendo más de lo liquidado, sin `accounts.settle` | Los cuatro rechazados |
+| Saldos derivados: listado vs. extracto | Coinciden; la `cash` sin saldo corriente (la base se redeclara en cada apertura), `bank` con acumulado |
+| Idempotencia: misma clave dos veces · sin el header | Mismo documento, sin duplicar · `400 IDEMPOTENCY_KEY_REQUIRED` |
+| Auditoría de la fase | `open_session`, `close_session`, `reopen_session`, `create_expense`, `account_transfer`, `create_account`, `create_expense_category` — todas registradas |
+
+> **Nota de método:** la acción del traslado se llama `account_transfer`, no `create_transfer`. Es la misma suposición que ya había fallado antes y que motivó `tests/unit/test_audit_actions.py`. Confirma que el nombre de una acción hay que leerlo del código, no deducirlo del patrón.
 
 ---
 

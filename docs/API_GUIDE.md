@@ -339,7 +339,7 @@ La venta ocurrió, hubo ingreso, y días o semanas después sale plata (o un com
 
 ## 11. Módulo `audit`
 
-Solo lectura sobre `audit_log` (inmutable — la insertan los demás módulos en su propia transacción, nunca este). Paginado por cursor, más reciente al final.
+Solo lectura sobre `audit_log` (inmutable — la insertan los demás módulos en su propia transacción, nunca este). Paginado por cursor, **más reciente primero**: keyset por `(created_at, id)` descendente — la fecha manda y el id desempata, así que dos filas del mismo instante ni se pierden ni se repiten al paginar. (Hasta el 08/09/2026 este documento decía "más reciente al final", que era cierto cuando el orden era `order by id` sobre UUID aleatorios — o sea, ningún orden. Ver `docs/QA_AUDITORIA.md`.)
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
