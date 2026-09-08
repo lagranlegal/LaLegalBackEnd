@@ -3,12 +3,12 @@
 Regla del proyecto: "un codigo de error es un contrato entre dos capas".
 Todo assert de error va contra el campo `code` del envelope {code,message,details}.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import pathlib
-import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -106,9 +106,7 @@ class Client:
     token: str
     calls: list[Result] = field(default_factory=list)
 
-    def request(
-        self, method: str, path: str, *, idem: bool | str = False, **kw: Any
-    ) -> Result:
+    def request(self, method: str, path: str, *, idem: bool | str = False, **kw: Any) -> Result:
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
         if idem:
             headers["Idempotency-Key"] = idem if isinstance(idem, str) else str(uuid.uuid4())

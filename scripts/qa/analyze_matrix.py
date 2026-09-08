@@ -4,7 +4,7 @@ from collections import defaultdict
 
 res = json.load(open(pathlib.Path(__file__).parent / "_run" / "matrix_results.json"))
 bad = [r for r in res if not r["ok"]]
-print(f"{len(res)} comprobaciones · {len(res)-len(bad)} coinciden · {len(bad)} discrepan\n")
+print(f"{len(res)} comprobaciones · {len(res) - len(bad)} coinciden · {len(bad)} discrepan\n")
 
 if bad:
     # agrupar por endpoint
@@ -16,7 +16,12 @@ if bad:
         print(f"\n{ep}   (permiso declarado: {perm})")
         for r in rows:
             esperado = "403" if r["expected_403"] else "NO 403"
-            print(f"    {r['actor']:10} esperado {esperado:6} → obtuvo {r['status']} {r['code'] or ''}")
+            print(
+                print(
+                    f"    {r['actor']:10} esperado {esperado:6} → "
+                    f"obtuvo {r['status']} {r['code'] or ''}"
+                )
+            )
 
 # estadistica de codigos devueltos cuando SI tiene permiso
 print("\n\n=== Códigos devueltos cuando el rol SÍ tiene el permiso ===")

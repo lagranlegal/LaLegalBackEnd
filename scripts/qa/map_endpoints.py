@@ -3,7 +3,10 @@
 Detecta el hueco que CLAUDE.md llama "bug de revisión": un endpoint sin
 Depends(require_permission(...)).
 """
-import ast, json, pathlib
+
+import ast
+import json
+import pathlib
 
 OUT = pathlib.Path(__file__).parent / "_run" / "endpoint_map.json"
 OUT.parent.mkdir(exist_ok=True)
@@ -56,18 +59,23 @@ for f in sorted(BE.glob("app/modules/*/router.py")):
             if guard is None:
                 if "require_permission(" in src:
                     i = src.index('require_permission("') + len('require_permission("')
-                    guard = src[i:src.index('"', i)]
+                    guard = src[i : src.index('"', i)]
                 elif "require_super_admin" in src:
                     guard = "SUPER_ADMIN"
                 elif "get_current_user" in src or "CurrentUser" in src:
                     guard = "AUTENTICADO"
                 else:
                     guard = None
-            rows.append({
-                "module": mod, "method": method, "path": prefix + path,
-                "permission": guard, "fn": node.name,
-                "idempotency": "require_idempotency_key" in src,
-            })
+            rows.append(
+                {
+                    "module": mod,
+                    "method": method,
+                    "path": prefix + path,
+                    "permission": guard,
+                    "fn": node.name,
+                    "idempotency": "require_idempotency_key" in src,
+                }
+            )
 
 rows.sort(key=lambda r: (r["module"], r["path"], r["method"]))
 json.dump(rows, open(OUT, "w"), indent=2, ensure_ascii=False)
@@ -76,9 +84,12 @@ print(f"{len(rows)} endpoints mapeados\n")
 sin = [r for r in rows if r["permission"] is None]
 auth_only = [r for r in rows if r["permission"] == "AUTENTICADO"]
 print(f"SIN ningún guard        : {len(sin)}")
-for r in sin: print("   ", r["method"], r["path"], "→", r["fn"])
+for r in sin:
+    print("   ", r["method"], r["path"], "→", r["fn"])
 print(f"\nSolo AUTENTICADO (sin permiso): {len(auth_only)}")
-for r in auth_only: print("   ", r["method"], r["path"], "→", r["fn"])
-print(f"\nSUPER_ADMIN: {sum(1 for r in rows if r['permission']=='SUPER_ADMIN')}")
-print(f"Con permiso: {sum(1 for r in rows if r['permission'] not in (None,'AUTENTICADO','SUPER_ADMIN'))}")
+for r in auth_only:
+    print("   ", r["method"], r["path"], "→", r["fn"])
+print(f"\nSUPER_ADMIN: {sum(1 for r in rows if r['permission'] == 'SUPER_ADMIN')}")
+n_perm = sum(1 for r in rows if r["permission"] not in (None, "AUTENTICADO", "SUPER_ADMIN"))
+print(f"Con permiso: {n_perm}")
 print(f"Con Idempotency-Key: {sum(1 for r in rows if r['idempotency'])}")
