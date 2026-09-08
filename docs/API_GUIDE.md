@@ -14,6 +14,19 @@
   {"items": [...], "next_cursor": "base64-del-último-id-o-null"}
   ```
   Pedir la página siguiente = repetir la misma request con `cursor=<next_cursor>` de la respuesta anterior. `next_cursor: null` significa que no hay más.
+
+  **Excepción: trece endpoints devuelven un array plano**, sin envoltorio ni cursor, porque son catálogos acotados por naturaleza y el consumidor siempre los quiere enteros (armar el árbol de categorías, pintar la matriz de permisos, llenar un selector):
+
+  ```
+  GET /catalogs/categories          GET /identity/roles
+  GET /accounts                     GET /identity/roles/{id}/permissions   (y su PUT)
+  GET /platform/plans               GET /identity/permissions
+  GET /cashbox/expense-categories   GET /company/document-templates
+  GET /contracts/ready-for-auction  GET /inventory/products/{id}/lots
+  GET /sales/{id}/returns           GET /inventory/products/{id}/purchases
+  ```
+
+  No aceptan `cursor` ni `limit`: **no tienen tope**. Para los que crecen con el uso —`ready-for-auction`, los lotes de un producto— vale tenerlo presente antes de que una empresa grande los haga pesados. El shape exacto de cada uno, como siempre, sale de `/openapi.json`.
 - Errores: forma uniforme, ver `docs/ARCHITECTURE.md` §7 y el catálogo de códigos en §12 de este documento.
 
 ## 2. Cómo autenticarse (flujo completo para el front)
@@ -65,7 +78,7 @@ Gestión de empresas/suscripciones. Nada de esto es visible ni accesible para us
 | `GET` | `/api/v1/platform/companies/{id}` | Detalle de una empresa. |
 | `POST` | `/api/v1/platform/companies/{id}/suspend` | Suspende (bloquea login/API, no borra datos). |
 | `POST` | `/api/v1/platform/companies/{id}/activate` | Reactiva. |
-| `POST` | `/api/v1/platform/companies/{id}/subscription/extend` | Body `{new_expires_at, notes?}` → 204. |
+| `POST` | `/api/v1/platform/companies/{id}/subscription/extend` | Body `{new_expires_at, notes?, amount?}` → 204. **Renueva también una suscripción `expired`**, y al hacerlo la vuelve a poner `active` — es el caso normal, el cliente que paga tarde. Hasta el 08/09/2026 buscaba solo la `active`, así que en cuanto el job nocturno marcaba una vencida el super-admin recibía `404` y no quedaba **ningún** camino en la API para devolverle el acceso a esa empresa. `404 NOT_FOUND` solo si la empresa no tiene ninguna suscripción registrada. |
 | `GET` | `/api/v1/platform/companies/{id}/subscription/events` | Historial COMERCIAL: altas, renovaciones (monto y notas), suspensiones, reactivaciones, vencimientos. |
 | `GET` | `/api/v1/platform/companies/{id}/audit-log` | Agregado 27/08/2026. Historial de SEGURIDAD (roles, remates, anulaciones, cierres) — distinto del comercial de arriba. `audit_log` tiene RLS forzado; sin este endpoint un super-admin nunca podía ver el de una empresa que no fuera la suya, sin importar `?module=` en `GET /audit-log`. Mismos filtros que ese endpoint tenant-scoped (`?module=`, `?entity_type=`, `?entity_id=`, `?user_id=`), paginado por cursor. `company_id` siempre explícito en el `WHERE` de la query, nunca confiado al bypass de RLS de la sesión de plataforma. |
 | `GET` | `/api/v1/platform/plans` | Catálogo de planes. |
@@ -172,7 +185,7 @@ Reglas de `code_letter` (1–3 caracteres, usado para armar el código de artíc
 - Único entre **categorías hermanas** (mismo `parent_id`, incluyendo raíz — el `UNIQUE` de la migración no cubre raíz porque Postgres no compara `NULL` consigo mismo; el backend sí lo valida) → `409 CONFLICT`.
 - Único por **empresa** entre proveedores (sin relación con categorías) → `409 CONFLICT`.
 - **Se normaliza a mayúscula y solo admite A-Z** (00039) → `422 VALIDATION_ERROR`. El índice de unicidad distingue mayúsculas, así que sin esto un proveedor `r` y otro `R` convivían como dos distintos y generaban códigos que solo se diferencian por algo invisible en una etiqueta impresa. Nada de `Ñ` ni dígitos: el código termina escrito a mano en un buscador.
-- **`R`, `P` y `T` están reservadas para PROVEEDORES** (00039) → `422 VALIDATION_ERROR`. Son las que el emisor de códigos usa como sufijo cuando no hay proveedor: remate, propio, transformado. Sin la reserva, un proveedor "Rodríguez" con letra `R` producía artículos indistinguibles de los rematados — y el remate es el caso donde el origen tiene consecuencias legales, porque esa pieza fue la prenda de un cliente. **Solo se valida al escribir**: los proveedores que ya tuvieran una de esas letras siguen funcionando, porque prohibirlas hacia atrás rompería códigos ya impresos y pegados a la mercancía.
+- **`R`, `P`, `T` y `D` están reservadas para PROVEEDORES** (00039, `D` desde 00044) → `422 VALIDATION_ERROR`. Son las que el emisor de códigos usa como sufijo cuando no hay proveedor: remate, propio, transformado y **devuelto** (el lote que nace de una devolución de cliente cuando el original ya no se puede reabrir). Sin la reserva, un proveedor "Rodríguez" con letra `R` producía artículos indistinguibles de los rematados — y el remate es el caso donde el origen tiene consecuencias legales, porque esa pieza fue la prenda de un cliente. **Solo se valida al escribir**: los proveedores que ya tuvieran una de esas letras siguen funcionando, porque prohibirlas hacia atrás rompería códigos ya impresos y pegados a la mercancía.
 - La reserva **no aplica a categorías**: sus letras forman el *prefijo* del código (`JOC0001`) y la de origen el *sufijo* (`-01R`), así que no colisionan y "Relojes" conserva su inicial.
 - Árbol de máximo 3 niveles: crear un hijo de una categoría nivel 3 → `400 BAD_REQUEST`.
 
@@ -268,7 +281,7 @@ Reúne cuatro clases de movimiento (`entry`, `exit`, `sale`, `sale_void`), y **u
 
 **La valoración es POR LOTE, nunca promediada** (identificación específica, NIIF): `running_value` **no** se deriva de `running_quantity` — tres unidades valen distinto según de qué lote salgan. Por eso cada línea trae `item_id`/`item_code`.
 
-Sin `from_date` devuelve la historia entera, al revés que `GET /accounts/{id}/statement` (últimos 30 días): en un extracto se busca conciliar el mes, en un kardex de dónde salió el saldo. Lo anterior al rango se comprime en `opening_quantity`/`opening_value`.
+Sin `from_date` devuelve la historia entera, al revés que `GET /accounts/{id}/statement`, que **exige** el rango: en un extracto se busca conciliar un período concreto, en un kardex de dónde salió el saldo. Lo anterior al rango se comprime en `opening_quantity`/`opening_value`.
 
 **Trazabilidad de vuelta** (00039). `inventory_item.source_transformation_id` es el **tercer puntero de origen**, junto a `supplier_id` y `source_contract_id`; los tres son excluyentes y dicen respectivamente que la mercancía se compró, se remató o se produjo acá. Ninguno de los tres = mercancía propia sin documento externo (inventario inicial o sobrante de conteo).
 
@@ -363,7 +376,7 @@ El **saldo se deriva** de `cash_movement`, nunca se guarda, y se calcula distint
 | `GET` | `/api/v1/accounts` | `accounts.view` | Lista con saldo. `?include_inactive=true` para ver también las desactivadas. |
 | `POST` | `/api/v1/accounts` | `accounts.manage` | Body `{name, type, reference?, is_default?, opening_balance?}`. Marcar `is_default` desmarca la anterior de ese tipo (hay un índice único parcial). |
 | `PATCH` | `/api/v1/accounts/{id}` | `accounts.manage` | Renombrar, cambiar `reference`, `is_default` o `active`. El **tipo no se edita**: cambiarlo reinterpretaría todos los movimientos históricos de la cuenta. |
-| `GET` | `/api/v1/accounts/{id}/statement` | `accounts.view` | **Extracto** de la cuenta (`?from_date=`/`?to_date=`): saldo inicial, cada movimiento con su saldo corriente y saldo final, del más viejo al más nuevo. Para conciliar contra el extracto real del banco. En cuentas de **efectivo** `has_running_balance: false` y los saldos en `null` — la base del cajón se redeclara en cada apertura y no es un movimiento, así que acumular el histórico no daría un saldo; ahí la verificación es el arqueo. Los movimientos se devuelven igual. |
+| `GET` | `/api/v1/accounts/{id}/statement` | `accounts.view` | **Extracto** de la cuenta. `from_date` y `to_date` son **obligatorios** (sin ellos, `422 VALIDATION_ERROR` con `missing` en ambos — no hay rango por defecto): saldo inicial, cada movimiento con su saldo corriente y saldo final, del más viejo al más nuevo. Para conciliar contra el extracto real del banco. En cuentas de **efectivo** `has_running_balance: false` y los saldos en `null` — la base del cajón se redeclara en cada apertura y no es un movimiento, así que acumular el histórico no daría un saldo; ahí la verificación es el arqueo. Los movimientos se devuelven igual. |
 | `POST` | `/api/v1/accounts/{id}/settle` | `accounts.settle` + `Idempotency-Key` | Liquidar un convenio. Body `{to_account_id, amount_settled, amount_received, notes?}`. Devuelve `{settled, received, commission, commission_pct, new_pending_balance}`. Genera dos movimientos (sale de la `settlement`, entra a la destino). La comisión se **deriva** (`amount_settled − amount_received`) y **no genera movimiento propio**: no es plata que salió, es plata que nunca llegó. |
 
 **Cuál cuenta se usa.** Todas las operaciones de dinero (`POST /sales`, `/contracts`, `/contracts/{id}/payments`, `/cashbox/expenses`, `/inventory/entries`, `/inventory/entries/{id}/pay`) aceptan `account_id` opcional. Si no viene, se usa la predeterminada del tipo que implica el `payment_method` (`cash` → la `cash` por defecto; `transfer`/`other` → la `bank` por defecto).
@@ -412,7 +425,15 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `SUBSCRIPTION_EXPIRED` | 402 | La empresa no tiene suscripción activa. |
 | `NOT_FOUND` | 404 | El recurso no existe (o no pertenece a tu empresa — mismo código, no se revela cuál). |
 | `CONFLICT` / `LAST_ADMIN_SAFEGUARD` | 409 | Ver salvaguarda del último admin arriba. |
-| `CASH_SESSION_NOT_OPEN` | 409 | Se intentó desembolsar/cobrar/registrar un gasto sin una sesión de caja abierta. |
+| `CANNOT_DEACTIVATE_SELF` | 409 | Un usuario intentó desactivar su propia cuenta. Se valida en el backend, no solo en la UI: ocultar el botón no es protección. |
+| `USER_ALREADY_INVITED` | 409 | Se invitó otra vez a alguien que sigue en `invited`. Reinvitar anularía el enlace anterior; el mensaje manda a «Generar enlace de activación» desde su ficha. |
+| `USER_ALREADY_EXISTS` | 409 | Ese correo ya es un usuario de **esta** empresa (activo o inactivo). Si está inactivo, el camino es reactivarlo. |
+| `EMAIL_ALREADY_REGISTERED` | 409 | Ese correo ya tiene cuenta en la plataforma, en **otra** empresa. Nunca se confirma en cuál (aislamiento entre tenants). |
+| `AUTH_ACCOUNT_MISSING` | 409 | La fila de `app_user` existe pero su cuenta de Supabase Auth fue borrada desde el panel. Es un dato descuadrado, no una falla: el mensaje explica cómo repararlo. |
+| `TEMPLATE_IS_ACTIVE` | 409 | Se intentó borrar la plantilla de documento activa. Hay que activar otra primero — si no, el documento se queda sin nada que renderizar. |
+| `INVITE_RATE_LIMITED` | 429 | Se agotó la cuota de correos del SMTP incluido de Supabase. No es una falla: se espera, o se usa «Generar enlace», que no consume cuota. |
+| `AUTH_ADMIN_ERROR` | 502 | Fallo genérico de la API Admin de Supabase Auth al invitar o generar un enlace. Los casos conocidos ya tienen su propio 409 arriba; este es lo que queda. |
+| `CASH_SESSION_NOT_OPEN` | 409 · **404** | Se intentó desembolsar/cobrar/registrar un gasto sin una sesión de caja abierta. **Excepción deliberada:** en `GET /cashbox/sessions/current` viaja con **404**, porque ahí "no hay caja abierta" no es un rechazo sino el estado consultado. El front distingue por el `code`, nunca por el status — cuando ese endpoint devolvía `NOT_FOUND` a secas, la franja global decía "No se pudo consultar el estado de la caja" y toda la rama de "Caja cerrada" era código muerto (03/09/2026). |
 | `CASH_SESSION_ALREADY_OPEN` | 409 | Se intentó abrir una sesión (o reabrir una) habiendo ya otra abierta para esa caja. |
 | `CASH_SESSION_ALREADY_CLOSED_TODAY` | 409 | Se intentó abrir una sesión el mismo día en que ya se cerró una (un solo ciclo diario). |
 | `PAYMENT_PARTIAL_INTEREST_REJECTED` | 422 | Abono con `capital_amount` sin cubrir todos los meses de interés adeudados. |

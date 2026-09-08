@@ -139,6 +139,34 @@ async def get_active_subscription(db: AsyncSession, *, company_id: UUID) -> Row[
     return result.first()
 
 
+async def get_subscription_for_renewal(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
+    """La suscripción sobre la que aplica una renovación, ESTÉ O NO vigente.
+
+    Distinta de `get_active_subscription` a propósito: renovar es justamente
+    lo que se hace con una suscripción **vencida** — el cliente pagó tarde y
+    el super-admin le extiende la fecha. Mientras esto filtró por
+    `status = 'active'`, una empresa que el job nocturno marcaba `expired`
+    quedaba bloqueada para siempre: `extend` respondía 404 y no había ningún
+    otro camino en la API para devolverle el acceso.
+
+    Prioriza la vigente (una empresa no debería tener dos, pero el orden lo
+    deja determinístico) y si no hay, toma la más reciente por vencimiento.
+    """
+    result = await db.execute(
+        text(
+            """
+            select id, company_id, plan_id, status, expires_at
+            from public.subscription
+            where company_id = :company_id
+            order by (status = 'active') desc, expires_at desc
+            limit 1
+            """
+        ),
+        {"company_id": str(company_id)},
+    )
+    return result.first()
+
+
 async def get_active_subscription_with_plan(
     db: AsyncSession, *, company_id: UUID
 ) -> Row[Any] | None:
@@ -168,7 +196,8 @@ async def extend_subscription(
         text(
             """
             update public.subscription
-            set expires_at = :new_expires_at, extended_by = :extended_by, notes = :notes
+            set expires_at = :new_expires_at, extended_by = :extended_by, notes = :notes,
+                status = 'active'
             where id = :id
             """
         ),

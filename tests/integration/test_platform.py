@@ -677,3 +677,54 @@ async def _role_id_de(company_id: uuid.UUID, nombre: str) -> uuid.UUID:
                 ).scalar_one()
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_expired_subscription_can_still_be_renewed(
+    client: TestClient, created_company: dict, super_admin_token: str
+) -> None:
+    """Una suscripción vencida se renueva; si no, la empresa queda muerta.
+
+    `extend_subscription` buscaba la suscripción con `status = 'active'`, así
+    que en cuanto el job nocturno marcaba una `expired` el super-admin
+    recibía un 404 y **no existía ningún otro camino en la API** para
+    devolverle el acceso a esa empresa: había que entrar a la base a mano.
+
+    Es el flujo comercial más normal del producto —el cliente paga tarde y se
+    le renueva— y estuvo roto sin que nadie lo notara porque hacía falta una
+    suscripción `expired` para llegar hasta él, y el job que las produce no
+    estaba corriendo en dev.
+    """
+    headers = {"Authorization": f"Bearer {super_admin_token}"}
+    company_id = created_company["id"]
+
+    async with AsyncSessionLocal() as db, db.begin():
+        await db.execute(
+            text("update public.subscription set status = 'expired' where company_id = :cid"),
+            {"cid": company_id},
+        )
+
+    response = client.post(
+        f"/api/v1/platform/companies/{company_id}/subscription/extend",
+        headers=headers,
+        json={"new_expires_at": "2099-12-31", "notes": "el cliente pagó tarde"},
+    )
+    assert response.status_code == 204, response.text
+
+    # Renovar tiene que devolver el acceso, no solo mover la fecha: con el
+    # `status` en `expired`, `get_current_user` sigue cortando con 402.
+    async with AsyncSessionLocal() as db:
+        row = (
+            await db.execute(
+                text("select status, expires_at from public.subscription where company_id = :cid"),
+                {"cid": company_id},
+            )
+        ).first()
+    assert row is not None
+    assert row._mapping["status"] == "active"
+    assert str(row._mapping["expires_at"]) == "2099-12-31"
+
+    # Y la empresa vuelve a mostrar su plan en el panel.
+    detalle = client.get(f"/api/v1/platform/companies/{company_id}", headers=headers).json()
+    assert detalle["subscription_expires_at"] == "2099-12-31"
+    assert detalle["plan_code"] == "full"

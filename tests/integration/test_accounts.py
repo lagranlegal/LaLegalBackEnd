@@ -767,3 +767,61 @@ def test_statement_rejects_an_inverted_range(client: TestClient, accounts_tenant
         params={"from_date": "2026-08-31", "to_date": "2026-08-01"},
     )
     assert r.status_code == 400
+
+
+def test_transfer_history_can_actually_be_listed(client: TestClient, accounts_tenant: dict) -> None:
+    """`GET /accounts/transfers` respondía 500 SIEMPRE, desde 00032.
+
+    La cláusula del cursor estaba escrita como `(:cursor is null or t.id >
+    :cursor)`, y así asyncpg no puede inferir el tipo del parámetro: aparece
+    primero en `is null`, sin ningún contexto que lo tipe, y Postgres corta
+    con `could not determine data type of parameter $2`.
+
+    No lo vio nadie porque el endpoint aparecía nueve veces en este archivo
+    y las nueve eran POST: ni un solo GET al listado en toda la suite. Un
+    endpoint puede estar roto al 100% y tener "cobertura" si lo que se
+    ejercita es su vecino.
+    """
+    token = accounts_tenant["token"]
+    cuentas = {a["type"]: a for a in _accounts(client, token)}
+    caja = cuentas["cash"]
+    origen = _create(
+        client, token, name="Banco para el histórico", type="bank", opening_balance="900000.00"
+    )
+
+    for monto in ("100000.00", "50000.00"):
+        creado = client.post(
+            "/api/v1/accounts/transfers",
+            headers=_headers(token),
+            json={
+                "from_account_id": origen["id"],
+                "to_account_id": caja["id"],
+                "amount": monto,
+            },
+        )
+        assert creado.status_code == 201, creado.text
+
+    r = client.get("/api/v1/accounts/transfers", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    montos = [línea["amount"] for línea in body["items"]]
+    assert "100000.00" in montos and "50000.00" in montos
+    # Los nombres de las dos puntas vienen resueltos, que es el motivo del JOIN.
+    assert all(línea["from_account_name"] and línea["to_account_name"] for línea in body["items"])
+
+    # Y con cursor, que es la otra mitad del bug: el mismo parámetro se usaba
+    # dos veces en la cláusula rota.
+    primera = client.get(
+        "/api/v1/accounts/transfers",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"limit": 1},
+    )
+    assert primera.status_code == 200, primera.text
+    assert primera.json()["next_cursor"]
+    siguiente = client.get(
+        "/api/v1/accounts/transfers",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"limit": 1, "cursor": primera.json()["next_cursor"]},
+    )
+    assert siguiente.status_code == 200, siguiente.text
+    assert siguiente.json()["items"][0]["id"] != primera.json()["items"][0]["id"]

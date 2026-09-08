@@ -266,11 +266,14 @@ async def extend_subscription(
     company = await repository.get_company(db, company_id=company_id)
     if company is None:
         raise NotFoundError("La empresa no existe.")
-    subscription = await repository.get_active_subscription(db, company_id=company_id)
+    # A propósito NO se exige que esté vigente: renovar es lo que se hace con
+    # una suscripción vencida. Ver `get_subscription_for_renewal`.
+    subscription = await repository.get_subscription_for_renewal(db, company_id=company_id)
     if subscription is None:
-        raise NotFoundError("La empresa no tiene una suscripción activa.")
+        raise NotFoundError("La empresa no tiene ninguna suscripción registrada.")
 
     before_expires_at = subscription._mapping["expires_at"]
+    before_status = subscription._mapping["status"]
     await repository.extend_subscription(
         db,
         subscription_id=subscription._mapping["id"],
@@ -286,8 +289,8 @@ async def extend_subscription(
         action="extend_subscription",
         entity_type="subscription",
         entity_id=subscription._mapping["id"],
-        before={"expires_at": str(before_expires_at)},
-        after={"expires_at": str(new_expires_at)},
+        before={"expires_at": str(before_expires_at), "status": before_status},
+        after={"expires_at": str(new_expires_at), "status": "active"},
     )
     # El audit_log solo guarda `expires_at`, así que las `notes` de cada
     # extensión —el campo donde el super-admin anota cómo pagó el cliente— se

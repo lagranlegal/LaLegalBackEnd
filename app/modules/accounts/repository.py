@@ -226,22 +226,28 @@ async def get_transfer(db: AsyncSession, *, company_id: UUID, transfer_id: UUID)
 async def list_transfers(
     db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
 ) -> list[Row[Any]]:
-    result = await db.execute(
-        text(
-            """
-            select t.id, t.number, t.amount, t.transfer_date, t.notes, t.created_at,
-                   t.from_account_id, t.to_account_id,
-                   fa.name as from_account_name, ta.name as to_account_name
-            from public.account_transfer t
-            join public.account fa on fa.id = t.from_account_id
-            join public.account ta on ta.id = t.to_account_id
-            where t.company_id = :cid and (:cursor is null or t.id > :cursor)
-            order by t.id
-            limit :limit
-            """
-        ),
-        {"cid": str(company_id), "cursor": str(cursor) if cursor else None, "limit": limit + 1},
-    )
+    # El cursor se agrega al WHERE solo si viene, igual que en el resto de
+    # los repositorios (p. ej. `sales.list_sales`). Estuvo escrito como
+    # `(:cursor is null or t.id > :cursor)`, y así asyncpg no podía inferir
+    # el tipo del parámetro —aparece primero en `is null`, sin contexto— y
+    # Postgres respondía `could not determine data type of parameter $2`:
+    # el endpoint devolvía 500 SIEMPRE, con o sin cursor, desde 00032.
+    query = """
+        select t.id, t.number, t.amount, t.transfer_date, t.notes, t.created_at,
+               t.from_account_id, t.to_account_id,
+               fa.name as from_account_name, ta.name as to_account_name
+        from public.account_transfer t
+        join public.account fa on fa.id = t.from_account_id
+        join public.account ta on ta.id = t.to_account_id
+        where t.company_id = :cid
+    """
+    params: dict[str, Any] = {"cid": str(company_id), "limit": limit + 1}
+    if cursor is not None:
+        query += " and t.id > :cursor"
+        params["cursor"] = str(cursor)
+    query += " order by t.id limit :limit"
+
+    result = await db.execute(text(query), params)
     return list(result.all())
 
 

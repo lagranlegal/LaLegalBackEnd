@@ -87,10 +87,15 @@ on conflict (code) do nothing;
 -- el admin de cada empresa puede modificarla en cualquier momento):
 --   Admin:      TODOS los permisos.
 --   Moderador:  todos MENOS inventory.create, inventory.exit,
+--               inventory.pay_purchase, inventory.transform,
 --               identity.manage_users, identity.manage_roles,
 --               cashbox.open_close, cashbox.reopen, payments.apply_discount,
 --               sales.apply_discount, sales.return_override_time_limit,
+--               accounts.manage, accounts.settle, accounts.transfer,
 --               audit.view, company.configure, contracts.import.
+--               (17 exclusiones de 36 permisos → 19. La lista viva es
+--               `_MODERADOR_EXCLUDED_CODES` en platform/service.py, con el
+--               porqué de cada una; este comentario se había quedado en 12.)
 --   Asesor:     contracts.view/create, payments.create, customers.*,
 --               inventory.view, sales.view/create, catalogs.view,
 --               cashbox.view, accounts.view.

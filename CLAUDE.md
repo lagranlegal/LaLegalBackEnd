@@ -53,8 +53,9 @@ La **letra de origen** dice de dónde salió la pieza, y se deriva de sus punter
 | `R` | salió de un remate | `source_contract_id` |
 | `T` | la produjimos fundiendo, despiezando o armando (00039) | `source_transformation_id` |
 | `P` | propio: inventario inicial o sobrante de conteo (00033) | ninguno |
+| `D` | volvió en una devolución de cliente y su lote original ya no se podía reabrir (00044) | `source_return_id` |
 
-Los tres punteros son **excluyentes**. `R`, `P` y `T` están reservadas: un proveedor no puede tomarlas (se valida al escribir, no hacia atrás — hay códigos impresos).
+Los punteros son **excluyentes** entre sí. `R`, `P`, `T` y `D` están reservadas: un proveedor no puede tomarlas (se valida al escribir, no hacia atrás — hay códigos impresos).
 
 ### Caja (acto único diario)
 - Una sesión por día por caja (fase 1: una caja por empresa, base ÚNICA de efectivo). Sin sesión `open` → toda operación de dinero se rechaza.

@@ -37,9 +37,19 @@
 # vez al día). En cambio se crea como una Fly Machine programada,
 # independiente del fleet que gestiona `fly deploy`, apuntando a la misma
 # imagen ya construida:
-#   fly machine run registry.fly.io/compraventa-backend-dev:latest \
+#   IMG=$(fly image show -a compraventa-backend-dev --json | python3 -c \
+#     "import json,sys; i=json.load(sys.stdin)[0]; print(i['Registry']+'/'+i['Repository']+':'+i['Tag'])")
+#   fly machine run "$IMG" \
 #     --app compraventa-backend-dev --region sjc --vm-size shared-cpu-1x \
 #     --schedule daily -- python -m app.jobs.nightly
+#
+# (`:latest` NO existe en el registry de Fly: las imágenes se publican con
+# el tag `deployment-<id>` del deploy que las construyó, así que el comando
+# con `:latest` falla con "Could not find image" — comprobado el 08/09/2026.
+# De ahí el `fly image show` de arriba, que resuelve la imagen que está
+# corriendo AHORA. Corolario: la máquina del job queda clavada a esa
+# imagen y NO se actualiza con los `fly deploy` siguientes; tras un cambio
+# que la afecte hay que recrearla.
 #
 # (el `--` importa: sin él, flyctl interpreta el `-m` de `python -m` como su
 # propia flag `--metadata` y falla; con el comando entre comillas como un

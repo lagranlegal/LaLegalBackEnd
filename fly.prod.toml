@@ -28,9 +28,19 @@
 # Job nocturno (mismo criterio que fly.dev.toml: NO va en [processes] para
 # no dejarlo corriendo 24/7 — se crea como Fly Machine programada aparte,
 # una vez que el proceso `web` ya esté desplegado):
-#   fly machine run registry.fly.io/compraventa-backend-prod:latest \
+#   IMG=$(fly image show -a compraventa-backend-prod --json | python3 -c \
+#     "import json,sys; i=json.load(sys.stdin)[0]; print(i['Registry']+'/'+i['Repository']+':'+i['Tag'])")
+#   fly machine run "$IMG" \
 #     --app compraventa-backend-prod --region gru --vm-size shared-cpu-1x \
 #     --schedule daily -- python -m app.jobs.nightly
+#
+# (`:latest` NO existe en el registry de Fly: las imágenes se publican con
+# el tag `deployment-<id>` del deploy que las construyó, así que el comando
+# con `:latest` falla con "Could not find image" — comprobado el 08/09/2026.
+# De ahí el `fly image show` de arriba, que resuelve la imagen que está
+# corriendo AHORA. Corolario: la máquina del job queda clavada a esa
+# imagen y NO se actualiza con los `fly deploy` siguientes; tras un cambio
+# que la afecte hay que recrearla.
 #
 # (el `--` importa: sin él, flyctl interpreta el `-m` de `python -m` como su
 # propia flag `--metadata` y falla)
