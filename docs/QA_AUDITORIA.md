@@ -19,7 +19,7 @@
 | **2** · Dinero y caja | Ciclo diario, arqueo sin tolerancia, reapertura, cuentas, traslados, idempotencia | 🟡 08/09/2026 — cerrada salvo lo que nace de contratos y ventas, que va con las fases 3-4 |
 | **3** · Contratos | Snapshot legal, herencia de categoría, meses completos, máquina de estados, remate, import | ✅ 08/09/2026 |
 | **4** · Inventario y tienda | Códigos y letras, producto vs lote, unidades, transformaciones, kardex, ventas, devoluciones | ⏳ |
-| **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ⏳ |
+| **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ✅ 08/09/2026 |
 | **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ⏳ |
 | **7** · Regresión | Convertir lo encontrado en suite automatizada | ⏳ |
 
@@ -31,6 +31,84 @@
 
 
 
+
+
+---
+
+## Fase 5 — El círculo completo (08/09/2026)
+
+**Veredicto: el círculo cierra.** Cada peso movido en las fases 2, 3 y 4 aparece con el mismo número en la caja, en los reportes y en la auditoría, y las cuatro reglas contables que este proyecto pagó caras se cumplen. **Un solo hallazgo: una asimetría entre dos definiciones de ingreso dentro del mismo estado de resultados.**
+
+### El arqueo cuadra al peso
+
+```
+base                                          500.000
++ pawn  in  efectivo   (interés + capital)  1.340.000
+− pawn  out efectivo   (préstamos)          8.500.000
++ store in  efectivo   (venta)                180.000
+− store out efectivo   (anulación, compras,
+                        devolución)          2.490.000
+− general out efectivo (gastos, traslados)     270.000
+                                            ──────────
+esperado en el cajón                       −9.240.000   ✓ exacto
+```
+
+Y cuenta **solo el efectivo**: quedan fuera los 80.000 del gasto por transferencia, los 3.000.000 cobrados por Sistecrédito y los 1.400.000 que entraron al banco al liquidar.
+
+### Las cuatro reglas contables
+
+| Regla | Cómo se comprobó |
+|---|---|
+| **El interés es ingreso; el capital recuperado no** | `total_revenue` = ventas + intereses. Los 8.500.000 desembolsados y los 1.050.000 recuperados van **fuera** del resultado, en campos propios |
+| **Ingreso no es ganancia** | `gross_profit` = 3.480.000 − 2.145.000 de costo de ventas = 1.335.000; luego − 140.000 de gastos = 1.195.000 |
+| **Una cuenta por cobrar no es plata** | La venta por Sistecrédito cuenta como ingreso (es un documento) pero **no entra a la caja**; el efectivo aparece recién al liquidar, y por lo cobrado, no por lo facturado |
+| **Un traslado no es ingreso ni egreso** | Los 210.000 trasladados no aparecen ni en ingresos ni en gastos operativos (que son exactamente los 3 gastos: 140.000), y el arqueo **sí** los cuenta — si consignaste, esos billetes ya no están |
+
+### F5-01 · El descuento de interés no se resta del ingreso; el de ventas sí — MEDIA, abierto
+
+La asimetría está en dos líneas contiguas de `reports/service.py`:
+
+```python
+ventas    = _dec(t["gross_revenue"]) - _dec(t["discounts"])   # ← resta el descuento
+intereses = _dec(e["interest_collected"])                     # ← NO resta interest_discounts
+```
+
+El dato existe —`interest_discounts` se consulta y se devuelve en la respuesta— pero no entra en el cálculo. Medido con un descuento real de 10.000 sobre un abono:
+
+```
+ventas netas (descuento ya restado)      3.180.000
+intereses BRUTOS                           300.000     ← por caja entraron 290.000
+total_revenue                            3.480.000
+
+utilidad reportada                       1.195.000
+utilidad restando el descuento           1.185.000
+```
+
+**La utilidad se sobreestima por todos los descuentos de interés otorgados.** En este laboratorio son 10.000 sobre 1.195.000; en una compraventa que negocia intereses seguido, la desviación es sistemática y siempre en la misma dirección. Y lo mismo ocurre en `GET /reports/series`, que usa la misma definición — así que la gráfica de doce meses arrastra el mismo sesgo.
+
+**Por qué creo que debería restarse:** un descuento sobre el interés es plata que la compraventa **decidió no cobrar**, o sea una rebaja del ingreso, no un dato informativo. Es la misma naturaleza que el descuento de una venta, y para ese caso el proyecto ya decidió: *«el descuento se resta del ingreso y no se trata como gasto»* (`PENDIENTES_BACKEND_INFRA.md` §26). Hoy dos ingresos del mismo estado de resultados siguen criterios distintos.
+
+**No lo arreglé** porque cambia el valor de un indicador que el dueño ya está mirando, y eso es una decisión suya — igual que F3-01. El fix es una línea.
+
+### Todo lo demás cruza
+
+| Dato | Fuente A | Fuente B | ¿Coincide? |
+|---|---|---|---|
+| Ventas del período | `/profit`: 3 ventas, 3.180.000 | Dashboard: `today_count` 3, `today_total` 3.180.000 | ✓ |
+| Capital en la calle | `/pawn-performance`: 8.950.000 | Dashboard: `capital_outstanding` 8.950.000 | ✓ |
+| Inventario disponible | `/inventory-valuation`: 3 lotes, 1.470.000 al costo | Dashboard: `available_count` 3, `available_value` 1.470.000 | ✓ |
+| Ingresos del mes | Estado de resultados: 3.180.000 / 300.000 / 140.000 | `/series`: idénticos | ✓ (misma semántica, no una tercera definición) |
+| Abonos registrados | `/pawn-performance`: `payment_count` 5 | Auditoría: 5 × `create_payment` | ✓ |
+| Gastos | Estado de resultados: `expense_count` 3 | Auditoría: 3 × `create_expense` | ✓ |
+| Ventas vivas | `/profit`: 3 | Auditoría: 4 × `create_sale` − 1 × `void_sale` | ✓ |
+
+### La auditoría no dejó nada fuera
+
+**87 entradas y 33 acciones distintas** en la empresa espejo. Se cruzó la lista completa de operaciones ejecutadas en las cuatro fases contra lo registrado: **ninguna quedó sin rastro** — contratos (crear, importar, editar, abonar, descontar, rematar), inventario (ingresar, publicar, pagar, egresar, transformar), ventas (vender, anular, devolver), caja (abrir, cerrar, reabrir, gastar, trasladar, liquidar), catálogos, clientes, cuentas e identidad.
+
+### Nota de uso, no defecto
+
+`GET /reports/closings-breakdown` devolvió **cero líneas** pese a todo el movimiento del día: solo cubre sesiones **cerradas**, y la de hoy sigue abierta. Está documentado y es coherente (un acta se arma sobre un turno cerrado), pero significa que **la tabla de desglose de la pantalla de Reportes está vacía para el día en curso**. Un dueño que la abre a media tarde no ve lo de hoy. El estado de resultados sí lo incluye, porque sale de los documentos y no del desglose de caja — que es justamente la razón por la que se construyó así.
 
 ---
 
