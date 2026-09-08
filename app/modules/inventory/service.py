@@ -398,6 +398,19 @@ async def create_entry(
             account_id=resolved.account_id,
         )
 
+    # Un ingreso mueve stock Y saca plata de la caja (o deja una cuenta por
+    # pagar). Se auditaban el egreso y la transformación pero no la entrada,
+    # que es la más frecuente de las tres.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=registered_by,
+        module="inventory",
+        action="create_entry",
+        entity_type="inventory_entry",
+        entity_id=entry_id,
+        after={"origin_type": body.origin_type, "lines": len(body.lines)},
+    )
     return await get_entry(db, company_id=company_id, entry_id=entry_id)
 
 

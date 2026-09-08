@@ -8,6 +8,7 @@ from app.common.pagination import CursorPage, make_page
 from app.core.errors import ConflictError, NotFoundError
 from app.modules.customers import repository
 from app.modules.customers.schemas import CustomerCreateIn, CustomerOut, CustomerUpdateIn
+from app.modules.identity import repository as identity_repo
 
 
 def _row_to_customer(row: Row[Any]) -> CustomerOut:
@@ -56,6 +57,20 @@ async def create_customer(
         doc_photo_url=body.doc_photo_url,
         notes=body.notes,
         created_by=created_by,
+    )
+    # `customers` no auditaba NADA. Dar de alta a un cliente es la puerta de
+    # entrada de todo lo demás —un contrato o una venta cuelgan de él— y con
+    # datos personales de por medio (Habeas Data, Ley 1581): quién lo registró
+    # y cuándo es justo lo que hay que poder responder.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=created_by,
+        module="customers",
+        action="create_customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        after={"full_name": body.full_name, "doc_number": body.doc_number},
     )
     row = await repository.get_customer(db, company_id=company_id, customer_id=customer_id)
     assert row is not None

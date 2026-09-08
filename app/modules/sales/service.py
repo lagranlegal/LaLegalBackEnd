@@ -274,6 +274,28 @@ async def create_sale(
             created_by=user.id,
             account_id=resolved.account_id,
         )
+    # La venta EN SÍ se audita, no solo el descuento.
+    #
+    # Reportado por Mateo el 07/09/2026: invitó a un empleado, hizo una venta
+    # con su usuario y en Auditoría no aparecía nada. Y era cierto — hasta acá
+    # solo se auditaban el descuento, la anulación y la devolución, o sea las
+    # excepciones. Una pantalla que se llama Auditoría y no muestra la
+    # operación más común del negocio no responde la única pregunta para la
+    # que un dueño la abre: "¿qué hizo esta persona hoy?". Su silencio se lee
+    # como "el sistema no está registrando", no como "eso vive en otra tabla".
+    #
+    # `sale.sold_by` ya guardaba el autor, así que el dato existía; lo que
+    # faltaba era que estuviera donde alguien lo iba a buscar.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=user.id,
+        module="sales",
+        action="create_sale",
+        entity_type="sale",
+        entity_id=sale_id,
+        after={"number": number, "total": str(total), "payment_method": body.payment_method},
+    )
     if discount_amount > 0:
         await identity_repo.insert_audit_log(
             db,

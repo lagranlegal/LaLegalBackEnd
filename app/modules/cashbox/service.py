@@ -91,6 +91,20 @@ async def open_session(
         opening_balance=opening_balance,
         session_date=today,
     )
+    # Se auditaba cerrar y reabrir, pero no ABRIR — y la app ya tenía la
+    # etiqueta "Abrió la caja" en pantalla para una acción que nunca se
+    # escribía. Abrir es el primer acto del turno: sin él, el histórico
+    # empieza a la mitad y no se sabe quién lo arrancó.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=opened_by,
+        module="cashbox",
+        action="open_session",
+        entity_type="cash_session",
+        entity_id=session_id,
+        after={"opening_balance": str(opening_balance), "session_date": str(today)},
+    )
     row = await repository.get_session(db, company_id=company_id, session_id=session_id)
     assert row is not None
     return _row_to_session(row)

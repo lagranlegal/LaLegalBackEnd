@@ -687,6 +687,23 @@ async def create_payment(
             reference_id=payment_id,
             created_by=user.id,
         )
+    # El abono en sí, no solo su descuento. Es la operación de dinero más
+    # frecuente del empeño; sin ella, Auditoría no puede responder "¿qué hizo
+    # esta persona hoy?" (ver la nota en `sales.create_sale`).
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=user.id,
+        module="contracts",
+        action="create_payment",
+        entity_type="contract_payment",
+        entity_id=payment_id,
+        after={
+            "contract_id": str(contract_id),
+            "total": str(total),
+            "payment_method": body.payment_method,
+        },
+    )
     if discount_amount > 0:
         await identity_repo.insert_audit_log(
             db,
