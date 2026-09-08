@@ -37,7 +37,7 @@
 
 **Veredicto: es el módulo más sólido auditado hasta ahora.** Un solo hallazgo, y no está en el cálculo del dinero sino en lo que el sistema deja pasar antes de calcularlo. Las reglas que definen el negocio —interés sobre saldo, meses completos, snapshot legal, reparto del remate— se cumplen al peso, incluidos los ejemplos textuales de `CLAUDE.md`.
 
-### F3-01 · Prestar y gastar no validan que haya efectivo; trasladar sí — MEDIA, abierto
+### F3-01 · Prestar y gastar no validan que haya efectivo; trasladar sí — MEDIA, **en definición de negocio**
 
 Con el cajón en 240.000 esperados, presté 1.000.000 dos veces. Ambos desembolsos pasaron. Siguiendo desde un esperado ya negativo:
 
@@ -56,6 +56,8 @@ préstamo de 5.000.000     → 201  (esperado: -7.270.000)
 **No es obvio que deba bloquearse, y por eso es una pregunta de negocio.** Un argumento razonable para no validar: durante el día entra efectivo por ventas y abonos, y si el registro no es cronológico, validar estricto bloquearía operaciones legítimas. Pero entonces el traslado tampoco debería validar. **La inconsistencia es el hallazgo, más que la decisión.**
 
 Tres salidas posibles: (a) validar en las tres operaciones, (b) no validar en ninguna y dejar que el arqueo lo revele, (c) advertir sin bloquear, como ya se hace con el LTV. La (c) encaja con el criterio que el proyecto ya tomó para un caso análogo.
+
+**Trasladado a `frontend-starter/docs/DECISIONES_PENDIENTES.md` §3** (decisión de Mateo, 08/09), con las tres preguntas de negocio y las opciones desarrolladas. Sea cual sea la elegida, las tres operaciones deberían comportarse igual: hoy dos dicen una cosa y una dice la contraria.
 
 ### Lo que se probó y está bien
 
