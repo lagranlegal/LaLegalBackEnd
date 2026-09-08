@@ -151,7 +151,9 @@ async def create_expense_category(
     user: Annotated[CurrentUser, Depends(_expense)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> ExpenseCategoryOut:
-    return await service.create_expense_category(db, company_id=user.company_id, body=body)
+    return await service.create_expense_category(
+        db, company_id=user.company_id, body=body, acting_user_id=user.id
+    )
 
 
 @router.get("/expenses", response_model=CursorPage[ExpenseOut])

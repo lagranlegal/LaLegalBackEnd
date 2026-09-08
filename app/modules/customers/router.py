@@ -60,5 +60,5 @@ async def update_customer(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> CustomerOut:
     return await service.update_customer(
-        db, company_id=user.company_id, customer_id=customer_id, body=body
+        db, company_id=user.company_id, customer_id=customer_id, body=body, acting_user_id=user.id
     )

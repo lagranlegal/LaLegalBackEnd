@@ -336,13 +336,23 @@ async def reopen_session(
 
 
 async def create_expense_category(
-    db: AsyncSession, *, company_id: UUID, body: ExpenseCategoryCreateIn
+    db: AsyncSession, *, company_id: UUID, body: ExpenseCategoryCreateIn, acting_user_id: UUID
 ) -> ExpenseCategoryOut:
     if await repository.category_name_exists(db, company_id=company_id, name=body.name):
         raise ConflictError("Ya existe una categoría de gasto con ese nombre.")
     category_id = uuid4()
     await repository.insert_expense_category(
         db, category_id=category_id, company_id=company_id, name=body.name
+    )
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="cashbox",
+        action="create_expense_category",
+        entity_type="expense_category",
+        entity_id=category_id,
+        after={"name": body.name},
     )
     row = await repository.get_expense_category(db, company_id=company_id, category_id=category_id)
     assert row is not None

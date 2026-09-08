@@ -109,7 +109,11 @@ async def update_contract(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> ContractOut:
     return await service.update_contract(
-        db, company_id=user.company_id, contract_id=contract_id, body=body
+        db,
+        company_id=user.company_id,
+        contract_id=contract_id,
+        body=body,
+        acting_user_id=user.id,
     )
 
 

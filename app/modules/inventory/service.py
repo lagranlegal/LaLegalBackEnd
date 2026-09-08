@@ -373,6 +373,7 @@ async def create_entry(
                 company_id=company_id,
                 item_id=item_id,
                 body=ItemPublishIn(sale_price=precio),
+                acting_user_id=registered_by,
             )
 
         item_ids.append(item_id)
@@ -613,7 +614,12 @@ async def update_item(
 
 
 async def publish_item(
-    db: AsyncSession, *, company_id: UUID, item_id: UUID, body: ItemPublishIn
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    item_id: UUID,
+    body: ItemPublishIn,
+    acting_user_id: UUID,
 ) -> ItemOut:
     row = await repository.get_item(db, company_id=company_id, item_id=item_id)
     if row is None:
@@ -728,6 +734,20 @@ async def publish_item(
     )
 
     await repository.publish_item(db, company_id=company_id, item_id=item_id, code=code)
+    # Publicar es lo que convierte un borrador en mercancía vendible: emite el
+    # código —que es inmutable y va impreso en la etiqueta— y la pone en
+    # vitrina. Sin esto, en la auditoría un artículo aparecía vendido sin que
+    # constara nunca quién lo puso a la venta.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="inventory",
+        action="publish_item",
+        entity_type="inventory_item",
+        entity_id=item_id,
+        after={"code": code},
+    )
     return await get_item(db, company_id=company_id, item_id=item_id)
 
 
@@ -780,6 +800,18 @@ async def pay_entry(
         reference_id=entry_id,
         created_by=registered_by,
         account_id=resolved.account_id,
+    )
+    # Pagarle a un proveedor saca plata de una cuenta. Es una operación de
+    # dinero como cualquier otra y no dejaba rastro en la auditoría.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=registered_by,
+        module="inventory",
+        action="pay_entry",
+        entity_type="inventory_entry",
+        entity_id=entry_id,
+        after={"amount": str(m["total_cost"]), "payment_method": body.payment_method},
     )
     return await get_entry(db, company_id=company_id, entry_id=entry_id)
 
@@ -851,7 +883,12 @@ async def list_product_lots(
 
 
 async def update_product(
-    db: AsyncSession, *, company_id: UUID, product_id: UUID, body: ProductUpdateIn
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    product_id: UUID,
+    body: ProductUpdateIn,
+    acting_user_id: UUID,
 ) -> ProductOut:
     """Cambiar el precio acá lo cambia para TODOS los lotes de una vez — que
     es el comportamiento correcto: el cliente no sabe qué lote le tocó, y dos
@@ -885,6 +922,24 @@ async def update_product(
             )
     await repository.update_product_fields(
         db, company_id=company_id, product_id=product_id, fields=fields
+    )
+    # Con `before`: cambiar el precio acá lo cambia para TODOS los lotes de una
+    # vez, así que es de las ediciones con más alcance de la app. Saber que
+    # alguien lo tocó sin saber de cuánto a cuánto no sirve para nada.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="inventory",
+        action="update_product",
+        entity_type="product",
+        entity_id=product_id,
+        before={
+            campo: str(producto._mapping[campo]) if producto._mapping[campo] is not None else None
+            for campo in fields
+            if campo in producto._mapping
+        },
+        after={k: str(v) if v is not None else None for k, v in fields.items()},
     )
 
     # Ya NO hay que propagar el precio a los lotes: desde 00022 el dato existe
@@ -1177,7 +1232,11 @@ async def create_transformation(
                 precio = producto._mapping["sale_price"]
         if precio is not None and precio > 0:
             await publish_item(
-                db, company_id=company_id, item_id=item_id, body=ItemPublishIn(sale_price=precio)
+                db,
+                company_id=company_id,
+                item_id=item_id,
+                body=ItemPublishIn(sale_price=precio),
+                acting_user_id=registered_by,
             )
 
     # --- La plata del proceso, si la hubo -------------------------------

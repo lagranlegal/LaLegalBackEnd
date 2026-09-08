@@ -48,7 +48,9 @@ async def create_category(
     user: Annotated[CurrentUser, Depends(_manage)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> CategoryOut:
-    return await service.create_category(db, company_id=user.company_id, body=body)
+    return await service.create_category(
+        db, company_id=user.company_id, body=body, acting_user_id=user.id
+    )
 
 
 @router.get("/categories/{category_id}", response_model=CategoryOut)
@@ -68,7 +70,7 @@ async def update_category(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> CategoryOut:
     return await service.update_category(
-        db, company_id=user.company_id, category_id=category_id, body=body
+        db, company_id=user.company_id, category_id=category_id, body=body, acting_user_id=user.id
     )
 
 
@@ -93,7 +95,9 @@ async def create_supplier(
     user: Annotated[CurrentUser, Depends(_manage)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> SupplierOut:
-    return await service.create_supplier(db, company_id=user.company_id, body=body)
+    return await service.create_supplier(
+        db, company_id=user.company_id, body=body, acting_user_id=user.id
+    )
 
 
 @router.get("/suppliers/{supplier_id}", response_model=SupplierOut)
@@ -113,7 +117,7 @@ async def update_supplier(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> SupplierOut:
     return await service.update_supplier(
-        db, company_id=user.company_id, supplier_id=supplier_id, body=body
+        db, company_id=user.company_id, supplier_id=supplier_id, body=body, acting_user_id=user.id
     )
 
 

@@ -17,6 +17,7 @@ from app.modules.catalogs.schemas import (
     SupplierSummaryOut,
     SupplierUpdateIn,
 )
+from app.modules.identity import repository as identity_repo
 
 _MAX_LEVEL = 3
 
@@ -54,7 +55,7 @@ def _row_to_supplier(row: Row[Any]) -> SupplierOut:
 
 
 async def create_category(
-    db: AsyncSession, *, company_id: UUID, body: CategoryCreateIn
+    db: AsyncSession, *, company_id: UUID, body: CategoryCreateIn, acting_user_id: UUID
 ) -> CategoryOut:
     parent_id = body.parent_id
     if parent_id is not None:
@@ -98,6 +99,29 @@ async def create_category(
         arrears_window_months=body.arrears_window_months,
         max_ltv_pct=body.max_ltv_pct,
     )
+    # UNA CATEGORÍA DEFINE LAS CONDICIONES DE LOS CONTRATOS FUTUROS: plazo,
+    # ventana de mora y LTV salen de acá y se CONGELAN en cada contrato al
+    # firmarlo. Cambiarla no toca los contratos vivos, pero sí los que se
+    # firmen después — y esa es exactamente la clase de cambio que hay que
+    # poder rastrear cuando dos contratos del mismo mes tienen plazos
+    # distintos. También manda la letra del código de inventario.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="catalogs",
+        action="create_category",
+        entity_type="category",
+        entity_id=category_id,
+        after={
+            "name": body.name,
+            "level": level,
+            "code_letter": body.code_letter,
+            "default_term_months": body.default_term_months,
+            "arrears_window_months": body.arrears_window_months,
+            "max_ltv_pct": str(body.max_ltv_pct) if body.max_ltv_pct is not None else None,
+        },
+    )
     row = await repository.get_category(db, company_id=company_id, category_id=category_id)
     assert row is not None
     return _row_to_category(row)
@@ -116,7 +140,12 @@ async def get_category(db: AsyncSession, *, company_id: UUID, category_id: UUID)
 
 
 async def update_category(
-    db: AsyncSession, *, company_id: UUID, category_id: UUID, body: CategoryUpdateIn
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    category_id: UUID,
+    body: CategoryUpdateIn,
+    acting_user_id: UUID,
 ) -> CategoryOut:
     current = await repository.get_category(db, company_id=company_id, category_id=category_id)
     if current is None:
@@ -145,13 +174,30 @@ async def update_category(
     await repository.update_category(
         db, company_id=company_id, category_id=category_id, fields=fields
     )
+    # Con `before`: acá viven el plazo y la ventana de mora de los contratos
+    # que se firmen a partir de ahora (ver `create_category`).
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="catalogs",
+        action="update_category",
+        entity_type="category",
+        entity_id=category_id,
+        before={
+            campo: str(current._mapping[campo]) if current._mapping[campo] is not None else None
+            for campo in fields
+            if campo in current._mapping
+        },
+        after={k: str(v) if v is not None else None for k, v in fields.items()},
+    )
     row = await repository.get_category(db, company_id=company_id, category_id=category_id)
     assert row is not None
     return _row_to_category(row)
 
 
 async def create_supplier(
-    db: AsyncSession, *, company_id: UUID, body: SupplierCreateIn
+    db: AsyncSession, *, company_id: UUID, body: SupplierCreateIn, acting_user_id: UUID
 ) -> SupplierOut:
     if await repository.code_letter_in_use(db, company_id=company_id, code_letter=body.code_letter):
         raise ConflictError(
@@ -172,6 +218,18 @@ async def create_supplier(
         address=body.address,
         code_letter=body.code_letter,
         notes=body.notes,
+    )
+    # La letra del proveedor va impresa en el código de cada lote que se le
+    # compre, y es inmutable una vez emitido.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="catalogs",
+        action="create_supplier",
+        entity_type="supplier",
+        entity_id=supplier_id,
+        after={"name": body.name, "code_letter": body.code_letter},
     )
     row = await repository.get_supplier(db, company_id=company_id, supplier_id=supplier_id)
     assert row is not None
@@ -194,7 +252,12 @@ async def get_supplier(db: AsyncSession, *, company_id: UUID, supplier_id: UUID)
 
 
 async def update_supplier(
-    db: AsyncSession, *, company_id: UUID, supplier_id: UUID, body: SupplierUpdateIn
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    supplier_id: UUID,
+    body: SupplierUpdateIn,
+    acting_user_id: UUID,
 ) -> SupplierOut:
     current = await repository.get_supplier(db, company_id=company_id, supplier_id=supplier_id)
     if current is None:
@@ -211,6 +274,21 @@ async def update_supplier(
     fields = body.model_dump(exclude_unset=True)
     await repository.update_supplier(
         db, company_id=company_id, supplier_id=supplier_id, fields=fields
+    )
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="catalogs",
+        action="update_supplier",
+        entity_type="supplier",
+        entity_id=supplier_id,
+        before={
+            campo: str(current._mapping[campo]) if current._mapping[campo] is not None else None
+            for campo in fields
+            if campo in current._mapping
+        },
+        after={k: str(v) if v is not None else None for k, v in fields.items()},
     )
     row = await repository.get_supplier(db, company_id=company_id, supplier_id=supplier_id)
     assert row is not None

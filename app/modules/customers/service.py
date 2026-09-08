@@ -95,7 +95,12 @@ async def list_customers(
 
 
 async def update_customer(
-    db: AsyncSession, *, company_id: UUID, customer_id: UUID, body: CustomerUpdateIn
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    customer_id: UUID,
+    body: CustomerUpdateIn,
+    acting_user_id: UUID,
 ) -> CustomerOut:
     current = await repository.get_customer(db, company_id=company_id, customer_id=customer_id)
     if current is None:
@@ -104,6 +109,23 @@ async def update_customer(
     fields = body.model_dump(exclude_unset=True)
     await repository.update_customer(
         db, company_id=company_id, customer_id=customer_id, fields=fields
+    )
+    # Con `before`: son datos personales (Ley 1581) y el documento identifica
+    # a quien firmó los contratos. Un cambio ahí hay que poder explicarlo.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="customers",
+        action="update_customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        before={
+            campo: str(current._mapping[campo]) if current._mapping[campo] is not None else None
+            for campo in fields
+            if campo in current._mapping
+        },
+        after={k: str(v) if v is not None else None for k, v in fields.items()},
     )
     row = await repository.get_customer(db, company_id=company_id, customer_id=customer_id)
     assert row is not None

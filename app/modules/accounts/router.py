@@ -103,7 +103,9 @@ async def create_account(
     user: Annotated[CurrentUser, Depends(_manage)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> AccountOut:
-    return await service.create_account(db, company_id=user.company_id, body=body)
+    return await service.create_account(
+        db, company_id=user.company_id, body=body, acting_user_id=user.id
+    )
 
 
 @router.patch("/{account_id}", response_model=AccountOut)
@@ -114,7 +116,7 @@ async def update_account(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> AccountOut:
     return await service.update_account(
-        db, company_id=user.company_id, account_id=account_id, body=body
+        db, company_id=user.company_id, account_id=account_id, body=body, acting_user_id=user.id
     )
 
 

@@ -228,7 +228,9 @@ async def publish_item(
     user: Annotated[CurrentUser, Depends(_create)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> ItemOut:
-    return await service.publish_item(db, company_id=user.company_id, item_id=item_id, body=body)
+    return await service.publish_item(
+        db, company_id=user.company_id, item_id=item_id, body=body, acting_user_id=user.id
+    )
 
 
 # ---- Productos (00021) --------------------------------------------------
@@ -300,7 +302,11 @@ async def update_product(
     barato por olvido. Las ventas ya hechas no se ven afectadas.
     """
     return await service.update_product(
-        db, company_id=user.company_id, product_id=product_id, body=body
+        db,
+        company_id=user.company_id,
+        product_id=product_id,
+        body=body,
+        acting_user_id=user.id,
     )
 
 

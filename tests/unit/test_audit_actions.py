@@ -30,9 +30,11 @@ ACCIONES_AUDITADAS = {
     "close_session",
     "reopen_session",
     "create_expense",
+    "create_expense_category",
     # contracts
     "create_contract",
     "import_contract",
+    "update_contract",
     "create_payment",
     "apply_payment_discount",
     "auction_contract",
@@ -43,10 +45,19 @@ ACCIONES_AUDITADAS = {
     "create_return",
     # inventory
     "create_entry",
+    "pay_entry",
     "create_exit",
+    "publish_item",
+    "update_product",
     "create_transformation",
     # customers
     "create_customer",
+    "update_customer",
+    # catalogs
+    "create_category",
+    "update_category",
+    "create_supplier",
+    "update_supplier",
     # identity
     "invite_user",
     "update_user_role",
@@ -63,6 +74,8 @@ ACCIONES_AUDITADAS = {
     "activate_document_template",
     "delete_document_template",
     # accounts
+    "create_account",
+    "update_account",
     "account_transfer",
     "settle_account",
     # platform

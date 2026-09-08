@@ -50,7 +50,7 @@ async def list_accounts(
 
 
 async def create_account(
-    db: AsyncSession, *, company_id: UUID, body: AccountCreateIn
+    db: AsyncSession, *, company_id: UUID, body: AccountCreateIn, acting_user_id: UUID
 ) -> AccountOut:
     if body.is_default:
         await repository.clear_default(db, company_id=company_id, account_type=body.type)
@@ -66,6 +66,18 @@ async def create_account(
         is_default=body.is_default,
         opening_balance=body.opening_balance,
     )
+    # Una cuenta es DÓNDE está la plata: crearla o cambiarla reordena a dónde
+    # caen los cobros y los pagos de toda la empresa.
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="accounts",
+        action="create_account",
+        entity_type="account",
+        entity_id=account_id,
+        after={"name": body.name, "type": body.type, "is_default": body.is_default},
+    )
     return await get_account(db, company_id=company_id, account_id=account_id)
 
 
@@ -78,7 +90,12 @@ async def get_account(db: AsyncSession, *, company_id: UUID, account_id: UUID) -
 
 
 async def update_account(
-    db: AsyncSession, *, company_id: UUID, account_id: UUID, body: AccountUpdateIn
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    account_id: UUID,
+    body: AccountUpdateIn,
+    acting_user_id: UUID,
 ) -> AccountOut:
     row = await repository.get_account(db, company_id=company_id, account_id=account_id)
     if row is None:
@@ -96,6 +113,21 @@ async def update_account(
 
     await repository.update_account_fields(
         db, company_id=company_id, account_id=account_id, fields=fields
+    )
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=acting_user_id,
+        module="accounts",
+        action="update_account",
+        entity_type="account",
+        entity_id=account_id,
+        before={
+            campo: str(row._mapping[campo]) if row._mapping[campo] is not None else None
+            for campo in fields
+            if campo in row._mapping
+        },
+        after={k: str(v) if v is not None else None for k, v in fields.items()},
     )
     return await get_account(db, company_id=company_id, account_id=account_id)
 

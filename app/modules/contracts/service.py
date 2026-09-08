@@ -497,15 +497,39 @@ async def list_contracts(
 
 
 async def update_contract(
-    db: AsyncSession, *, company_id: UUID, contract_id: UUID, body: ContractUpdateIn
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    contract_id: UUID,
+    body: ContractUpdateIn,
+    acting_user_id: UUID,
 ) -> ContractOut:
     row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
     if row is None:
         raise NotFoundError("El contrato no existe en esta empresa.")
     fields = body.model_dump(exclude_unset=True)
     if fields:
+        anterior = {
+            campo: str(row._mapping[campo]) if row._mapping[campo] is not None else None
+            for campo in fields
+        }
         await repository.update_contract_fields(
             db, company_id=company_id, contract_id=contract_id, fields=fields
+        )
+        # Con `before` y `after`: son los únicos campos editables de un
+        # contrato ya firmado —avalúo, notas y la foto del documento
+        # firmado— y el avalúo es la referencia de cuánto valía la prenda.
+        # Saber que cambió no sirve de nada si no se sabe de cuánto a cuánto.
+        await identity_repo.insert_audit_log(
+            db,
+            company_id=company_id,
+            user_id=acting_user_id,
+            module="contracts",
+            action="update_contract",
+            entity_type="contract",
+            entity_id=contract_id,
+            before=anterior,
+            after={k: str(v) if v is not None else None for k, v in fields.items()},
         )
     return await get_contract(db, company_id=company_id, contract_id=contract_id)
 
