@@ -192,7 +192,7 @@ async def list_companies(
     db: AsyncSession, *, cursor: UUID | None, limit: int
 ) -> CursorPage[CompanyOut]:
     rows = await repository.list_companies(db, cursor=cursor, limit=limit)
-    page = make_time_page(rows, limit, lambda r: (r._mapping["created_at"], r._mapping["id"]))
+    page = make_page(rows, limit, lambda r: r._mapping["id"])
     return CursorPage(items=[_row_to_company(r) for r in page.items], next_cursor=page.next_cursor)
 
 
@@ -361,7 +361,9 @@ async def list_company_audit_log(
         entity_id=entity_id,
         user_id=user_id,
     )
-    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    # Por FECHA: es el mismo listado de auditoría que ve un admin, y el
+    # orden cronológico es su función.
+    page = make_time_page(rows, limit, lambda r: (r._mapping["created_at"], r._mapping["id"]))
     return CursorPage(
         items=[
             AuditLogOut(
