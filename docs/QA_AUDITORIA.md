@@ -31,6 +31,107 @@
 
 
 
+
+---
+
+## Fase 4 — Inventario y tienda (08/09/2026)
+
+**Veredicto: sólido, con un solo desajuste y es de documentación.** El módulo más grande de la app —códigos, producto contra lote, unidades, transformaciones, kardex, ventas, devoluciones y notas crédito— hizo todo lo que promete. De paso quedó cerrado el pendiente de la Fase 2: la liquidación de un convenio con saldo real.
+
+### F4-01 · El formato del código de inventario documentado no es el real — BAJA, **corregido**
+
+| | |
+|---|---|
+| La doc decía | `[cat1][cat2][cat3][consecutivo 4 dígitos][letra origen]` → `JOC0001I` / `JOC0001R` |
+| El real es | `JOC0002-01U` — el consecutivo es del **producto**, y hay un segmento de **lote** antes de la letra |
+
+Comprobado comprando dos veces el mismo producto: salieron `JOC0002-01U` y `JOC0002-02U`, con costos de 100.000 y 120.000 respectivamente. La documentación se quedó en el modelo anterior a producto+lote (migración 00021).
+
+**Importa porque ese código va impreso en la etiqueta de cada pieza** y se teclea en el buscador del mostrador. Corregido en `CLAUDE.md` y `API_GUIDE` §9.
+
+### Los códigos y sus letras de origen
+
+Las cinco letras salieron de una operación real, no de leer el código:
+
+| Código emitido | De dónde salió |
+|---|---|
+| `JOC0001-01R` · `JOA0001-01R` | Las dos prendas del remate de la Fase 3 |
+| `JOC0002-01U` · `JOC0002-02U` | Dos compras al mismo proveedor (letra `U`), dos lotes del mismo producto |
+| `JOC0003-01T` | La barra de oro producida fundiendo esos dos lotes |
+| `JOC0002-03D` | Un lote que volvió por devolución cuando el original ya estaba `written_off` |
+
+Y el código es inmutable: republicar o hacer `PATCH` sobre un artículo publicado da `409`.
+
+### La trazabilidad hacia atrás, que es el punto de todo esto
+
+```
+barra JOC0003-01T  →  source_transformation_id  →  transformación #1
+                                                 →  consumió JOC0002-01U y -02U
+                                                 →  comprados a Proveedor Uno
+```
+
+Y del otro lado, los artículos del remate llegan hasta el contrato del cliente que dejó la prenda. La cadena se recorre entera sin adivinar por nombre.
+
+### Lo que se probó y está bien
+
+| Comprobación | Resultado |
+|---|---|
+| Publicar sin precio · sin `inventory.create` | `422` · `403` |
+| Los cuatro orígenes de ingreso | `purchase` sin proveedor `400`; `initial_stock` con medio de pago `400` (no toca caja); `other` sin notas `400`; rama de categorías inválida `400` |
+| Compra en efectivo | Genera su movimiento de caja — el fix del punto 21 sigue en pie |
+| Compra sin medio de pago | Queda a crédito y aparece en `/reports/payables` con su antigüedad |
+| Pagarla | Exige `inventory.pay_purchase` (Bodega no puede); mueve la caja; pagar dos veces da `409` |
+| Publicación automática | Una línea de ingreso con `sale_price` sale ya `available` con su código; sin precio queda `draft` |
+| Unidades decimales | 12,5 gramos se aceptan; 2,5 unidades se rechazan con «se mide en u y no admite cantidades fraccionarias» |
+| Costos por lote | El producto reporta el **rango** 100.000–120.000, nunca un promedio |
+| Venta en efectivo | Entra a caja; stock descontado |
+| Vender más de lo que hay | `400` — «No hay suficiente cantidad disponible» |
+| Venta por Sistecrédito | **No toca la caja** y deja 1.500.000 por cobrar: una cuenta por cobrar no es plata |
+| Anulación | Motivo obligatorio (`422` sin él), `sales.void` exigido, contra-movimiento, stock repuesto de 2 a 3, y `409` al anular dos veces |
+| Egresos, los cinco tipos | Los cinco `201`; sin motivo `422`; sin `inventory.exit` `403`; el lote a cero pasa a `written_off` |
+
+### La liquidación del convenio, con saldo real (pendiente de la Fase 2)
+
+```
+por cobrar 1.500.000 · banco 130.000
+liquidar 1.500.000 recibiendo 1.400.000
+  → commission 100.000 · commission_pct 6.67 · new_pending_balance 0.00
+por cobrar 0 · banco 1.530.000
+```
+
+Un solo movimiento en el banco (`settlement_in` de 1.400.000). **La comisión no genera movimiento propio**: no es plata que salió, es plata que nunca llegó.
+
+### Devoluciones y notas crédito
+
+- **Devolver en efectivo una venta cobrada por un convenio todavía sin liquidar** → `400 SALE_ACCOUNT_NOT_SETTLED`. Una vez liquidada, la misma devolución pasa. Es el guardrail que evita sacar del cajón plata que el negocio nunca recibió.
+- **Nota crédito**: se emite por el total, se redime **parcialmente** (180.000 de 1.500.000, saldo 1.320.000 derivado en cada lectura), no entra efectivo cuando cubre la venta entera, y **no es transferible**: usarla con otro cliente da `400`.
+- **Reapertura de lote, el segundo camino**: como el lote original estaba `written_off` (lo había fundido), la devolución creó un lote nuevo **al costo congelado en la línea de venta** (120.000), que al publicarse tomó `JOC0002-03D`.
+
+### El kardex
+
+Cinco movimientos sobre un producto con dos lotes, una venta, una anulación y otra venta:
+
+```
+entry      JOC0002-01U   saldo 3 u.   300.000
+entry      JOC0002-02U   saldo 6 u.   660.000
+sale       JOC0002-02U   saldo 5 u.   540.000
+sale_void  JOC0002-02U   saldo 6 u.   660.000     ← no existe como fila: se sintetiza
+sale       JOC0002-02U   saldo 5 u.   540.000
+```
+
+Dos cosas que confirman el diseño: **la anulación aparece aunque no exista ninguna fila inversa** (`void_sale` solo cambia el `status`), y el valor **no se deriva de la cantidad** — al vender del lote de 120.000 el saldo bajó 120.000, no el promedio de los dos lotes. Las líneas traen `quantity_in`/`quantity_out` separadas, como un kardex contable de verdad.
+
+### Las transformaciones: el costo viaja
+
+```
+entran  2 × 100.000  +  2 × 120.000   =  440.000
+extra_cost (el fundidor)              =   50.000   → sale de la caja como `purchase`, no como gasto
+                                        ─────────
+sale    1 barra de oro                =  490.000
+```
+
+El costo de la salida **no se digita**: es todo lo que entró. Y en una segunda transformación con tres salidas y sin estimaciones, los 490.000 se repartieron en partes iguales (163.333,33 cada una), como documenta la regla. El `extra_cost` se capitaliza —es parte de producir el activo— en vez de ensuciar el gasto del mes.
+
 ---
 
 ## Fase 3 — Contratos (08/09/2026)

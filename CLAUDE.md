@@ -43,7 +43,7 @@ Backend (FastAPI) de una plataforma SaaS **multi-tenant** para compraventas (cas
 `POST /contracts/{id}/auction` (permiso `contracts.auction`): en una transacción — contrato→`auctioned`, items→`auctioned`, crear `inventory_item` en `draft` (cost = saldo capital + intereses pendientes, `origin='auction'`, `source_contract_id`, vínculo en `contract_item.inventory_item_id`), crear `inventory_entry`, auditar. Luego `POST /inventory/items/{id}/publish` emite el código. Exige precio siempre y **foto solo en piezas únicas** — que es el caso del remate: la foto es la evidencia de qué prenda dejó el cliente. Para mercancía fungible la foto es opcional y vive en el producto, no en el lote (00034).
 
 ### Códigos de inventario
-`[letra cat1][cat2][cat3][consecutivo 4 dígitos][letra de origen]` → `JOC0001I` / `JOC0001R`. Consecutivo por (company_id, prefijo) vía `next_counter()` (ya en migraciones, atómico). El código se emite AL PUBLICAR y es inmutable. Costos por identificación específica: cada pieza/lote conserva su costo real; nunca promediar.
+`[letra cat1][cat2][cat3][consecutivo 4 dígitos del PRODUCTO]-[lote 2 dígitos][letra de origen]` → `JOC0002-01U` / `JOC0001-01R`. Consecutivo por (company_id, prefijo) vía `next_counter()` (ya en migraciones, atómico); el segmento de lote lo numera cada producto desde 00021 (producto + lote), así que dos compras del mismo producto dan `-01` y `-02` con su costo real cada una. El código se emite AL PUBLICAR y es inmutable. Costos por identificación específica: cada pieza/lote conserva su costo real; nunca promediar.
 
 La **letra de origen** dice de dónde salió la pieza, y se deriva de sus punteros —nunca se digita:
 
