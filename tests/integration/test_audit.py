@@ -178,6 +178,35 @@ def test_audit_log_without_permission_is_403(client: TestClient, audit_tenant: d
     assert response.json()["code"] == "PERMISSION_DENIED"
 
 
+def test_audit_log_viene_del_mas_reciente_al_mas_viejo(
+    client: TestClient, audit_tenant: dict
+) -> None:
+    """El orden cronológico ES la función de esta pantalla.
+
+    BUG REAL (08/09/2026): la consulta ordenaba `by id`, y los ids son UUID
+    aleatorios — así que el audit log salía en orden ARBITRARIO. Lo último que
+    hizo un empleado podía caer en cualquier página, y la pantalla no
+    respondía "¿qué pasó hoy?" ni con las acciones que sí se registraban.
+
+    El test que cubría este endpoint miraba filtros y permisos, nunca el
+    orden: por eso pasó desapercibido. El índice que hace falta
+    (`ix_audit_company_date`) existía desde la primera migración, sin usar.
+    """
+    _open_session_and_add_expense(client, audit_tenant)
+    headers = _headers(audit_tenant["full_token"])
+
+    respuesta = client.get("/api/v1/audit-log", headers=headers)
+    assert respuesta.status_code == 200, respuesta.text
+    fechas = [e["created_at"] for e in respuesta.json()["items"]]
+    assert len(fechas) >= 2, "hacen falta al menos dos filas para poder comparar el orden"
+    assert fechas == sorted(fechas, reverse=True), (
+        "el audit log tiene que venir del más reciente al más viejo"
+    )
+    # Abrir la caja pasó ANTES que el gasto, así que el gasto va primero.
+    acciones = [e["action"] for e in respuesta.json()["items"]]
+    assert acciones.index("create_expense") < acciones.index("open_session")
+
+
 def test_audit_log_lists_and_filters_expense_entry(client: TestClient, audit_tenant: dict) -> None:
     _open_session_and_add_expense(client, audit_tenant)
     headers = _headers(audit_tenant["full_token"])

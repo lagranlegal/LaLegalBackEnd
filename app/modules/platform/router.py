@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.pagination import CursorPage, decode_cursor
+from app.common.pagination import CursorPage, decode_cursor, decode_time_cursor
 from app.core.db import get_db
 from app.core.security import TokenClaims, require_super_admin
 from app.modules.audit.schemas import AuditLogOut
@@ -142,7 +142,7 @@ async def list_company_audit_log(
     return await service.list_company_audit_log(
         db,
         company_id=company_id,
-        cursor=decode_cursor(cursor) if cursor else None,
+        cursor=decode_time_cursor(cursor) if cursor else None,
         limit=limit,
         module=module,
         entity_type=entity_type,

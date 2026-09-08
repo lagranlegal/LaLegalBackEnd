@@ -1,10 +1,11 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.pagination import CursorPage, make_page
+from app.common.pagination import CursorPage, make_time_page
 from app.modules.audit import repository
 from app.modules.audit.schemas import AuditLogOut
 
@@ -28,7 +29,7 @@ async def list_audit_log(
     db: AsyncSession,
     *,
     company_id: UUID,
-    cursor: UUID | None,
+    cursor: tuple[datetime, UUID] | None,
     limit: int,
     module: str | None,
     entity_type: str | None,
@@ -45,4 +46,4 @@ async def list_audit_log(
         entity_id=entity_id,
         user_id=user_id,
     )
-    return make_page([_row_to_out(r) for r in rows], limit, lambda o: o.id)
+    return make_time_page([_row_to_out(r) for r in rows], limit, lambda o: (o.created_at, o.id))

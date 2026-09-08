@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.pagination import CursorPage, make_page
+from app.common.pagination import CursorPage, make_page, make_time_page
 from app.core.errors import NotFoundError
 from app.modules.audit import repository as audit_repo
 from app.modules.audit.schemas import AuditLogOut
@@ -192,7 +192,7 @@ async def list_companies(
     db: AsyncSession, *, cursor: UUID | None, limit: int
 ) -> CursorPage[CompanyOut]:
     rows = await repository.list_companies(db, cursor=cursor, limit=limit)
-    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    page = make_time_page(rows, limit, lambda r: (r._mapping["created_at"], r._mapping["id"]))
     return CursorPage(items=[_row_to_company(r) for r in page.items], next_cursor=page.next_cursor)
 
 
@@ -337,7 +337,7 @@ async def list_company_audit_log(
     db: AsyncSession,
     *,
     company_id: UUID,
-    cursor: UUID | None,
+    cursor: tuple[datetime, UUID] | None,
     limit: int,
     module: str | None,
     entity_type: str | None,
