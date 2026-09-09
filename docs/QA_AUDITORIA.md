@@ -21,7 +21,7 @@
 | **4** · Inventario y tienda | Códigos y letras, producto vs lote, unidades, transformaciones, kardex, ventas, devoluciones | ⏳ |
 | **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ✅ 08/09/2026 |
 | **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ✅ 08/09/2026 |
-| **7** · Regresión | Convertir lo encontrado en suite automatizada | ⏳ |
+| **7** · Regresión | Convertir lo encontrado en suite automatizada | ✅ 08/09/2026 |
 
 **Principios de método** (los mismos del proyecto, aplicados a probar):
 
@@ -33,6 +33,65 @@
 
 
 
+
+
+---
+
+## Fase 7 — Regresión (08/09/2026)
+
+**El objetivo no era automatizar todo, sino que lo que se rompió una vez no pueda volver en silencio.** Tres de los hallazgos de esta auditoría comparten la misma forma: nadie los vio porque nada los vigilaba. Cuatro tests nuevos cubren esas tres formas.
+
+**Cada uno se verificó viéndolo fallar**: se reintrodujo el defecto original y se comprobó que el test lo caza, antes de darlo por bueno. Es la misma regla que el proyecto ya aprendió — *«un test escrito contra un payload inventado confirma el bug en vez de encontrarlo»*.
+
+### F7-01 · `CREDIT_NOTE_INSUFFICIENT_BALANCE` estaba documentado y el backend no lo emitía — **arreglado**
+
+**Lo encontró el test mientras lo escribía**, antes de terminarlo. `API_GUIDE` §15 documenta ese código para cuando la nota crédito no alcanza; `sales/service.py` lanzaba un `AppError` sin `code`, que cae en el `BAD_REQUEST` por defecto. Confirmado en vivo:
+
+```
+nota crédito con saldo 1.320.000 · intento redimir 99.999.999
+  → 400  code=BAD_REQUEST
+  API_GUIDE §15 documenta: CREDIT_NOTE_INSUFFICIENT_BALANCE
+```
+
+Es **exactamente** el bug que costó once días de trabajo (`NOT_FOUND` donde el front escuchaba `CASH_SESSION_NOT_OPEN`): un contrato entre dos capas que solo conocía una. El front que escuche el código documentado nunca lo recibe. Arreglado pasando el `code` explícito.
+
+### Los cuatro tests
+
+| Test | Qué vigila | Se vio fallar con |
+|---|---|---|
+| `unit/test_endpoint_guards.py` | Que **ningún endpoint quede sin `require_permission`** — el «bug de revisión» de `CLAUDE.md` regla 3. Recorre los routers con el AST, sin red ni base: milisegundos | Un endpoint nuevo sin guard, añadido a propósito en `audit/router.py` |
+| `unit/test_error_catalog.py` | Que **todo código de error esté en el catálogo** de `API_GUIDE` §15, y que el catálogo no documente códigos muertos. Mismo molde que `test_audit_actions.py`, que ya había demostrado su valor | Un `code="CODIGO_INVENTADO_QA"` metido en un módulo |
+| `integration/test_smoke_listings.py` | Que **ningún listado responda 5xx** ni devuelva texto plano, con una empresa **vacía**. Recorre los 40 GET sin parámetros de ruta que expone el OpenAPI | Reintroduciendo la cláusula rota de `/accounts/transfers`: los dos tests fallan |
+| `frontend/tests/token-contrast.test.ts` | Que **los tokens de texto cumplan WCAG AA** sobre los fondos de la app. La regla estaba escrita en `DESIGN_SYSTEM` §4.10 y nadie la medía | Corrigiendo `--text-muted` al valor propuesto: el test avisa |
+
+El smoke es el que más valor tiene por línea escrita: **habría cazado el 500 de `/accounts/transfers` el día que se escribió**. Ese endpoint aparecía nueve veces en `test_accounts.py` y las nueve eran POST — un endpoint puede estar roto al 100% y parecer cubierto si lo que se ejercita es su vecino. Corre con una empresa vacía a propósito: la lista vacía es el caso que más se olvida, y era justamente el que reventaba.
+
+### Los defectos conocidos quedan marcados, no escondidos
+
+Los dos tests de contraste que hoy **no** pasan están marcados con `it.fails` y no con `skip`:
+
+```
+Tests  163 passed | 2 expected fail (165)
+```
+
+CI queda en verde documentando el defecto real, y el día que se corrija el token el test empezará a fallar por *«pasó cuando se esperaba que fallara»* — obligando a quitarle el `.fails`. Un `skip`, en cambio, se olvida. Comprobado: al aplicar el valor propuesto para `--text-muted`, el test reacciona.
+
+### Qué NO se automatizó, y por qué
+
+No todo lo de esta auditoría debe correr en CI. Lo que queda como **herramienta manual** en `scripts/qa/`:
+
+- **La matriz completa de permisos** (420 comprobaciones × 4 roles). Necesita usuarios reales en Supabase Auth y tarda cinco minutos: es una auditoría periódica, no un test de cada PR. Lo que sí quedó en CI es su parte estática y barata — que ningún endpoint quede sin guard.
+- **El barrido de contraste y responsive con Playwright.** Playwright no es dependencia del proyecto (`ARCHITECTURE` §10) y montarlo en CI es un proyecto en sí. La parte que sí se automatizó es la que vale para el 90% de los casos: los tokens.
+- **Los flujos de dinero de punta a punta.** Ya están cubiertos por los tests de integración de cada módulo; duplicarlos como E2E costaría más de lo que aporta.
+
+### Estado de las suites
+
+| | Antes de la auditoría | Después |
+|---|---|---|
+| Backend | 325 | **333** — 2 de los bugs arreglados (Fase 1) + 6 de regresión (Fase 7) |
+| Frontend | 161 | **165** — 163 en verde + 2 marcados como defecto conocido |
+
+Ambas suites corridas enteras al cerrar: `333 passed` y `163 passed | 2 expected fail`.
 
 ---
 

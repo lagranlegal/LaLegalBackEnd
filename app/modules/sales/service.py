@@ -186,9 +186,14 @@ async def create_sale(
             body.credit_note_amount if body.credit_note_amount is not None else min(balance, total)
         )
         if redeemed_amount <= 0 or redeemed_amount > balance:
+            # El código va explícito: `API_GUIDE` §15 lo documenta y el front
+            # decide por `code`, no por `message`. Sin esto llegaba el
+            # `BAD_REQUEST` por defecto de `AppError` y la rama que escucha
+            # este caso no se ejecutaba nunca.
             raise AppError(
                 "La nota crédito no tiene saldo suficiente.",
                 details={"balance": str(balance), "requested": str(redeemed_amount)},
+                code="CREDIT_NOTE_INSUFFICIENT_BALANCE",
             )
         if redeemed_amount > total:
             raise AppError("La nota crédito no puede superar el total de la venta.")
