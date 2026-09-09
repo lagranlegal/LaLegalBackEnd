@@ -67,7 +67,7 @@ Tras las diez fases, se tomó la lista de hallazgos abiertos y se aplicó lo que
 | Hallazgo | Qué se hizo |
 |---|---|
 | **F6-02** · 12 combinaciones bajo WCAG AA | Los seis tokens semánticos pasan a valores calculados contra los **tres** fondos donde viven (`--bg-app`, `--bg-surface` y su propio `-soft`, el más exigente por compartir tono), conservando el matiz. **El teal de marca no se tocó** |
-| **F6-03** · `/caja` desbordaba 59px a 360px | `flex-wrap` + `min-w-0` en el `PageHeader` **y en los dos contenedores reales**: los tres botones de `/caja` no viven en el header sino en una card propia, y `/contratos` tenía otro `flex` anidado dentro de sus acciones |
+| **F6-03** · `/caja` desbordaba 59px a 360px | `flex-wrap` + `min-w-0` en el `PageHeader` **y en los tres contenedores reales**: los botones de `/caja` no viven en el header sino en una card propia, `/contratos` tenía otro `flex` anidado dentro de sus acciones, y en `/cuentas` era la fila de cada cuenta. Verificado a 360px: las 12 pantallas sin desborde |
 | **F9-01** · El turno de ayer no se distinguía | La franja se pone ámbar y dice la fecha y qué hacer. El dato (`session_date`) ya viajaba en la respuesta |
 | **F6-01** · El error más arriba quedaba fuera de vista | `EntryFormPage` usa `revealFirstError`, el helper que ya existía |
 | **F8-03 · F9-03** · Etiquetas en inglés | `completed`/`voided` en Ventas y `sale_return` en el acta. `CONCEPT_LABELS` cubre ahora los 13 valores del enum |
@@ -79,6 +79,25 @@ Tras las diez fases, se tomó la lista de hallazgos abiertos y se aplicó lo que
 ### Configuración
 
 **F9-02** · `FRONTEND_URL` pasa a la URL que usa el cliente. Los enlaces de invitación y recuperación llevaban el nombre interno del proyecto y del dueño (`…-git-dev-mateos-projects-85710491…`) — un enlace así, pidiendo crear una contraseña, se lee como phishing. La razón documentada para mantenerlo en preview había caducado: se comprobó pidiéndole a `generate_link` la URL de producción y hoy la respeta.
+
+### La verificación, que es la mitad que importa
+
+Ningún fix se dio por bueno con el commit. Todos se volvieron a medir **contra el entorno desplegado**, con los mismos scripts que los encontraron:
+
+| Qué se midió | Antes | Después |
+|---|---|---|
+| Cinco ventas simultáneas de la última unidad | `[500, 500, 201, 500, 500]` | `[400, 400, 201, 400, 400]` — los cuatro que pierden reciben el error de stock |
+| Cinco requests con la misma clave de idempotencia | `[500, 500, 500, 201, 500]` | `201` + cuatro `IDEMPOTENCY_IN_PROGRESS` |
+| Ingreso por intereses con un descuento de 10.000 | 300.000 | 290.000, y `/reports/series` con el mismo número |
+| Activar una plantilla vacía | activaba | `TEMPLATE_IS_EMPTY` |
+| Volver al documento de fábrica | no había camino | `deactivate` y vuelve |
+| `FRONTEND_URL` en los enlaces de invitación | el nombre interno del proyecto | `la-legal-front-end.vercel.app` |
+| Contraste WCAG AA | 12 combinaciones por debajo | 3, todas del teal de marca que se decidió no tocar |
+| Desborde horizontal a 360px | `/caja` 59px · `/contratos` 14px · `/cuentas` 15px | las 12 pantallas en cero |
+
+Las dos pantallas que a 360px todavía tienen contenido más ancho que el viewport —la tabla de desglose de `/reportes` y las pestañas de `/inventario`— lo tienen **dentro de un contenedor con scroll propio**, que es el patrón correcto: el documento no se mueve.
+
+**Suites: 337 tests en el backend, 165 en el front, todo en verde.**
 
 ### Lo que se dejó a propósito
 
