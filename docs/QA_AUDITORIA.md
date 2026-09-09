@@ -22,8 +22,8 @@
 | **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ✅ 08/09/2026 |
 | **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ✅ 08/09/2026 |
 | **7** · Regresión | Convertir lo encontrado en suite automatizada | ✅ 08/09/2026 |
-| **8** · Documentos y archivos | Storage y fotos, impresión, plantillas de documentos | ⏳ siguiente |
-| **9** · Los caminos de entrada | Alta de usuario, contraseñas y panel de plataforma, en navegador | ⏳ |
+| **8** · Documentos y archivos | Storage y fotos, impresión, plantillas de documentos | ✅ 08/09/2026 |
+| **9** · Los caminos de entrada | Alta de usuario, contraseñas y panel de plataforma, en navegador | ⏳ siguiente |
 | **10** · Concurrencia y volumen | Dos sesiones sobre el mismo stock y la misma caja; paginación y topes | ⏳ |
 
 **Principios de método** (los mismos del proyecto, aplicados a probar):
@@ -38,6 +38,86 @@
 
 
 
+
+
+---
+
+## Fase 8 — Documentos y archivos (08/09/2026)
+
+**Veredicto: Storage está impecable y las plantillas funcionan; los dos hallazgos son sobre lo que el sistema *deja* hacer.** Se puede activar una plantilla vacía y entregarle al cliente un contrato sin cuerpo, y una vez activada cualquier plantilla no hay forma de volver al documento por defecto.
+
+### Storage: cero hallazgos
+
+Era la pieza de más riesgo —ahí viven cédulas, prendas y contratos firmados (Ley 1581), y es la única donde el front habla directo con Supabase sin pasar por el backend. Probado con las sesiones reales de dos empresas:
+
+| Comprobación | Resultado |
+|---|---|
+| Un usuario sube a la carpeta de **su** empresa | `200` |
+| La empresa B sube a la carpeta de la empresa A | `403` — *new row violates row-level security* |
+| La empresa B pide URL firmada de un archivo de A | `404 Object not found` — **no revela que existe** |
+| La empresa B descarga el archivo directo | `404` |
+| Subir un **PDF** o un **HTML con `<script>`** | `415 invalid_mime_type` |
+| Subir un PNG de **9 MB** | `413 Payload too large` |
+| Subir un WEBP | `200` |
+| Acceder como público (bucket abierto) | `404 Bucket not found` — es privado |
+| Acceder solo con la anon key | `404` |
+| URL firmada propia | `200`, y los bytes descargados son **idénticos** al original |
+
+### F8-01 · Se puede activar una plantilla vacía, y el contrato sale sin cuerpo — MEDIA, abierto
+
+`POST /company/document-templates` acepta `body: {}`. Activándola e imprimiendo un contrato real, esto es **todo** lo que sale en papel:
+
+```
+QA Compraventa S.A.S. · ZZ QA — auditoria 08/09 · NIT 900123456-7
+Encabezado QA
+Contrato de empeño #7
+08/09/2026
+Aviso legal QA
+Pie QA
+```
+
+137 caracteres. **Sin cliente, sin prendas, sin monto, sin tasa, sin firmas.** El encabezado y el pie salen porque los pone `PrintLayout`; el cuerpo —que es el contrato— viene de la plantilla, y está vacío.
+
+El caso realista no es exótico: alguien crea una plantilla, borra el contenido para empezar de cero, la guarda, la activa, y **a partir de ahí todos los contratos se imprimen en blanco**. El banner que se agregó el 28/08 avisa «guardada pero inactiva»; nada avisa «activa y vacía». Y un contrato de empeño en blanco no ampara la prenda del cliente.
+
+**Fix sugerido:** rechazar la activación (no la creación — un borrador vacío es legítimo) de una plantilla sin contenido, o advertirlo en el diálogo de activar.
+
+### F8-02 · Una vez activada una plantilla, no hay vuelta al documento por defecto — MEDIA, abierto
+
+```
+POST .../{id}/activate        → 200
+PATCH .../{id} is_active:false → 200, y la ignora — sigue activa
+DELETE .../{id} (la activa)    → 409 TEMPLATE_IS_ACTIVE
+```
+
+No existe endpoint de desactivar. El único camino es activar **otra** plantilla, así que el JSX de fábrica —que `API_GUIDE` §4 bis presenta como la red de seguridad, *«cero riesgo de regresión para empresas que nunca toquen esto»*— queda inalcanzable en cuanto alguien toca esto una vez.
+
+Combinado con F8-01 es peor: si activas una vacía por error, para deshacerlo tienes que **construir una plantilla nueva desde cero** que replique el documento de fábrica. Y el `PATCH` que responde `200` ignorando el campo hace creer que se desactivó.
+
+### F8-03 · El estado de una venta se muestra en inglés crudo — BAJA, abierto (conocido)
+
+El listado de Ventas muestra `completed` y `voided` tal cual. Ya estaba documentado en `PENDIENTES_FRONTEND.md` el 27/08 («`sale.status` nunca estuvo en `STATUS_LABELS`… hallazgo documentado, no arreglado, fuera de alcance») y sigue visible en una pantalla de uso diario.
+
+### Lo que se probó y está bien
+
+| Comprobación | Resultado |
+|---|---|
+| `GET`/`PATCH /company/settings` | `PATCH` parcial conserva lo no enviado; `null` explícito borra |
+| Separación de permisos de los datos de impresión | El Asesor ve razón social, NIT y textos vía `/me`, pero `GET /company/settings` le da `403` |
+| Crear plantilla con los tres layouts | `classic`, `modern`, `compact`; sin `layout` toma `classic`; uno inventado da `422` |
+| Guardar ≠ activar | Las cuatro nacen inactivas (el caso del bug 6e) |
+| Swap transaccional al activar | Siempre **exactamente una** activa por tipo |
+| Borrar la plantilla activa | `409 TEMPLATE_IS_ACTIVE` |
+| Leer la plantilla activa | El Asesor sí (`contracts.view`), Bodega no; y listar todas exige `company.configure` |
+| `document_type` inventado · `body` nulo · HTML como string | `422` los tres |
+| Aislamiento entre empresas | La empresa B no lista, activa, borra ni renombra plantillas de A (`404`) |
+| Campos dinámicos | Se sustituyen con los datos reales y bien formateados: `$ 1.000.000`, `5.00%`, `CC 1010101010`, `08/03/2026` |
+| Campo inexistente | Degrada a `[campo desconocido: x]` en vez de romper el render |
+| Impresión del **contrato** con plantilla activa | Correcta, con encabezado, cuerpo, aviso legal y pie |
+| Impresión del **paz y salvo** | Correcta: empresa, cliente con documento, contrato, capital, fecha de cancelación y número de recibo |
+| Impresión del **comprobante de venta** | Correcta |
+
+**Queda sin probar de esta fase:** el acta de cierre de caja, que exige una sesión cerrada — la del laboratorio quedó abierta a propósito para las fases anteriores.
 
 ---
 
