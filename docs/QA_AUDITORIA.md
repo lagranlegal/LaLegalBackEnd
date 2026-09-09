@@ -24,7 +24,7 @@
 | **7** · Regresión | Convertir lo encontrado en suite automatizada | ✅ 08/09/2026 |
 | **8** · Documentos y archivos | Storage y fotos, impresión, plantillas de documentos | ✅ 08/09/2026 |
 | **9** · Los caminos de entrada | Alta de usuario, contraseñas y panel de plataforma, en navegador | ✅ 09/09/2026 |
-| **10** · Concurrencia y volumen | Dos sesiones sobre el mismo stock y la misma caja; paginación y topes | ⏳ siguiente |
+| **10** · Concurrencia y volumen | Dos sesiones sobre el mismo stock y la misma caja; paginación y topes | ✅ 09/09/2026 |
 
 **Principios de método** (los mismos del proyecto, aplicados a probar):
 
@@ -40,6 +40,70 @@
 
 
 
+
+
+---
+
+## Fase 10 — Concurrencia y volumen (09/09/2026)
+
+**Veredicto: la integridad aguanta, el manejo del conflicto no.** Cinco cajeros vendiendo la última unidad al mismo tiempo producen **una sola venta** — pero los cuatro que pierden la carrera reciben un `500`, no un error de negocio. Y la promesa de idempotencia se rompe justo en el caso para el que existe.
+
+Las pruebas se lanzaron **en el mismo instante** (todas esperando un evento común), no en fila.
+
+### F10-01 · Bajo concurrencia, quien pierde la carrera recibe un 500 — MEDIA-ALTA, abierto
+
+**Cinco ventas simultáneas de la última unidad** (claves de idempotencia distintas: cinco intentos legítimos):
+
+```
+[500, 500, 201 #5, 500, 500]
+ventas creadas: 1           ✓
+stock final: 0.000 · sold   ✓
+```
+
+**Cinco requests con la MISMA clave** (un reintento de red real, sobre un artículo con stock de sobra):
+
+```
+[500, 500, 500, 201 #6, 500]
+números de venta distintos: {6}   ✓
+stock: bajó 1, no 5               ✓
+```
+
+**Lo que está bien y hay que reconocerlo:** la integridad no se rompe en ninguno de los dos casos. Y quien la salva es la base de datos — `CHECK (quantity >= 0)` en `inventory_item` y `UNIQUE(company_id, idempotency_key)` en `sale`. Es exactamente el principio del proyecto: *«la base de datos hace cumplir, aunque haya un bug en la query»*.
+
+**Lo que falla es lo que ve el usuario.** Las dos causas:
+
+1. **Stock.** Las cinco validan «hay 1 disponible» a la vez, las cinco descuentan, y el `CHECK` rechaza a las que dejarían negativo. La excepción sube sin capturar → `500`, en vez de `400 «No hay suficiente cantidad disponible»`.
+2. **Idempotencia.** `create_sale` hace `find_by_idempotency_key` y **después** inserta: un *comprueba-y-actúa*. Bajo concurrencia las cinco consultan antes de que ninguna haya insertado, las cinco intentan, y el índice único deja pasar una.
+
+El segundo es el más serio, porque **rompe la promesa justo cuando importa**. `API_GUIDE` §1 dice: *«reenviar el mismo valor en un reintento de red devuelve el resultado ya creado, no duplica»*. El caso típico de reintento es un **timeout**, o sea que el reintento sale *mientras la primera sigue en vuelo* — que es exactamente esta carrera. El front recibiría `500` de una venta que **sí se hizo**, y el cajero, un error genérico sin `code` que mapear. Puede intentar vender otra vez.
+
+**Fix sugerido:** capturar la violación de unicidad y resolverla como el camino que ya existe (devolver la venta creada); y traducir el `CHECK` de stock al `400` de negocio que el usuario espera.
+
+### F10-02 · `fetchAllPages` corta a 10.000 filas sin ninguna señal — MEDIA, abierto
+
+```ts
+} while (cursor && pageCount < maxPages)   // maxPages = 50
+return items
+```
+
+Al llegar a 50 páginas sale del bucle y devuelve lo que lleva. **El llamador no tiene forma de saber si trajo todo o se cortó.** Con `limit ≤ 200`, el techo son 10.000 filas.
+
+El tope en sí es correcto y el comentario del código lo justifica bien (sin él, un catálogo que crece dispararía cientos de requests). El problema es el silencio: lo usan las **cuatro exportaciones a Excel** y la pantalla de Reportes, así que un dueño que exporte su histórico de ventas para el contador puede recibir un archivo truncado **que parece completo**. Ya estaba anotado en `PENDIENTES_FRONTEND.md` («corta en silencio»), sin cuantificar ni proponer salida.
+
+**Fix sugerido:** devolver también si se truncó (`{items, truncated}`) y que la UI lo diga — «mostrando los primeros 10.000 registros».
+
+### Lo que se probó y está bien
+
+| Comprobación | Resultado |
+|---|---|
+| 5 ventas simultáneas de la última unidad | **Una sola** venta; stock `0.000` y estado `sold` |
+| 5 requests con la misma clave de idempotencia | **Una sola** venta; el stock baja 1, no 5 |
+| 5 aperturas de caja simultáneas con la caja ya abierta | Las cinco → `409 CASH_SESSION_ALREADY_OPEN`, sin un solo 500 |
+| Paginación por cursor en 5 listados, de 3 en 3 | Sin repetidos ni saltos: el total paginado coincide con traerlo de una vez (incluido `audit-log` con 40 páginas y 119 filas) |
+| `limit` = 201 · 0 · −5 | `422 VALIDATION_ERROR` los tres |
+| Cursor basura · cursor de otro recurso | `400 BAD_REQUEST` |
+
+> **Nota:** la apertura de caja simultánea es el contraste que vale la pena mirar. Ahí la validación ocurre **antes** y el conflicto se resuelve como error de negocio (`409`) en las cinco, sin ningún 500. Es el comportamiento que le falta a la venta.
 
 ---
 
