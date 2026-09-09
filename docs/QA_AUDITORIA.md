@@ -22,6 +22,9 @@
 | **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ✅ 08/09/2026 |
 | **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ✅ 08/09/2026 |
 | **7** · Regresión | Convertir lo encontrado en suite automatizada | ✅ 08/09/2026 |
+| **8** · Documentos y archivos | Storage y fotos, impresión, plantillas de documentos | ⏳ siguiente |
+| **9** · Los caminos de entrada | Alta de usuario, contraseñas y panel de plataforma, en navegador | ⏳ |
+| **10** · Concurrencia y volumen | Dos sesiones sobre el mismo stock y la misma caja; paginación y topes | ⏳ |
 
 **Principios de método** (los mismos del proyecto, aplicados a probar):
 
@@ -34,6 +37,53 @@
 
 
 
+
+
+---
+
+## Cobertura: qué se probó y qué no (al cerrar la Fase 7)
+
+Los **109 endpoints** pasaron por la matriz de permisos, pero eso solo verifica que **rechazan** bien — no que funcionen. Con profundidad funcional real:
+
+| Módulo | Endpoints | Cobertura funcional |
+|---|---|---|
+| `contracts` | 11 | Alta — el ciclo completo, incluidos remate e import |
+| `cashbox` | 12 | Alta — apertura, arqueo, cierre, reapertura, gastos |
+| `sales` | 7 | Alta — venta, anulación, devoluciones, notas crédito |
+| `accounts` | 7 | Alta — falta `PATCH` de cuenta |
+| `reports` | 10 | Alta — falta `stale-inventory` |
+| `inventory` | 18 | Buena — ingresos, egresos, publicación, kardex, transformaciones |
+| `identity` | 12 | Alta |
+| `customers` | 4 | **Parcial** — sin detalle, edición ni ficha con historial cruzado |
+| `catalogs` | 10 | **Parcial** — sin detalle de proveedor, sus compras ni su resumen |
+| `platform` | 9 | **Parcial** — sin eventos de suscripción ni audit-log de plataforma |
+| `company` | 8 | **Ninguna** — solo permisos |
+
+### Sin probar, por riesgo
+
+**Alto — datos sensibles o lo que el cliente se lleva en la mano**
+
+- **Storage y fotos.** `PhotoUploader`, subida a Supabase, URLs firmadas, RLS del bucket. Ahí viven cédulas, prendas y contratos firmados (Ley 1581), y es la única pieza donde el front habla directo con Supabase sin pasar por el backend.
+- **Impresión.** Contrato, paz y salvo, acta de cierre y comprobante de venta — hoy reemplazan a los PDFs.
+- **Plantillas de documentos.** El módulo `company` entero: editor Tiptap, tres formatos visuales, activar/desactivar. **Tuvo cuatro bugs en agosto**, uno de ellos tirando «No se pudo cargar la app».
+
+**Medio — flujos que ya mordieron antes**
+
+- El alta de usuario **en navegador**: el canje del enlace con `verifyOtp` y la pantalla de crear contraseña. Se probó la API, no el camino real.
+- Recuperar contraseña desde el login, y cambiar la propia en `/perfil`.
+- El panel de plataforma por UI (se hizo todo por API).
+- Exportación a Excel en las cuatro pantallas.
+
+**Medio — condiciones que no se dan probando de a uno**
+
+- **Concurrencia**: dos usuarios vendiendo el mismo artículo o cerrando caja a la vez.
+- **Volumen**: paginación con miles de registros y el tope silencioso de `fetchAllPages` (10.000 filas, corta sin avisar).
+
+**Bajo**
+
+- Navegación por teclado y lectores de pantalla (se midió contraste, no la operación sin ratón).
+- Filtros y buscadores de cada listado (se probó el de contratos).
+- Google OAuth: no está configurado.
 
 ---
 
