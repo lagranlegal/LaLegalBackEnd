@@ -23,8 +23,8 @@
 | **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ✅ 08/09/2026 |
 | **7** · Regresión | Convertir lo encontrado en suite automatizada | ✅ 08/09/2026 |
 | **8** · Documentos y archivos | Storage y fotos, impresión, plantillas de documentos | ✅ 08/09/2026 |
-| **9** · Los caminos de entrada | Alta de usuario, contraseñas y panel de plataforma, en navegador | ⏳ siguiente |
-| **10** · Concurrencia y volumen | Dos sesiones sobre el mismo stock y la misma caja; paginación y topes | ⏳ |
+| **9** · Los caminos de entrada | Alta de usuario, contraseñas y panel de plataforma, en navegador | ✅ 09/09/2026 |
+| **10** · Concurrencia y volumen | Dos sesiones sobre el mismo stock y la misma caja; paginación y topes | ⏳ siguiente |
 
 **Principios de método** (los mismos del proyecto, aplicados a probar):
 
@@ -39,6 +39,77 @@
 
 
 
+
+
+---
+
+## Fase 9 — Los caminos de entrada (09/09/2026)
+
+**Veredicto: los flujos que históricamente rompieron están sólidos.** El alta de usuario sobrevive a los crawlers, la recuperación funciona, el cambio de contraseña propia exige la actual y el panel de plataforma opera. Los dos hallazgos son de **contexto que la app tiene y no muestra**.
+
+> El cambio de día dio un escenario que no se puede fabricar: la sesión de caja quedó **abierta desde ayer**. Es exactamente lo que pasa cuando alguien olvida cerrarla.
+
+### F9-01 · Una caja abierta desde ayer no se distingue de una abierta hoy — MEDIA, abierto
+
+Con la sesión del **08/09** todavía abierta el **09/09**, la app dice:
+
+```
+Caja abierta · desde las 4:38 PM
+```
+
+**Sin fecha.** Un cajero que llega a las 8 de la mañana lee «abierta desde las 4:38 PM» y no tiene cómo saber que esa hora es de ayer — de hecho es una hora imposible para la mañana, así que o parece un error o se asume que es de hoy.
+
+El sistema **sí sabe** la fecha: `session_date: 2026-09-08` viene en la respuesta de `/cashbox/sessions/current`. Solo no la muestra.
+
+**La consecuencia, medida:** registré un gasto de 5.000 el 09/09 y entró en el turno del 08/09. Al cerrar, el acta del 08/09 lo incluye — los gastos en efectivo pasaron de 60.000 a **65.000**. Es decir: **el acta de un día contiene movimientos de otro**, el arqueo mezcla el efectivo de dos jornadas, y los reportes por `session_date` atribuyen al día equivocado.
+
+El resto del comportamiento es correcto y coherente con lo documentado: `/sessions/current` devuelve la de ayer (una abierta sigue siendo la sesión en curso), `/sessions/today` da `404`, y abrir una nueva da `409 CASH_SESSION_ALREADY_OPEN` — el sistema obliga a cerrar antes de abrir otra. Lo que falta es decirlo.
+
+**Fix sugerido:** mostrar la fecha en el banner cuando la sesión no es de hoy («Caja abierta desde ayer 08/09, 4:38 PM»), que es dato que ya viaja en la respuesta.
+
+### F9-02 · Los enlaces de acceso mandan a la URL de preview, no a la del cliente — MEDIA, abierto
+
+```
+el enlace apunta a : https://la-legal-front-end-git-dev-mateos-projects-85710491.vercel.app
+la app del cliente : https://la-legal-front-end.vercel.app
+```
+
+`FRONTEND_URL` en Fly sigue apuntando a la URL de preview (confirmado con `fly ssh console -C "printenv FRONTEND_URL"`). Afecta a **los dos** caminos de alta: invitar y recuperar.
+
+**Por qué importa:**
+
+1. El empleado nuevo recibe por WhatsApp un enlace que lleva el nombre interno del proyecto y del dueño (`mateos-projects-85710491`). Un enlace así, pidiendo crear una contraseña, **se lee como phishing**.
+2. Tras poner la contraseña queda navegando en un dominio distinto del que le dijeron. Si guarda el marcador, guarda el equivocado.
+3. Son dos **orígenes** distintos: la sesión que crea ahí no existe en la URL oficial, así que tiene que volver a entrar.
+
+**Y la razón que lo justificaba ya caducó.** `CONTINUAR.md` dice: *«`FRONTEND_URL` en Fly debe seguir apuntando a la URL de preview de dev»*, porque Supabase descartaba la de producción al no estar en las *Redirect URLs*. Pero Mateo las agregó el 03/09, **y** el fix del `token_hash` eliminó del todo la dependencia del redirect. Comprobado hoy pidiéndoselo a `generate_link`:
+
+```
+se pidió  : https://la-legal-front-end.vercel.app/auth/callback
+devolvió  : https://la-legal-front-end.vercel.app/auth/callback   ✓ respetado
+```
+
+**El cambio es un `fly secrets set FRONTEND_URL=…` y hoy es seguro.** No lo apliqué: es infraestructura.
+
+### F9-03 · `sale_return` sin traducir en el acta de cierre — BAJA, abierto
+
+En el desglose del acta, todos los conceptos salen en español («Abono de interés», «Desembolso de préstamo», «Recibido del convenio», «Consignado / trasladado») menos uno: **`sale_return`**. Mismo patrón que `completed`/`voided` en el listado de Ventas (F8-03): un valor del enum sin etiqueta en el mapa del front, visible en un documento que se imprime y se archiva.
+
+### Lo que se probó y está bien
+
+| Comprobación | Resultado |
+|---|---|
+| **El alta de usuario completa, en navegador real** | El enlace apunta a la app con `token_hash`; los cuatro crawlers (WhatsApp, Telegram, Slack, Googlebot) reciben `200` **sin quemarlo**; después de ellos, abre «Crea tu contraseña», guarda y **entra a la app**. El fix del 03/09 aguanta |
+| Activación `invited → active` | El usuario nuevo quedó `active` tras entrar con su propia contraseña |
+| **Recuperación de contraseña**, de punta a punta | Enlace fresco → pantalla de contraseña → entra; y la anterior deja de servir |
+| Enlace ya consumido | Pantalla propia: «Este enlace ya se usó. Cada enlace sirve una sola vez…» |
+| **Cambio de la propia contraseña** en `/perfil` | Exige la actual; tras el cambio la original ya no entra y la nueva sí. La pantalla explica por qué se pide («para que nadie pueda cambiarla desde tu pantalla si la dejas abierta») |
+| **Panel de plataforma** en navegador | Lista 7 empresas con estado, plan y vencimiento; el detalle abre con suspender, extender, monto pagado y notas |
+| Caja de ayer: `current` / `today` / abrir otra | Devuelve la de ayer · `404` · `409 CASH_SESSION_ALREADY_OPEN` |
+| Cerrar la de ayer y abrir la de hoy | Correcto; tras cerrar, `today` sigue en `404` hasta abrir la del día |
+| **Acta de cierre de caja** *(pendiente de la Fase 8)* | Imprime completa: «Acta de cierre — 08/09/2026», saldo inicial, esperado, contado, diferencia, la justificación del descuadre, el desglose módulo×concepto×medio y la hora de cierre |
+
+> **Confirmado en la UI**, la cola de H-14: en el panel, las empresas suspendidas o vencidas muestran plan y vencimiento como «—», indistinguibles de una que nunca tuvo plan.
 
 ---
 
