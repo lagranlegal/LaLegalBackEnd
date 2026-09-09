@@ -1,1 +1,6 @@
 _run/
+
+# Evidencia de una corrida concreta (capturas, PDFs impresos). Lo que prueban
+# se transcribe a docs/QA_AUDITORIA.md; el binario no aporta nada versionado.
+*.png
+*.pdf

@@ -170,6 +170,22 @@ Toda excepción de negocio hereda de `AppError` (`app/core/errors.py`) y se seri
 
 `code` es estable y pensado para que el front decida comportamiento por código (mostrar un modal específico, redirigir, etc.), nunca parseando `message` (ese es para humanos, puede cambiar). Catálogo de códigos usados hasta ahora en `docs/API_GUIDE.md`.
 
+**Un test vigila que el catálogo y el código no se separen.** `tests/unit/test_error_catalog.py` extrae todos los `code=` del árbol de módulos y falla si alguno no está documentado en `API_GUIDE` §15, o si el catálogo documenta un código que ya nadie emite. Nació de encontrar exactamente eso: `CREDIT_NOTE_INSUFFICIENT_BALANCE` estaba documentado y el backend nunca lo emitía —lanzaba un `AppError` sin `code`, que cae en el `BAD_REQUEST` por defecto—, así que un front que escuchara el código documentado no lo recibía jamás. Es el mismo bug que costó once días una vez: *un código de error es un contrato entre dos capas, y nadie lo compila*.
+
+### Lo que hace cumplir la BASE también tiene que salir como error de negocio
+
+Hay invariantes que no las decide el servicio sino el esquema: `CHECK (quantity >= 0)` en `inventory_item`, `UNIQUE(company_id, idempotency_key)` en las tablas de dinero. Están ahí a propósito —la base hace cumplir aunque haya un bug en la query— pero bajo concurrencia **es la base la que rechaza**, y una `IntegrityError` sin capturar sube como `500`.
+
+`app/core/errors.py` tiene un `@app.exception_handler(IntegrityError)` que traduce **solo lo que sabemos nombrar**:
+
+| Restricción violada | Se convierte en |
+|---|---|
+| `…idempotency_key…` | `409 IDEMPOTENCY_IN_PROGRESS` — el reintento llegó mientras la original seguía en vuelo, que es justo el caso para el que existe la clave |
+| `quantity_check` | `400 BAD_REQUEST` con el mensaje de stock insuficiente |
+| cualquier otra | `raise exc` — sigue subiendo como 500 |
+
+Ese último renglón es la regla: **traducir a ciegas convertiría un bug de esquema desconocido en un mensaje tranquilizador**. Lo encontró la Fase 10 de la auditoría de QA lanzando cinco ventas de la última unidad en el mismo instante: la integridad aguantaba (una sola venta, stock en cero) pero cuatro clientes recibían un 500 sin código que mapear, y en el caso de la idempotencia el cajero recibía un error de una venta **que sí se había hecho**.
+
 ## 8. Entornos y despliegue
 
 - **Front:** Vercel (Vite + React).
@@ -179,7 +195,12 @@ Toda excepción de negocio hereda de `AppError` (`app/core/errors.py`) y se seri
 - **CORS** (`app/common/cors.py`, aplicado en `main.py`): `ENVIRONMENT=dev` acepta `localhost:5173`/`localhost:3000` y cualquier preview de Vercel (`https://*.vercel.app`, regex) sin configurar nada — pensado para que el front pegue contra `compraventa-backend-dev` desde local o desde un preview de PR sin fricción. Producción es explícito y nada más: solo los orígenes exactos en `CORS_ALLOW_ORIGINS` (secret, coma-separado) — sin eso configurado, prod rechaza toda request de browser.
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) — corre en push a `main` y a `dev`, y en cada PR. Lint + tipos + tests unitarios siempre; tests de integración/RLS contra un Postgres efímero (sin pooler, por eso no sufre el problema de Supavisor documentado en `docs/API_GUIDE.md`). Deploy a Fly todavía es manual (`fly deploy --config fly.dev.toml`/`fly.prod.toml`); automatizarlo en CI es el siguiente paso natural una vez el deploy manual esté probado.
 - **Costos de Fly (verificado en fly.io/docs/about/pricing, agosto 2026):** ya no existe un tier gratis permanente (lo quitaron en 2024); el billing es por segundo mientras la máquina corre, no por mes fijo. Un `shared-cpu-1x`/256MB siempre encendido cuesta ~$2.02/mes; 512MB ~$3.32/mes. `dev` usa `auto_stop_machines=true` + `min_machines_running=0` (`fly.dev.toml`) — se apaga sola sin tráfico, así que en un ambiente de pruebas de uso intermitente el cómputo puede quedar en centavos al mes (con unos segundos de cold start en el primer request tras estar apagada). `prod` usa `min_machines_running=1` (siempre encendida, sin cold start) — esa sí cuesta el precio de lista completo. Aparte: ancho de banda de salida (~$0.02/GB en Norteamérica/Europa) e IP dedicada si se agrega una (no hace falta: Fly da IPv4 compartida + IPv6 gratis por defecto). Total estimado para los dos ambientes juntos con tráfico bajo: unos pocos dólares al mes, no los $8-25/mes que citan blogs de terceros asumiendo tráfico constante en ambos — pero son precios de lista de Fly, no una promesa: confirmar en el dashboard de facturación antes de asumir un número.
-- **`dev` ya está desplegado**: `https://compraventa-backend-dev.fly.dev` (org `personal`, región `gru` — São Paulo; `bog`/Bogotá está deprecada en Fly y ya no acepta recursos nuevos). 1 máquina `shared-cpu-1x`/256MB con `auto_stop`/`auto_start`, secrets apuntando al Supabase `dev` (`driyubkodnsqxbtxcmaz`), más una Fly Machine programada (`--schedule daily`) para el job nocturno — corrida de verificación ya ejecutada con éxito contra la BD real. `prod` queda pendiente de un proyecto Supabase propio antes de desplegarse igual.
+- **`dev` ya está desplegado**: `https://compraventa-backend-dev.fly.dev` (org `personal`, región **`sjc`** — San José, CA; se movió ahí desde `gru`/São Paulo el 27/08/2026 porque la base vive en AWS `us-west-2` y cada consulta cruzaba el continente. `bog`/Bogotá está deprecada en Fly y no acepta recursos nuevos). 1 máquina `shared-cpu-1x`/**512MB** con `auto_stop`/`auto_start`, secrets apuntando al Supabase `dev` (`driyubkodnsqxbtxcmaz`), más una Fly Machine programada (`nightly-job`, `--schedule daily`) para el job nocturno. `prod` queda pendiente de un proyecto Supabase propio antes de desplegarse igual.
+
+  > **Dos trampas de la máquina programada, las dos cobradas ya.**
+  >
+  > 1. **Se ve como una máquina huérfana y se borra sin querer.** No pertenece al process group `app`, así que en una limpieza de máquinas "sueltas" es lo primero que parece sobrante — pasó el 27/08 y nadie lo notó hasta la auditoría de QA doce días después. Sin ella las suscripciones vencidas nunca se marcan y los contratos se quedan con el estado del día anterior, así que **una prenda lista para remate no aparece en la lista**. Comprobar que existe: `fly machines list --config fly.dev.toml | grep nightly-job`.
+  > 2. **No se actualiza con `fly deploy`.** Un deploy cambia la imagen del process group `app`; la máquina programada se queda con la imagen **con la que se creó**. Para moverla hay que recrearla contra el tag real, que sale de `fly image show --json` (devuelve una lista, con `Registry`/`Repository`/`Tag` — el tag es un `deployment-<id>`, **no existe `:latest`** en el registro de Fly). Si el job empieza a comportarse como código viejo, es esto.
 
 ## 9. Por qué NullPool + `statement_cache_size=0`
 
