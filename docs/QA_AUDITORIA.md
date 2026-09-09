@@ -42,6 +42,56 @@
 
 
 
+
+---
+
+## Cierre: los hallazgos aplicados (09/09/2026)
+
+Tras las diez fases, se tomó la lista de hallazgos abiertos y se aplicó lo que era **código**, dejando fuera solo lo que necesita una decisión de negocio o de diseño. Cada fix con su test, y **cada test visto fallar sin él**.
+
+### Backend
+
+| Hallazgo | Qué se hizo |
+|---|---|
+| **F5-01** · El descuento de interés no bajaba el ingreso | Se resta, igual que el de una venta. Estaban en dos líneas contiguas: `ventas = gross_revenue - discounts` frente a `intereses = interest_collected`. Corregido también en `/reports/series`, que usaba la misma definición |
+| **F10-01** · Los conflictos de concurrencia devolvían 500 | Un handler traduce lo que la BASE detecta a errores de negocio: la violación del `UNIQUE(idempotency_key)` estrena código propio, **`IDEMPOTENCY_IN_PROGRESS`** (el reintento llegó mientras la original seguía en vuelo — justo el caso para el que existe la clave), y el `CHECK (quantity >= 0)` pasa a ser el `400` de stock. Solo se traduce lo que sabemos nombrar; el resto sigue subiendo como 500 |
+| **F2-01** · «No hay plata» cuando lo que falta es la caja | Reordenado: la sesión se comprueba antes que el saldo. Sin sesión, una cuenta `cash` reporta `0.00`, así que al revés ganaba el error equivocado |
+| **F8-01** · Se podía activar una plantilla vacía | Guardarla sigue siendo legítimo (un borrador a medias); activarla da **`TEMPLATE_IS_EMPTY`** |
+| **F8-02** · Activar era irreversible | `POST /company/document-templates/{id}/deactivate` — hay camino de vuelta al documento de fábrica |
+| **F7-01** · `CREDIT_NOTE_INSUFFICIENT_BALANCE` documentado y no emitido | Corregido durante la Fase 7 |
+
+> El test de auditoría del propio proyecto cazó que la acción nueva no seguía la convención de nombres ni estaba registrada — otra vez hizo su trabajo.
+
+### Frontend
+
+| Hallazgo | Qué se hizo |
+|---|---|
+| **F6-02** · 12 combinaciones bajo WCAG AA | Los seis tokens semánticos pasan a valores calculados contra los **tres** fondos donde viven (`--bg-app`, `--bg-surface` y su propio `-soft`, el más exigente por compartir tono), conservando el matiz. **El teal de marca no se tocó** |
+| **F6-03** · `/caja` desbordaba 59px a 360px | `flex-wrap` + `min-w-0` en el `PageHeader` **y en los dos contenedores reales**: los tres botones de `/caja` no viven en el header sino en una card propia, y `/contratos` tenía otro `flex` anidado dentro de sus acciones |
+| **F9-01** · El turno de ayer no se distinguía | La franja se pone ámbar y dice la fecha y qué hacer. El dato (`session_date`) ya viajaba en la respuesta |
+| **F6-01** · El error más arriba quedaba fuera de vista | `EntryFormPage` usa `revealFirstError`, el helper que ya existía |
+| **F8-03 · F9-03** · Etiquetas en inglés | `completed`/`voided` en Ventas y `sale_return` en el acta. `CONCEPT_LABELS` cubre ahora los 13 valores del enum |
+
+**Los dos tests de contraste marcados con `it.fails` dejaron de estarlo.** Al corregir los tokens empezaron a fallar por *«pasó cuando se esperaba que fallara»* — que es exactamente para lo que servía la marca, y por lo que se eligió sobre un `skip`.
+
+> **Nota de método, y es la más útil de esta tanda.** El primer fix de F6-03 fue al `PageHeader` porque parecía el sospechoso obvio. Al **volver a medir** tras desplegarlo, `/caja` seguía saliéndose los mismos 59px: sus botones no estaban ahí. El fix del componente compartido es correcto y previene el caso general, pero no era donde estaba el problema medido. Sin esa segunda medición, esto se habría reportado como arreglado sin estarlo — que es exactamente el tipo de cosa que esta auditoría existe para no hacer.
+
+### Configuración
+
+**F9-02** · `FRONTEND_URL` pasa a la URL que usa el cliente. Los enlaces de invitación y recuperación llevaban el nombre interno del proyecto y del dueño (`…-git-dev-mateos-projects-85710491…`) — un enlace así, pidiendo crear una contraseña, se lee como phishing. La razón documentada para mantenerlo en preview había caducado: se comprobó pidiéndole a `generate_link` la URL de producción y hoy la respeta.
+
+### Lo que se dejó a propósito
+
+| | Por qué |
+|---|---|
+| **H-04** · Descuento sobre intereses sin pantalla | Decisión de negocio — `DECISIONES_PENDIENTES.md` §1 |
+| **F3-01** · Prestar sin efectivo en el cajón | Decisión de negocio — `DECISIONES_PENDIENTES.md` §3 |
+| **F2-02** · Gasto por transferencia con la caja cerrada | Decisión de negocio: cambiarlo pide hacer `expense.session_id` opcional y definir a qué corte pertenece un gasto sin sesión |
+| **El teal de marca** | El botón primario relleno (blanco sobre `--brand-500`) está en 2.70 y también incumple, pero oscurecerlo cambia la identidad visual |
+| **F10-02** · `fetchAllPages` corta en silencio | El tope es correcto; falta devolver que truncó y que la UI lo diga. Toca las cuatro exportaciones, mejor como su propia tanda |
+| **H-05** · El inicio vacío del Asesor | Oportunidad de producto, no defecto |
+| **F2-03** · Idempotencia con otro cuerpo | Menor: devuelve el original, que es el comportamiento seguro |
+
 ---
 
 ## Fase 10 — Concurrencia y volumen (09/09/2026)
