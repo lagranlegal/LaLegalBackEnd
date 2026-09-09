@@ -20,7 +20,7 @@
 | **3** · Contratos | Snapshot legal, herencia de categoría, meses completos, máquina de estados, remate, import | ✅ 08/09/2026 |
 | **4** · Inventario y tienda | Códigos y letras, producto vs lote, unidades, transformaciones, kardex, ventas, devoluciones | ⏳ |
 | **5** · El círculo completo | Que cada operación de dinero aparezca a la vez en caja, reportes, auditoría y kardex | ✅ 08/09/2026 |
-| **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ⏳ |
+| **6** · UX, UI y accesibilidad | Estados de carga, mensajes, responsive, teclado, contraste, tema oscuro, impresión | ✅ 08/09/2026 |
 | **7** · Regresión | Convertir lo encontrado en suite automatizada | ⏳ |
 
 **Principios de método** (los mismos del proyecto, aplicados a probar):
@@ -32,6 +32,115 @@
 
 
 
+
+
+---
+
+## Fase 6 — UX, UI y accesibilidad (08/09/2026)
+
+**Veredicto: tres hallazgos, y los tres tienen fix en un solo lugar.** Ninguno es una pantalla rota; son cosas que se arreglan en un componente compartido o en `tokens.css`, que es exactamente el mecanismo que este proyecto ya usa para no tocar features una por una.
+
+Lo medido con Playwright contra la app en vivo, con login real: 12 pantallas × 2 temas para el contraste, 12 × 3 anchos para el responsive, y los cuatro formularios largos.
+
+### F6-01 · Los tres formularios largos no usan `revealFirstError` — MEDIA-BAJA, abierto
+
+`CONTINUAR.md` lo dejó anotado: *«mismo patrón sin revisar en otros formularios largos (venta, transformación, ingreso): si alguien reporta "el botón no hace nada", empezar por acá»*. Confirmado: el helper existe, es genérico, y **solo lo usan `ContractFormPage` y `ContractImportPage`**.
+
+No es que no muestren nada — los tres dan señal. Lo que falla es *cuál* señal se ve. Medido en **Nuevo ingreso**, enviando el formulario incompleto:
+
+```
+scrollY tras enviar: 469 · ventana visible del documento: 469 … 1269
+
+y=  361  fuera    "Un ingreso de tipo «Compra» necesita un proveedor"   ← el más arriba
+y=  888  VISIBLE  "El nombre es obligatorio"
+y=  984  VISIBLE  "Selecciona una categoría"
+y= 1080  VISIBLE  "Selecciona la categoría final"
+
+foco tras enviar: lines.0.name
+```
+
+El error que está **más arriba en el documento** queda 108 px por encima de la vista, y el foco cae en el nombre del artículo. El usuario corrige lo que ve, reenvía, y vuelve a fallar por algo que nunca vio — que es la mitad del bug que se arregló en contratos el 03/09.
+
+Los otros dos: **Nueva venta** muestra «Agrega al menos un artículo al carrito» y sí es visible (el formulario es corto y cabe). **Nueva transformación** usa otra estrategia: deshabilita el botón. Eso evita el clic muerto, pero el botón no dice por qué (sin `title` ni texto asociado) — el aviso está en la página, y hay que buscarlo.
+
+**Fix:** aplicar el helper que ya existe, tres líneas por formulario. Y decidir si la transformación sigue con botón deshabilitado o se alinea con el resto.
+
+### F6-02 · Doce combinaciones bajo WCAG AA en el tema claro; el oscuro está impecable — MEDIA, abierto
+
+Amplía el H-03 de la Fase 1 (que encontró tres) a un barrido de 12 pantallas en los dos temas:
+
+| Tema | Combinaciones por debajo de AA |
+|---|---|
+| **Claro** | **12** |
+| **Oscuro** | **0** |
+
+Que el tema oscuro —hecho después, con ~25 variables redefinidas— esté perfecto y el claro no, dice dónde está el problema: en el bloque original de `tokens.css`.
+
+Las peores, por impacto:
+
+| Ratio | Mín | Dónde |
+|---|---|---|
+| **2.70** | 4.5 | «+ Nuevo contrato» y todo CTA de texto teal — **en 10 de las 12 pantallas** |
+| **2.70** | 3 | Cifras de KPI de 24px en el inicio |
+| **2.77 / 2.97** | 4.5 | `--text-muted`: labels de tabla, hints, «Actualizado al…» — sistémico |
+| **2.98** | 4.5 | «Caja abierta» en el banner global |
+| **3.33** | 4.5 | La utilidad en Reportes, 18px |
+| **1.97** | 4.5 | «Caja cerrada» sobre su fondo ámbar (medido en la Fase 1) |
+
+**La parte buena: la marca no hay que tocarla.** `DESIGN_SYSTEM.md` §4.10 ya prescribe *«usar `--brand-600`+ para texto sobre claro»*, y los números dicen cuál sirve:
+
+```
+--brand-500  #00b19e   2.51   ✗
+--brand-600  #009c8b   3.19   ✗
+--brand-700  #00806f   4.53   ✓ pasa AA
+```
+
+O sea: **el token correcto ya existe y la guía ya lo pide; lo que falta es usarlo para texto.** Cero cambios de paleta, cero riesgo para el rebranding.
+
+Para los semánticos sí hay que oscurecer. Valores calculados contra el fondo gris (el peor caso), conservando el tono:
+
+| Token | Hoy | Ratio | Propuesta | Ratio |
+|---|---|---|---|---|
+| `--text-muted` | `#8a97a8` | 2.77 | `#647387` | 4.50 |
+| `--success` | `#22a06b` | 3.10 | `#1b8056` | 4.58 |
+| `--danger` | `#e5484d` | 3.65 | `#de2026` | 4.51 |
+| `--warning` | `#e8a23d` | 2.02 | `#9e6513` | 4.52 |
+| `--info` | `#3b82f6` | 3.43 | `#1268f4` | 4.54 |
+| `--status-extension` | `#d97706` | 2.97 | `#ab5e05` | 4.51 |
+
+Y para el texto de estado sobre su propio fondo suave: `warning` → `#9a6312` (4.58), `success` → `#1b7e54` (4.52), `danger` → `#d41e24` (4.56), `info` → `#0b63f3` (4.55).
+
+**No lo apliqué**: cambia la cara de toda la app y esa es una decisión de producto, no de QA.
+
+### F6-03 · Tres pantallas desbordan a 360 px, y la causa es un componente compartido — MEDIA-BAJA, abierto
+
+`DESIGN_SYSTEM.md` §4.11 lo pone como regla dura: *«la operación diaria debe ser 100% usable en un teléfono de gama media — el mostrador puede ser un celular»*, y la Definición de Hecho del front pide «responsive verificado (360px y 1280px)».
+
+| Pantalla | 360 px | 768 | 1280 | Culpable |
+|---|---|---|---|---|
+| `/caja` | **desborda 59 px** | ok | ok | El botón «Cerrar caja» llega a x=419 |
+| `/cuentas` | **desborda 15 px** | ok | ok | Un `<path>` de ícono sobresale |
+| `/contratos` | **desborda 14 px** | ok | ok | El botón «+ Nuevo contrato» llega a x=374 |
+
+Las otras nueve pantallas pasan limpias en los tres anchos. **`/caja` es la más grave** porque es operación diaria de mostrador, justo el caso que la regla nombra.
+
+La causa de `/caja` y `/contratos` es la misma: **la fila de acciones del `PageHeader` no envuelve en pantallas angostas**. Como es un componente compartido que usan todas las pantallas, se arregla en un solo sitio — y de paso previene las que vengan.
+
+> **Lo que sí está bien y conviene no tocar:** en `/inventario` el botón «Transformaciones» llega a x=430 con el viewport en 360, pero **el documento no desborda** (`scrollWidth` = 360). Es la fila de pestañas dentro de su contenedor con scroll horizontal — el fix del 02/09 funcionando exactamente como debe.
+
+### Lo que se probó y está bien
+
+| Comprobación | Resultado |
+|---|---|
+| Tema oscuro, 12 pantallas | **Cero** problemas de contraste |
+| Responsive 768 y 1280, 12 pantallas | Sin desbordes |
+| Responsive 360, las otras nueve pantallas | Sin desbordes |
+| Pestañas de Inventario a 360 | Scroll contenido, sin desbordar el documento (fix del 02/09) |
+| Formulario de contrato incompleto | Sube a la vista, muestra los cinco errores y enfoca el primero (fix del 03/09) |
+| Venta con carrito vacío | «Agrega al menos un artículo al carrito», visible sin scroll |
+| Transformación vacía | Botón deshabilitado — no hay clic muerto posible |
+| `--bg-muted` (#ebeef3) vs `--bg-app` (#f5f7fa) | Distintos: los skeletons se ven (fix del 28/08) |
+| Dashboard sin `reports.view` | Nombra el permiso que falta y a quién pedírselo (Fase 1) |
 
 ---
 
