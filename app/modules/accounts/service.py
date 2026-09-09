@@ -353,15 +353,6 @@ async def create_transfer(
             details={"transfer_date": str(transfer_date), "today": str(today)},
         )
 
-    saldo_origen = await repository.account_balance(
-        db, company_id=company_id, account_id=body.from_account_id
-    )
-    if body.amount > saldo_origen:
-        raise AppError(
-            "No se puede trasladar más de lo que hay en la cuenta de origen.",
-            details={"disponible": str(saldo_origen), "amount": str(body.amount)},
-        )
-
     # Sacar efectivo del cajón exige el cajón abierto, igual que cualquier
     # otro movimiento de efectivo: sin sesión el arqueo no podría cuadrar. Y
     # es deliberado que el traslado vaya ANTES del cierre — una sesión cerrada
@@ -375,6 +366,21 @@ async def create_transfer(
             "cerrar la caja: un cierre ya firmado no se puede modificar."
         )
     session_id = session._mapping["id"] if session is not None else None
+
+    # El saldo se comprueba DESPUÉS de la sesión, y el orden importa: sin
+    # sesión abierta el saldo de una cuenta `cash` se reporta como 0.00 (no
+    # hay cajón vivo que consultar), así que al revés ganaba «no se puede
+    # trasladar más de lo que hay» — el cajero salía a buscar plata que sí
+    # estaba, y el front no podía ofrecer el modal de «Abrir caja» porque le
+    # llegaba BAD_REQUEST en vez de CASH_SESSION_NOT_OPEN (auditoría, F2-01).
+    saldo_origen = await repository.account_balance(
+        db, company_id=company_id, account_id=body.from_account_id
+    )
+    if body.amount > saldo_origen:
+        raise AppError(
+            "No se puede trasladar más de lo que hay en la cuenta de origen.",
+            details={"disponible": str(saldo_origen), "amount": str(body.amount)},
+        )
 
     transfer_id = uuid4()
     number = await repository.next_transfer_number(db, company_id=company_id)

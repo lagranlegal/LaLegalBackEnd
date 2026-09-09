@@ -502,8 +502,8 @@ Y cuenta **solo el efectivo**: quedan fuera los 80.000 del gasto por transferenc
 La asimetría está en dos líneas contiguas de `reports/service.py`:
 
 ```python
-ventas    = _dec(t["gross_revenue"]) - _dec(t["discounts"])   # ← resta el descuento
-intereses = _dec(e["interest_collected"])                     # ← NO resta interest_discounts
+ventas = _dec(t["gross_revenue"]) - _dec(t["discounts"])  # ← resta el descuento
+intereses = _dec(e["interest_collected"])  # ← NO resta interest_discounts
 ```
 
 El dato existe —`interest_discounts` se consulta y se devuelve en la respuesta— pero no entra en el cálculo. Medido con un descuento real de 10.000 sobre un abono:

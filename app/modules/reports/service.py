@@ -366,8 +366,14 @@ async def get_income_statement(
 
     t, e, g = tienda._mapping, empeno._mapping, gastos._mapping
 
+    # Los dos ingresos se calculan igual: brutos MENOS los descuentos otorgados.
+    # Un descuento es plata que se decidió no cobrar —una rebaja del ingreso—, no
+    # un dato informativo, y da lo mismo que sea sobre una venta o sobre un
+    # interés. Hasta el 09/09/2026 el de intereses no se restaba, así que la
+    # utilidad se sobreestimaba por todos los descuentos de interés otorgados, y
+    # `/reports/series` arrastraba el mismo sesgo por usar esta definición.
     ventas = _dec(t["gross_revenue"]) - _dec(t["discounts"])
-    intereses = _dec(e["interest_collected"])
+    intereses = _dec(e["interest_collected"]) - _dec(e["interest_discounts"])
     ingresos = ventas + intereses
     costo_ventas = _dec(t["cost_of_goods_sold"])
     utilidad_bruta = ingresos - costo_ventas

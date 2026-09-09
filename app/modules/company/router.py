@@ -110,3 +110,22 @@ async def activate_document_template(
     return await service.activate_template(
         db, company_id=user.company_id, template_id=template_id, actor_id=user.id
     )
+
+
+@router.post("/document-templates/{template_id}/deactivate", status_code=204)
+async def deactivate_document_template(
+    template_id: UUID,
+    user: Annotated[CurrentUser, Depends(_configure)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> None:
+    """Vuelve al documento por defecto: el JSX de respaldo del front.
+
+    Sin esto no había camino de vuelta. Activar era irreversible salvo
+    activando otra: no existía «desactivar», el `PATCH` con `is_active: false`
+    respondía 200 ignorándolo y borrar la activa daba `409`. La red de
+    seguridad que `API_GUIDE` §4 bis promete —imprimir como siempre para quien
+    nunca toque esto— quedaba inalcanzable en cuanto alguien la tocaba una vez.
+    """
+    await service.deactivate_template(
+        db, company_id=user.company_id, template_id=template_id, actor_id=user.id
+    )

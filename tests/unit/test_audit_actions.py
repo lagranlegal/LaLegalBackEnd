@@ -73,6 +73,7 @@ ACCIONES_AUDITADAS = {
     "update_document_template",
     "activate_document_template",
     "delete_document_template",
+    "deactivate_document_template",
     # accounts
     "create_account",
     "update_account",

@@ -30,11 +30,19 @@ NO_SON_DE_NEGOCIO = {
 
 
 def _codigos_del_codigo() -> set[str]:
-    """Todos los `code = "X"` y `code="X"` que el backend puede devolver."""
+    """Todos los códigos de error que el backend puede devolver.
+
+    Dos formas, y hacen falta las dos: los servicios los pasan por nombre
+    (`code="X"`, o como atributo de clase en `errors.py`) y el handler global
+    los pasa **posicionalmente** a `_error_response(status, "X", ...)`. Mirar
+    solo la primera dejaba fuera todo lo que responde el handler — un punto
+    ciego que este mismo test tuvo hasta el 09/09/2026.
+    """
     encontrados: set[str] = set()
     for archivo in APP.rglob("*.py"):
-        for m in re.finditer(r'\bcode\s*=\s*"([A-Z][A-Z0-9_]+)"', archivo.read_text()):
-            encontrados.add(m.group(1))
+        texto = archivo.read_text()
+        encontrados.update(re.findall(r'\bcode\s*=\s*"([A-Z][A-Z0-9_]+)"', texto))
+        encontrados.update(re.findall(r'_error_response\(\s*[^,]+,\s*"([A-Z][A-Z0-9_]+)"', texto))
     return encontrados - NO_SON_DE_NEGOCIO
 
 

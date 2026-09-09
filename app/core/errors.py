@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 
 
 class AppError(Exception):
@@ -107,6 +108,51 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
         return _error_response(exc.status_code, exc.code, exc.message, exc.details)
+
+    @app.exception_handler(IntegrityError)
+    async def handle_integrity_error(_request: Request, exc: IntegrityError) -> JSONResponse:
+        """Traduce los conflictos que la BASE detecta a errores de negocio.
+
+        Dos operaciones simultáneas sobre lo mismo llegan hasta acá: las
+        validaciones del servicio comprueban «hay stock» / «no existe esa clave»
+        antes de escribir, y bajo concurrencia las dos pasan esa comprobación
+        porque ninguna ha escrito todavía. Quien salva la integridad es la base
+        —el `CHECK` y el `UNIQUE`— y eso está bien: es el diseño del proyecto.
+
+        Lo que estaba mal era la respuesta. Sin este handler, quien perdía la
+        carrera recibía un `500` en texto plano, sin el envelope `{code, message,
+        details}` y sin nada que el front pudiera mapear: el cajero veía «algo
+        salió mal» sin saber si la venta se hizo. Medido en la Fase 10 de la
+        auditoría: de cinco ventas simultáneas de la última unidad, cuatro
+        respondían 500.
+
+        Se traduce solo lo que sabemos nombrar; cualquier otra violación sigue
+        subiendo como 500, porque un error que no entendemos no debe disfrazarse
+        de error de negocio.
+        """
+        detalle = str(getattr(exc, "orig", exc))
+
+        if "idempotency_key" in detalle:
+            # El reintento llegó mientras la primera petición seguía en vuelo,
+            # que es justo el caso para el que existe la `Idempotency-Key`. La
+            # original va a terminar bien: lo correcto es decirlo, no fallar.
+            return _error_response(
+                status.HTTP_409_CONFLICT,
+                "IDEMPOTENCY_IN_PROGRESS",
+                "Esta misma operación ya se está registrando. No la repitas: "
+                "consulta el resultado en unos segundos.",
+                {},
+            )
+
+        if "quantity_check" in detalle:
+            return _error_response(
+                status.HTTP_400_BAD_REQUEST,
+                "BAD_REQUEST",
+                "No hay suficiente cantidad disponible.",
+                {},
+            )
+
+        raise exc
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(

@@ -237,12 +237,69 @@ async def delete_template(
     )
 
 
+def _tiene_contenido(body: Any) -> bool:
+    """¿Este documento ProseMirror imprimiría algo?
+
+    Un `{}` o un `{"type": "doc", "content": []}` son documentos válidos para
+    el editor y para el esquema, pero en papel no dejan nada.
+    """
+    if not isinstance(body, dict):
+        return False
+    contenido = body.get("content")
+    return isinstance(contenido, list) and len(contenido) > 0
+
+
+async def deactivate_template(
+    db: AsyncSession, *, company_id: UUID, template_id: UUID, actor_id: UUID
+) -> None:
+    """Vuelve al documento por defecto (el JSX de respaldo).
+
+    Sin esto no había camino de vuelta: no existía «desactivar», el `PATCH` con
+    `is_active: false` respondía 200 y lo ignoraba, y borrar la activa daba 409.
+    O sea que en cuanto una empresa activaba su primera plantilla, el documento
+    de fábrica —que `API_GUIDE` §4 bis presenta como la red de seguridad—
+    quedaba inalcanzable para siempre (auditoría de QA, F8-02).
+    """
+    existing = await repository.get_template(db, company_id=company_id, template_id=template_id)
+    if existing is None:
+        raise NotFoundError("La plantilla no existe.")
+    if not existing._mapping["is_active"]:
+        return
+    await repository.deactivate_active_template(
+        db, company_id=company_id, document_type=existing._mapping["document_type"]
+    )
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=actor_id,
+        module="company",
+        action="deactivate_document_template",
+        entity_type="document_template",
+        entity_id=template_id,
+        before={"is_active": True},
+        after={"is_active": False},
+    )
+
+
 async def activate_template(
     db: AsyncSession, *, company_id: UUID, template_id: UUID, actor_id: UUID
 ) -> DocumentTemplateOut:
     existing = await repository.get_template(db, company_id=company_id, template_id=template_id)
     if existing is None:
         raise NotFoundError("La plantilla no existe.")
+
+    # Una plantilla sin contenido se puede GUARDAR —un borrador a medias es
+    # legítimo— pero no activar: el cuerpo del documento sale de acá, así que
+    # activarla imprime contratos con encabezado, título y pie, y nada más.
+    # Medido en la auditoría de QA (Fase 8): 137 caracteres, sin cliente, sin
+    # prendas, sin monto y sin firmas. Un contrato de empeño en blanco no
+    # ampara la prenda de nadie, y hasta hoy nada lo impedía ni lo advertía.
+    if not _tiene_contenido(existing._mapping["body"]):
+        raise ConflictError(
+            "Esta plantilla está vacía: activarla imprimiría los documentos sin "
+            "su contenido. Escribe el cuerpo antes de activarla.",
+            code="TEMPLATE_IS_EMPTY",
+        )
 
     # Swap en dos pasos, misma transacción: desactivar la que esté activa HOY
     # antes de activar la nueva — en ese orden el índice único parcial nunca

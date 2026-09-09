@@ -522,10 +522,16 @@ async def monthly_series(
                     interval '1 month'
                 )::date as month
             ),
+            -- Interés NETO del descuento, igual que la venta se cuenta neta de
+            -- su descuento unas líneas más abajo: un descuento es plata que se
+            -- decidió no cobrar, no un dato informativo. Sin el `- discount`
+            -- esta serie sobreestimaba el ingreso del mes por todos los
+            -- descuentos de interés otorgados, y no cuadraba con
+            -- `/reports/income-statement` (09/09/2026).
             intereses as (
                 select
-                  date_trunc('month', (paid_at at time zone :tz)::date)::date as month,
-                  coalesce(sum(interest_amount), 0)                           as total
+                  date_trunc('month', (paid_at at time zone :tz)::date)::date        as month,
+                  coalesce(sum(interest_amount), 0) - coalesce(sum(discount_amount), 0) as total
                 from public.contract_payment
                 where company_id = :company_id
                 group by 1

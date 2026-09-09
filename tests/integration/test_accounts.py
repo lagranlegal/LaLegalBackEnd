@@ -825,3 +825,42 @@ def test_transfer_history_can_actually_be_listed(client: TestClient, accounts_te
     )
     assert siguiente.status_code == 200, siguiente.text
     assert siguiente.json()["items"][0]["id"] != primera.json()["items"][0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_without_open_session_says_so_instead_of_blaming_the_balance(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Con la caja cerrada, un traslado desde el cajón dice «no hay caja», no «no hay plata».
+
+    Sin sesión abierta el saldo de una cuenta `cash` se reporta como `0.00` —es
+    correcto: no hay cajón vivo que consultar—, así que mientras la validación
+    de saldo iba primero, el cajero recibía *«No se puede trasladar más de lo
+    que hay en la cuenta de origen»* con el cajón lleno. Salía a buscar plata
+    que sí estaba, y el front no podía ofrecer el modal de «Abrir caja» porque
+    ese comportamiento está mapeado a `CASH_SESSION_NOT_OPEN` y le llegaba
+    `BAD_REQUEST`.
+
+    Es la misma forma del bug que costó once días de trabajo: un mensaje que
+    sirve para otra causa manda a resolver el problema equivocado.
+    """
+    from app.core.db import AsyncSessionLocal as SL
+
+    token = accounts_tenant["token"]
+    caja = next(a for a in _accounts(client, token) if a["type"] == "cash")
+    banco = _create(client, token, name="Banco destino", type="bank", opening_balance="0.00")
+
+    async with SL() as s, s.begin():
+        await s.execute(
+            text("update public.cash_session set status = 'closed' where id = :sid"),
+            {"sid": str(accounts_tenant["session_id"])},
+        )
+
+    # Con la caja cerrada, el cajón no tiene saldo vivo que reportar (0.00).
+    r = client.post(
+        "/api/v1/accounts/transfers",
+        headers=_headers(token),
+        json={"from_account_id": caja["id"], "to_account_id": banco["id"], "amount": "50000.00"},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "CASH_SESSION_NOT_OPEN", r.text

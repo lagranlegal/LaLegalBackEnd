@@ -146,8 +146,9 @@ Datos de la propia empresa: nombre legal, NIT, logo, firma (se estampa en los do
 | `GET` | `/api/v1/company/document-templates/active?document_type=` | **`contracts.view`** | La plantilla ACTIVA (o `null` si ninguna). Permiso distinto a propósito: cualquier asesor que pueda imprimir un contrato necesita poder leer esto, no solo quien administra `/configuracion` — mismo criterio que ya usan `header_note`/`legal_notice`, que salen de `GET /me` (accesible a cualquiera). |
 | `POST` | `/api/v1/company/document-templates` | `company.configure` | Body `{document_type, name, body, layout?}` → 201. `layout` default `classic` si se omite. |
 | `PATCH` | `/api/v1/company/document-templates/{id}` | `company.configure` | Body parcial `{name?, body?, layout?}`. |
-| `DELETE` | `/api/v1/company/document-templates/{id}` | `company.configure` | `409 TEMPLATE_IS_ACTIVE` si es la plantilla activa — hay que activar otra primero (dejaría el documento sin nada que renderizar). |
+| `DELETE` | `/api/v1/company/document-templates/{id}` | `company.configure` | `409 TEMPLATE_IS_ACTIVE` si es la plantilla activa — hay que activar otra o **desactivarla** primero. (No es que el documento se quede sin nada: sin plantilla activa se imprime el JSX de respaldo. Es para que quitar el documento en uso sea un paso explícito y no un efecto colateral de borrar.) |
 | `POST` | `/api/v1/company/document-templates/{id}/activate` | `company.configure` | Desactiva la que esté activa hoy para ese `document_type` y activa esta, en una sola transacción. |
+| `POST` | `/api/v1/company/document-templates/{id}/deactivate` | `company.configure` | → 204. **Vuelve al documento por defecto** (el JSX de respaldo del front). Sin esto activar era irreversible salvo activando otra: no había «desactivar», el `PATCH` con `is_active:false` respondía 200 ignorándolo y borrar la activa daba 409, así que la red de seguridad de «imprime como siempre» quedaba inalcanzable en cuanto alguien tocaba esto una vez. |
 
 Si no hay ninguna plantilla activa, el frontend sigue renderizando el documento con su JSX hardcodeado de siempre (fallback de código, no una plantilla sembrada en la base de datos) — cero riesgo de regresión para empresas que nunca toquen esto.
 
@@ -430,7 +431,8 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `USER_ALREADY_EXISTS` | 409 | Ese correo ya es un usuario de **esta** empresa (activo o inactivo). Si está inactivo, el camino es reactivarlo. |
 | `EMAIL_ALREADY_REGISTERED` | 409 | Ese correo ya tiene cuenta en la plataforma, en **otra** empresa. Nunca se confirma en cuál (aislamiento entre tenants). |
 | `AUTH_ACCOUNT_MISSING` | 409 | La fila de `app_user` existe pero su cuenta de Supabase Auth fue borrada desde el panel. Es un dato descuadrado, no una falla: el mensaje explica cómo repararlo. |
-| `TEMPLATE_IS_ACTIVE` | 409 | Se intentó borrar la plantilla de documento activa. Hay que activar otra primero — si no, el documento se queda sin nada que renderizar. |
+| `TEMPLATE_IS_EMPTY` | 409 | Se intentó **activar** una plantilla sin contenido. Guardarla vacía es legítimo (un borrador a medias); activarla imprimiría los documentos sin su cuerpo — encabezado, título y pie, y nada más. |
+| `TEMPLATE_IS_ACTIVE` | 409 | Se intentó borrar la plantilla de documento activa. Hay que activar otra o desactivarla primero: quitar el documento en uso debe ser un paso explícito. |
 | `INVITE_RATE_LIMITED` | 429 | Se agotó la cuota de correos del SMTP incluido de Supabase. No es una falla: se espera, o se usa «Generar enlace», que no consume cuota. |
 | `AUTH_ADMIN_ERROR` | 502 | Fallo genérico de la API Admin de Supabase Auth al invitar o generar un enlace. Los casos conocidos ya tienen su propio 409 arriba; este es lo que queda. |
 | `CASH_SESSION_NOT_OPEN` | 409 · **404** | Se intentó desembolsar/cobrar/registrar un gasto sin una sesión de caja abierta. **Excepción deliberada:** en `GET /cashbox/sessions/current` viaja con **404**, porque ahí "no hay caja abierta" no es un rechazo sino el estado consultado. El front distingue por el `code`, nunca por el status — cuando ese endpoint devolvía `NOT_FOUND` a secas, la franja global decía "No se pudo consultar el estado de la caja" y toda la rama de "Caja cerrada" era código muerto (03/09/2026). |
@@ -447,6 +449,7 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `RETURN_TIME_LIMIT_EXCEEDED` | 400 | Devolución pasado `company.settings.return_window_days`, sin el permiso `sales.return_override_time_limit`. |
 | `CREDIT_NOTE_INSUFFICIENT_BALANCE` | 400 | `POST /sales` con `credit_note_id` cuyo saldo no alcanza el monto solicitado. |
 | `IDEMPOTENCY_KEY_REQUIRED` | 400 | Falta el header `Idempotency-Key` en un endpoint de dinero. |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | Llegó un reintento con la misma `Idempotency-Key` **mientras la petición original seguía en vuelo** — el caso típico de un timeout. La original va a terminar bien: no repetir, consultar el resultado. Antes esta carrera devolvía `500` (auditoría de QA, Fase 10). |
 | `VALIDATION_ERROR` | 422 | Body no cumple el schema Pydantic — `details.errors` trae el detalle campo por campo. |
 | `BAD_REQUEST` | 400 | Catch-all de reglas de negocio sin código más específico (p. ej. códigos de permiso inexistentes al armar una matriz de rol, categorías con distinto plazo en un mismo contrato, descuadre de caja sin justificación, stock insuficiente). |
 

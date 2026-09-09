@@ -6,11 +6,9 @@ confirman a la vez. En una compraventa con dos mostradores eso pasa.
 """
 
 import asyncio
-import json
 import uuid
 
 import httpx
-
 import qa
 
 S = qa.load("seed")
@@ -110,9 +108,7 @@ async def main():
     rs = await disparar(5, vender_misma_key)
     print("   ", resumen(rs))
     nums = {
-        r.json().get("number")
-        for r in rs
-        if not isinstance(r, Exception) and r.status_code < 300
+        r.json().get("number") for r in rs if not isinstance(r, Exception) and r.status_code < 300
     }
     print(f"    números de venta distintos: {nums}  ← debe ser uno solo")
     st2 = a.get("/inventory/items/" + item2["id"]).body["quantity"]
@@ -128,9 +124,7 @@ async def main():
     print("   ", resumen(await disparar(5, abrir)))
 
     print("\n=== 4. Cinco abonos simultáneos al mismo contrato ===")
-    contratos = [
-        x for x in a.get("/contracts", params={"status": "active"}).body["items"]
-    ]
+    contratos = [x for x in a.get("/contracts", params={"status": "active"}).body["items"]]
     if contratos:
         cid = contratos[0]["id"]
         o = a.get(f"/contracts/{cid}/payment-options").body
@@ -148,9 +142,8 @@ async def main():
             print("   ", resumen(rs))
             c2 = a.get(f"/contracts/{cid}").body
             print(f"    interés pagado hasta: {c2['interest_paid_until']}")
-            print(
-                f"    ← con {o['months_owed']} mes(es) adeudado(s), no puede aceptar 5 abonos de 1 mes"
-            )
+            debe = o["months_owed"]
+            print(f"    ← con {debe} mes(es) adeudado(s), no puede aceptar 5 abonos de 1 mes")
         else:
             print("    (el contrato está al día; no aplica)")
 

@@ -58,6 +58,9 @@ async def reports_tenant(
         "contracts.create",
         "contracts.view",
         "payments.create",
+        # El estado de resultados resta los descuentos de interés igual que los
+        # de venta, así que este tenant tiene que poder otorgarlos para probarlo.
+        "payments.apply_discount",
         "cashbox.view",
         # Desde 00031 el histórico de cierres exige su propio permiso, y
         # `GET /reports/closings` lo pide ADEMÁS de `reports.view`: es el mismo
@@ -809,3 +812,81 @@ def test_monthly_series_rejects_an_out_of_range_months_value(
         client.get("/api/v1/reports/series", headers=headers, params={"months": 37}).status_code
         == 422
     )
+
+
+@pytest.mark.asyncio
+async def test_interest_discount_lowers_revenue_like_a_sale_discount(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Un descuento de interés BAJA el ingreso, igual que el de una venta.
+
+    Hasta el 09/09/2026 el estado de resultados restaba el descuento de las
+    ventas (`gross_revenue - discounts`) pero **no** el de los intereses, así
+    que la utilidad se sobreestimaba por todo lo que la compraventa hubiera
+    perdonado. Y `GET /reports/series` arrastraba la misma definición, así que
+    la gráfica de doce meses tenía el mismo sesgo.
+
+    Un descuento sobre el interés es plata que se decidió no cobrar —una rebaja
+    del ingreso—, y da lo mismo que sea sobre una venta o sobre un interés: los
+    dos ingresos del mismo estado de resultados no pueden seguir criterios
+    distintos.
+    """
+    token = reports_tenant["token"]
+    headers = _headers(token)
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "5000000.00"}
+    )
+
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(reports_tenant["customer_id"]),
+            "principal": "1000000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [{"category_id": str(reports_tenant["category_id"]), "description": "Cadena"}],
+        },
+    )
+    assert contract.status_code == 201, contract.text
+    await _owe_one_month(contract.json()["id"])
+
+    # 50.000 de interés, 10.000 perdonados → entran 40.000.
+    payment = client.post(
+        f"/api/v1/contracts/{contract.json()['id']}/payments",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "months_covered": 1,
+            "payment_method": "cash",
+            "discount_amount": "10000.00",
+            "discount_reason": "acuerdo con el cliente",
+        },
+    )
+    assert payment.status_code == 201, payment.text
+    assert Decimal(payment.json()["total"]) == Decimal("40000.00")
+
+    today = date.today().isoformat()
+    estado = client.get(
+        "/api/v1/reports/income-statement",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": today, "to_date": today},
+    )
+    assert estado.status_code == 200, estado.text
+    e = estado.json()
+
+    # El ingreso por intereses es el NETO, no el facturado.
+    assert Decimal(e["interest_revenue"]) == Decimal("40000.00")
+    # El descuento se sigue informando aparte, para poder verlo.
+    assert Decimal(e["interest_discounts"]) == Decimal("10000.00")
+    # Y no se cuela dos veces: no es un gasto operativo.
+    assert Decimal(e["total_revenue"]) == Decimal(e["sales_revenue"]) + Decimal("40000.00")
+
+    serie = client.get(
+        "/api/v1/reports/series",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"months": 1},
+    )
+    assert serie.status_code == 200, serie.text
+    punto = serie.json()["points"][-1]
+    # La serie usa la MISMA definición que el estado de resultados, no una tercera.
+    assert Decimal(punto["interest_revenue"]) == Decimal("40000.00")

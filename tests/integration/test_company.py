@@ -467,3 +467,96 @@ def test_document_template_delete_blocked_while_active(
     delete = client.delete(f"/api/v1/company/document-templates/{created['id']}", headers=headers)
     assert delete.status_code == 409
     assert delete.json()["code"] == "TEMPLATE_IS_ACTIVE"
+
+
+def test_an_empty_template_can_be_saved_but_not_activated(
+    client: TestClient, company_tenant: dict
+) -> None:
+    """Guardar un borrador vacío está bien; activarlo imprime documentos en blanco.
+
+    Medido en la auditoría de QA (Fase 8): con una plantilla de `body: {}`
+    activa, un contrato real se imprimía con 137 caracteres — encabezado,
+    título, aviso legal y pie. **Sin cliente, sin prendas, sin monto y sin
+    firmas**, porque el cuerpo del documento sale de la plantilla. Un contrato
+    de empeño en blanco no ampara la prenda de nadie, y nada lo impedía ni lo
+    advertía: el banner del 28/08 avisa «guardada pero inactiva», no «activa y
+    vacía».
+    """
+    headers = _headers(company_tenant["token"])
+
+    vacia = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": "contract", "name": "Borrador a medias", "body": {}},
+    )
+    assert vacia.status_code == 201, vacia.text  # guardarla es legítimo
+
+    r = client.post(
+        f"/api/v1/company/document-templates/{vacia.json()['id']}/activate", headers=headers
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "TEMPLATE_IS_EMPTY", r.text
+
+    sin_contenido = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={
+            "document_type": "contract",
+            "name": "Doc sin nodos",
+            "body": {"type": "doc", "content": []},
+        },
+    )
+    r = client.post(
+        f"/api/v1/company/document-templates/{sin_contenido.json()['id']}/activate", headers=headers
+    )
+    assert r.status_code == 409, r.text
+
+
+def test_deactivating_returns_to_the_default_document(
+    client: TestClient, company_tenant: dict
+) -> None:
+    """Hay camino de vuelta al documento de fábrica.
+
+    Antes no lo había: no existía «desactivar», el `PATCH` con
+    `is_active: false` respondía 200 y lo ignoraba, y borrar la activa daba
+    `409`. Así que en cuanto una empresa activaba su primera plantilla, el JSX
+    de respaldo que `API_GUIDE` §4 bis promete quedaba inalcanzable — y si la
+    activada estaba vacía, para deshacerlo había que construir otra desde cero.
+    """
+    headers = _headers(company_tenant["token"])
+    doc = {
+        "type": "doc",
+        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Contrato"}]}],
+    }
+
+    creada = client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": "contract", "name": "Con contenido", "body": doc},
+    )
+    tid = creada.json()["id"]
+    act = client.post(f"/api/v1/company/document-templates/{tid}/activate", headers=headers)
+    assert act.status_code == 200, act.text
+
+    # `/active` exige `contracts.view` (lo lee quien imprime, no quien
+    # configura), así que este tenant comprueba el estado por el listado.
+    def activa_hay() -> bool:
+        r = client.get(
+            "/api/v1/company/document-templates",
+            headers=headers,
+            params={"document_type": "contract"},
+        )
+        assert r.status_code == 200, r.text
+        return any(t["is_active"] for t in r.json())
+
+    assert activa_hay()
+
+    r = client.post(f"/api/v1/company/document-templates/{tid}/deactivate", headers=headers)
+    assert r.status_code == 204, r.text
+
+    # Sin plantilla activa, el front vuelve a su JSX de siempre.
+    assert not activa_hay()
+
+    # Y ahora sí se puede borrar, porque ya no es la activa.
+    borrado = client.delete(f"/api/v1/company/document-templates/{tid}", headers=headers)
+    assert borrado.status_code == 204, borrado.text
