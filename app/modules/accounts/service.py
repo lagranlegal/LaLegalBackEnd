@@ -49,9 +49,52 @@ async def list_accounts(
     return [_row_to_account(r) for r in rows]
 
 
+async def _assert_single_operational_drawer(db: AsyncSession, *, company_id: UUID) -> None:
+    """Una sola cuenta `cash` activa por empresa, mientras haya una sola caja.
+
+    `00024_accounts.sql` **afirma** que un índice parcial lo asegura. No lo
+    asegura: ese índice garantiza una cuenta *por defecto* por tipo, que es
+    otra cosa. Por ese hueco una empresa terminó con tres cuentas de efectivo
+    y leyó como un "límite de 300.000" lo que era el saldo de su propio turno.
+
+    Por qué importa y no es burocracia: hay **una sesión de caja por empresa**
+    (`get_active_register` toma la más antigua) y `_expected_cash` suma los
+    movimientos de TODAS las cuentas `cash`. Con dos cajones, el arqueo pide
+    un solo número para dos cajas físicas: quien cuente una va a reportar un
+    descuadre por lo que hay en la otra. **Un arqueo que mezcla dos cajones es
+    incuadrable por construcción.**
+
+    Solo se valida al ESCRIBIR, igual que las letras reservadas de proveedor:
+    las empresas que ya tienen cuentas de más siguen funcionando — prohibirlas
+    hacia atrás rompería movimientos ya registrados contra ellas.
+
+    Cuando llegue multi-caja (fase 2), la regla no desaparece: pasa a ser una
+    cuenta `cash` activa **por caja registradora**, usando `account.register_id`
+    (ya existe, vacía, desde 00049). La caja fuerte no cuenta acá: es `vault`
+    justamente porque no es un punto de cobro.
+    """
+    existentes = [
+        r
+        for r in await repository.list_accounts(db, company_id=company_id)
+        if r._mapping["type"] == "cash"
+    ]
+    if existentes:
+        raise ConflictError(
+            "Ya existe una cuenta de efectivo. Con un solo cajón, el arqueo "
+            "diario cuenta un solo cajón: dos cuentas de efectivo harían que "
+            "el cierre pida un número que no corresponde a ninguna de las dos. "
+            "Si lo que necesitas es más efectivo disponible, trasládalo desde "
+            "otra cuenta; si es guardar plata fuera del cajón, crea una caja "
+            "fuerte.",
+            code="CASH_ACCOUNT_ALREADY_EXISTS",
+        )
+
+
 async def create_account(
     db: AsyncSession, *, company_id: UUID, body: AccountCreateIn, acting_user_id: UUID
 ) -> AccountOut:
+    if body.type == "cash":
+        await _assert_single_operational_drawer(db, company_id=company_id)
     if body.is_default:
         await repository.clear_default(db, company_id=company_id, account_type=body.type)
 
@@ -503,11 +546,15 @@ async def get_statement(
     pantalla de Cuentas decía cuánto hay en el banco pero no cómo se llegó
     ahí — y sin eso no se puede cuadrar.
 
-    EN EFECTIVO NO HAY SALDO CORRIENTE, y no es una carencia: la base del
-    cajón se vuelve a declarar en cada apertura y no es un movimiento, así que
-    acumular el histórico daría un número sin significado. El efectivo se
-    verifica CONTANDO. Se devuelven igual sus movimientos —sirven para ver qué
-    pasó por el cajón— pero sin saldo y diciéndolo.
+    **TODOS los tipos llevan saldo corriente desde 00048**, efectivo incluido.
+    Antes el efectivo era la excepción, y el argumento escrito acá era que "la
+    base del cajón se vuelve a declarar en cada apertura y no es un
+    movimiento". Eso dejó de ser cierto: la base ES un movimiento, así que el
+    acumulado del cajón sí significa algo — es cuánto debería haber ahí.
+
+    Que el efectivo además se verifique CONTANDO no lo contradice: contar es
+    lo que produce el ajuste que reconcilia el saldo. Un extracto de cajón sin
+    saldo corriente no dejaba ver de dónde salía un faltante.
     """
     row = await repository.get_account(db, company_id=company_id, account_id=account_id)
     if row is None:
@@ -517,7 +564,9 @@ async def get_statement(
 
     tipo = str(row._mapping["type"])
     tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
-    acumula = tipo != "cash"
+    # Antes: `acumula = tipo != "cash"`. Ver el docstring — el efectivo dejó
+    # de ser la excepción cuando su base pasó a ser un movimiento (00048).
+    acumula = True
 
     saldo_inicial = (
         await repository.balance_before(

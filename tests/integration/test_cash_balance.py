@@ -61,7 +61,14 @@ async def tenant_efectivo(
 
     company_id, role_id, user_id, register_id = uuid4(), uuid4(), uuid4(), uuid4()
     cajon_id, cajon_2_id, banco_id = uuid4(), uuid4(), uuid4()
-    codes = ("cashbox.view", "cashbox.open_close", "cashbox.expense", "accounts.view")
+    codes = (
+        "cashbox.view",
+        "cashbox.open_close",
+        "cashbox.expense",
+        "accounts.view",
+        "accounts.manage",
+        "accounts.transfer",
+    )
 
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
@@ -330,3 +337,117 @@ def test_el_ajuste_de_cierre_no_ensucia_el_acta(
     assert reporte.status_code == 200, reporte.text
     # Sigue diciendo lo que se ESPERABA, no lo que se contó.
     assert reporte.json()["expected_cash"] == "100000.00"
+
+
+# --------------------------------------------------------------------------
+# 5. La caja fuerte: efectivo real que no es un punto de cobro (00049)
+# --------------------------------------------------------------------------
+def test_una_caja_fuerte_no_puede_cobrar(client: TestClient, tenant_efectivo: dict) -> None:
+    """Una `vault` es plata REAL, a diferencia de una cuenta por cobrar. Lo
+    que no es, es un punto de cobro: nadie vende parado frente a la caja
+    fuerte. Aceptar un cobro directo ahí saltaría el arqueo del cajón sin que
+    nada lo note."""
+    token = tenant_efectivo["token"]
+    _abrir(client, token, counted_cash="100000.00", difference_reason="Base inicial")
+
+    fuerte = client.post(
+        "/api/v1/accounts",
+        headers=_headers(token),
+        json={
+            "name": "Caja fuerte",
+            "type": "vault",
+            "is_default": False,
+            "opening_balance": "0.00",
+        },
+    )
+    assert fuerte.status_code == 201, fuerte.text
+
+    categoria = client.post(
+        "/api/v1/cashbox/expense-categories", headers=_headers(token), json={"name": "Varios"}
+    )
+    gasto = client.post(
+        "/api/v1/cashbox/expenses",
+        headers={**_headers(token), "Idempotency-Key": str(uuid4())},
+        json={
+            "category_id": categoria.json()["id"],
+            "module": "general",
+            "description": "Gasto pagado desde la caja fuerte",
+            "amount": "10000.00",
+            "payment_method": "cash",
+            "account_id": fuerte.json()["id"],
+        },
+    )
+    assert gasto.status_code == 400, gasto.text
+    assert gasto.json()["code"] == "ACCOUNT_NOT_OPERATIONAL"
+
+
+def test_la_caja_fuerte_no_entra_al_arqueo_del_cajon(
+    client: TestClient, tenant_efectivo: dict
+) -> None:
+    """El arqueo diario es del CAJÓN. Si la caja fuerte entrara, el cierre
+    pediría contar todas las noches plata que está guardada bajo llave."""
+    token = tenant_efectivo["token"]
+    abierta = _abrir(client, token, counted_cash="100000.00", difference_reason="Base inicial")
+    fuerte = client.post(
+        "/api/v1/accounts",
+        headers=_headers(token),
+        json={
+            "name": "Caja fuerte",
+            "type": "vault",
+            "is_default": False,
+            "opening_balance": "500000.00",
+        },
+    )
+    assert fuerte.status_code == 201, fuerte.text
+
+    reporte = client.get(
+        f"/api/v1/cashbox/sessions/{abierta['body']['id']}/report", headers=_headers(token)
+    )
+    # Los 500.000 de la caja fuerte existen como saldo, pero no se cuentan hoy.
+    assert reporte.json()["expected_cash"] == "100000.00"
+    assert _saldo(client, token, UUID(fuerte.json()["id"])) == Decimal("500000.00")
+
+
+def test_no_se_puede_crear_una_segunda_cuenta_de_efectivo(
+    client: TestClient, tenant_efectivo: dict
+) -> None:
+    """La guarda que `00024_accounts.sql` prometía en un comentario y su
+    índice parcial no daba — por ese hueco una empresa terminó con tres
+    cajones compartiendo un solo arqueo."""
+    segunda = client.post(
+        "/api/v1/accounts",
+        headers=_headers(tenant_efectivo["token"]),
+        json={"name": "Otro cajón", "type": "cash", "is_default": False, "opening_balance": "0.00"},
+    )
+    assert segunda.status_code == 409, segunda.text
+    assert segunda.json()["code"] == "CASH_ACCOUNT_ALREADY_EXISTS"
+
+
+def test_la_caja_fuerte_se_llena_por_traslado(client: TestClient, tenant_efectivo: dict) -> None:
+    """Su única puerta. Y el traslado exige el cajón abierto porque la pata de
+    efectivo sí lo toca — sin sesión, el arqueo no podría cuadrar."""
+    token = tenant_efectivo["token"]
+    _abrir(client, token, counted_cash="300000.00", difference_reason="Base inicial")
+    fuerte = client.post(
+        "/api/v1/accounts",
+        headers=_headers(token),
+        json={
+            "name": "Caja fuerte",
+            "type": "vault",
+            "is_default": False,
+            "opening_balance": "0.00",
+        },
+    )
+    traslado = client.post(
+        "/api/v1/accounts/transfers",
+        headers={**_headers(token), "Idempotency-Key": str(uuid4())},
+        json={
+            "from_account_id": str(tenant_efectivo["cajon_id"]),
+            "to_account_id": fuerte.json()["id"],
+            "amount": "200000.00",
+            "notes": "Guardar el excedente del día",
+        },
+    )
+    assert traslado.status_code == 201, traslado.text
+    assert _saldo(client, token, tenant_efectivo["cajon_id"]) == Decimal("100000.00")
+    assert _saldo(client, token, UUID(fuerte.json()["id"])) == Decimal("200000.00")

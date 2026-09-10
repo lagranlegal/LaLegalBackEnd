@@ -211,6 +211,29 @@ async def resolve_account_for_movement(
             code="ACCOUNT_CANNOT_FUND_PAYMENT",
         )
 
+    # Una caja fuerte es plata REAL, a diferencia de una `settlement` — pero no
+    # es un punto de cobro. Nadie vende, presta ni paga un gasto parado frente
+    # a la caja fuerte: la plata pasa primero al cajón, y ese traslado es lo
+    # que deja constancia de que salió de la custodia.
+    #
+    # Por eso el rechazo va en las DOS direcciones, no solo en la salida como
+    # con las cuentas por cobrar. Aceptar una entrada directa a la caja fuerte
+    # —una venta cobrada "a la caja fuerte"— saltaría el arqueo del cajón sin
+    # que nada lo note, que es exactamente la clase de hueco por el que el
+    # efectivo se vuelve incuadrable.
+    #
+    # Su única puerta es el traslado (`POST /accounts/transfers`), que no pasa
+    # por acá: registra sus dos movimientos directamente, igual que la
+    # liquidación de un convenio.
+    if account_type == "vault":
+        raise AppError(
+            "Una caja fuerte no es un punto de cobro: la plata entra y sale de "
+            "ella solo por traslado. Elige el cajón o la cuenta por la que "
+            "realmente se movió el dinero.",
+            details={"account_id": str(account_id), "account_type": account_type},
+            code="ACCOUNT_NOT_OPERATIONAL",
+        )
+
     session = await get_open_session(db, company_id=company_id)
 
     # Sin cuenta resuelta se mantiene el comportamiento anterior (exigir

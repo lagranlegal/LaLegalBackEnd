@@ -439,6 +439,8 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `CASH_SESSION_ALREADY_OPEN` | 409 | Se intentó abrir una sesión (o reabrir una) habiendo ya otra abierta para esa caja. |
 | `CASH_SESSION_ALREADY_CLOSED_TODAY` | 409 | Se intentó abrir una sesión el mismo día en que ya se cerró una (un solo ciclo diario). |
 | `CASH_OPENING_DIFFERENCE_UNJUSTIFIED` | 400 | Se abrió el turno declarando un conteo de efectivo distinto del registrado, sin `difference_reason`. Mismo rigor y misma razón que el descuadre de cierre: es la misma clase de hecho, y sin tolerancia. |
+| `ACCOUNT_NOT_OPERATIONAL` | 400 | Una operación de negocio (venta, préstamo, abono, gasto, compra) eligió una cuenta `vault`. Una caja fuerte es plata real pero no un punto de cobro: entra y sale solo por traslado, y aceptar un cobro directo saltaría el arqueo del cajón. |
+| `CASH_ACCOUNT_ALREADY_EXISTS` | 409 | Se intentó crear una segunda cuenta de efectivo. Con una sola caja registradora el arqueo cuenta un solo cajón; dos cuentas `cash` harían que el cierre pida un número que no corresponde a ninguna. Para más efectivo disponible: traslado. Para guardar plata fuera del cajón: una cuenta `vault`. |
 | `PAYMENT_PARTIAL_INTEREST_REJECTED` | 422 | Abono con `capital_amount` sin cubrir todos los meses de interés adeudados. |
 | `CONTRACT_CLOSED` | 400 | Abono sobre un contrato ya `paid`/`auctioned`. |
 | `CONTRACT_NOT_READY_FOR_AUCTION` | 409 | Se intentó Rematar un contrato que no está en `in_extension` con la prórroga vencida. |

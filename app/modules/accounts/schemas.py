@@ -5,7 +5,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-AccountType = Literal["cash", "bank", "settlement"]
+AccountType = Literal["cash", "bank", "settlement", "vault"]
+
+#: Efectivo físico: se verifica CONTÁNDOLO, no conciliando un extracto.
+#: `cash` y `vault` se distinguen en si una operación de negocio las puede
+#: elegir, no en si son plata real (docs/CAJA_TRAZABILIDAD.md §5).
+PHYSICAL_CASH_TYPES = ("cash", "vault")
 
 
 class AccountOut(BaseModel):
@@ -16,6 +21,10 @@ class AccountOut(BaseModel):
       · `bank`        se concilia contra el extracto, en el ritmo del banco
       · `settlement`  es plata que TODAVÍA NO ESTÁ (Sistecrédito, datáfono):
                       alguien la debe y llegará después, y menos.
+      · `vault`       efectivo que NO está en el cajón (caja fuerte, fondo de
+                      menudos). Es plata real y se cuenta a mano, pero
+                      ninguna operación la elige: solo entra y sale por
+                      traslado, y no participa del arqueo diario del cajón.
     """
 
     id: UUID
@@ -24,8 +33,9 @@ class AccountOut(BaseModel):
     reference: str | None
     is_default: bool
     active: bool
-    #: Saldo con el que la cuenta entró al sistema. Las cuentas de efectivo no
-    #: lo usan: su base viene de cada sesión de caja.
+    #: Saldo con el que la cuenta entró al sistema. Desde 00048 lo usan TODOS
+    #: los tipos, efectivo incluido — antes el cajón lo ignoraba porque su
+    #: base salía de la sesión de caja.
     opening_balance: Decimal
     #: Saldo actual. En `cash` es lo que debería haber EN EL CAJÓN ahora (base
     #: de la sesión abierta + sus movimientos); en `bank` y `settlement` es el
