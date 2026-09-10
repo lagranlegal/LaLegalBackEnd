@@ -1075,6 +1075,8 @@ El super-admin de plataforma es la cuenta de Mateo (claim `app_metadata.platform
 - **Categorías con herencia repartida a propósito:** *Joyería* (nivel 1) define plazo/ventana/LTV y sus hijas *Oro* → *Cadena*/*Anillo* no definen nada (prueba que la herencia sube dos niveles); *Tecnología* define solo la ventana y su hija *Celulares* solo el plazo (prueba que la herencia es **por campo**, no por categoría).
 - **Cuentas de los tres tipos:** `Caja principal` (cash), `Bancolombia QA` (bank), `Sistecrédito QA` (settlement).
 - **Contrato `QA-JOB-TEST-1`** con fechas manipuladas en la base a propósito, para la demostración de H-01.
+- **Una cuenta `Caja fuerte` (`vault`)** creada el 10/09 al probar `00049` en vivo, con 700.000 tras un traslado desde el cajón. Se dejó a propósito: es el fixture para probar que una caja fuerte no puede cobrar y que no entra al arqueo diario.
+- **Una cuenta `Cajon 2` desactivada**, y un `cash_movement` de −70.000 con su contra-movimiento de +70.000. Es el rastro de la demostración de por qué **dos cuentas de efectivo hacen incuadrable el arqueo** (el gasto pagado desde el segundo cajón lo dejó en negativo y bajó el arqueo del turno a un número que no correspondía a ninguno de los dos). El movimiento no se pudo borrar —`cash_movement` es inmutable por trigger— así que se corrigió como manda el propio sistema: con un contra-movimiento. **Es el ejemplo vivo de esa disciplina.**
 
 ### Datos de prueba en LA GRAN LEGAL (09/09/2026)
 
@@ -1106,6 +1108,19 @@ El super-admin de plataforma es la cuenta de Mateo (claim `app_metadata.platform
 **El actor.** Los contratos los firma `qa.datos.prueba@qalab.com` ("Datos de prueba (QA)"), creado a propósito con nombre explícito para que en la UI se lea *creado por* y se distinga del trabajo real de Wilderson. No se pudo invitar por API (`POST /identity/invitations` exige `identity.manage_users`, que exige ya ser usuario de la empresa): se hizo el bootstrap del RUNBOOK — auth user con el service role + fila `app_user` con el rol Admin. **Queda `inactive` al terminar el script**: es un admin con contraseña conocida dentro de la empresa de un cliente. Reejecutar el script lo reactiva solo.
 
 **Reversible.** Todo lleva `legacy_code` con prefijo `DEMO-` y una nota fechada. `python scripts/qa/seed_contratos.py --limpiar` lo borra, localizando cada fila por **ID** y nunca por tipo — borrar `cash_movement` por `reference_type='contract_payment'` alcanzaría abonos reales de la empresa.
+
+### Ejemplo vivo de una ampliación de préstamo (10/09/2026)
+
+Además de los 22, quedaron en LA GRAN LEGAL los contratos **#28 y #29**, que son una cadena de recargo completa creada al verificar `00051` en vivo:
+
+| | #28 (`DEMO-RECARGO`) | #29 |
+|---|---|---|
+| Capital | 1.000.000 | **1.400.000** |
+| Estado | `superseded` | `active` |
+| Prendas | `transferred` | `in_custody` |
+| Interés mensual | 50.000 | 70.000 |
+
+Prenda avaluada en 2.000.000, LTV 70 % → cupo de 400.000, retirado completo. A la caja salieron **solo** los 400.000. Sirve para mirar en pantalla cómo se ve la cadena en los dos sentidos; `--limpiar` no los toca (`#29` no lleva prefijo `DEMO-`), así que si estorban hay que borrarlos a mano.
 
 ### Cómo se probó
 

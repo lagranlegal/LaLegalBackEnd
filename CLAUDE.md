@@ -17,7 +17,7 @@ Backend (FastAPI) de una plataforma SaaS **multi-tenant** para compraventas (cas
 2. **Capas por módulo:** `router.py` (HTTP) → `service.py` (reglas de negocio, puro y testeable) → `repository.py` (SQL). `schemas.py` para Pydantic in/out. Un módulo NO importa el service de otro; expone funciones de integración (ej. `cashbox.record_movement(tx, ...)`).
 3. **Permisos:** todo endpoint lleva `Depends(require_permission("modulo.accion"))`. Deny-by-default: endpoint sin permiso explícito = error de revisión. El catálogo de permisos vive en BD (seed).
 4. **Dinero:** `Decimal`/`NUMERIC(14,2)`. Prohibido float. Una operación de negocio = UNA transacción (documento + movimientos de caja + contadores + auditoría). Header `Idempotency-Key` obligatorio en operaciones de dinero (persistido con UNIQUE(company_id, idempotency_key)).
-5. **Estados y stock:** nunca editables a mano. El stock solo cambia por ingreso/egreso/venta. El estado del contrato solo lo calcula el servicio (+ job nocturno); la única acción manual es "Rematar" (con permiso, auditada).
+5. **Estados y stock:** nunca editables a mano. El stock solo cambia por ingreso/egreso/venta. El estado del contrato solo lo calcula el servicio (+ job nocturno); las únicas acciones manuales son **Rematar** y **Ampliar el préstamo** (ambas con permiso, ambas auditadas). **El efectivo también sigue esta regla desde `00048`:** el saldo de una cuenta `cash` se deriva de sus movimientos como cualquier otra, y el saldo de apertura de un turno ya no se digita — se hereda, y contar distinto emite un `adjustment` con motivo y responsable. Era el único número de la aplicación que aparecía sin documento.
 6. **Auditoría:** toda acción sensible (descuentos, remates, anulaciones, egresos, cierres/reaperturas, cambios de roles) inserta en `audit_log` en la misma transacción. `audit_log` es inmutable.
 7. **Errores:** respuesta uniforme `{code, message, details}` con códigos de negocio: `PAYMENT_PARTIAL_INTEREST_REJECTED`, `CASH_SESSION_NOT_OPEN`, `PERMISSION_DENIED`, `SUBSCRIPTION_EXPIRED`, etc.
 8. **API:** REST `/api/v1`, recursos en plural, paginación por cursor, OpenAPI actualizado (el front genera tipos TS de ahí).
@@ -36,8 +36,21 @@ Backend (FastAPI) de una plataforma SaaS **multi-tenant** para compraventas (cas
 - `in_extension` (Prórroga): al llegar a N meses se dispara automáticamente; `extension_ends_at = fecha_disparo + extension_months` (default 1).
 - Prórroga vencida sin pago → candidato a remate (aparece en `GET /contracts/ready-for-auction`). El estado `auctioned` SOLO lo pone la acción manual Rematar.
 - `paid`: salda capital + intereses; los artículos se devuelven TODOS juntos; cierra.
+- `superseded` (00051): el contrato fue **ampliado**. No se modifica el capital de un contrato firmado — se cierra y nace un sucesor con `parent_contract_id`/`root_contract_id`; las prendas pasan a `transferred` (no `returned`: nunca salieron de la bóveda). Terminal, como los otros dos.
 - **SNAPSHOT legal:** al crear el contrato se copian tasa, plazo, `arrears_window_months` y `extension_months` desde la categoría/config. Cambios de configuración NO afectan contratos existentes.
 - Job nocturno (pg_cron o worker): persistir estados, marcar suscripciones vencidas.
+
+### Ampliar el préstamo ("recargo")
+`POST /contracts/{id}/extend-loan` (permiso `contracts.extend_loan`). El cliente vuelve dentro de una ventana —`extension_window_days`, SNAPSHOT precargado de `company.settings.extension_window_days`, default 28— y retira parte del cupo que su prenda todavía tiene sin usar (`avalúo × max_ltv_pct − saldo`).
+
+**No es un `UPDATE` del capital, y no es una preferencia:** el interés se cobra en meses completos anclados a `interest_paid_until` y toda la máquina de estados cuelga de esa ancla; y el papel que el cliente firmó dice un capital, así que si cambia ya no describe la deuda.
+
+Tres invariantes, cada una con su test:
+- **La ventana se mide desde `root_contract_id.start_date`**, la raíz de la cadena. Si se midiera desde el contrato actual, un recargo de $1 el último día reiniciaría el reloj para siempre.
+- **A la caja sale SOLO el delta.** El capital viejo ya salió el día del contrato original.
+- **El interés vencido nunca se suma al capital** (anatocismo): con meses adeudados se rechaza y hay que abonar primero.
+
+Pasarse del cupo exige **`contracts.override_ltv`** — que rige igual en `POST /contracts`, para que la misma regla no se comporte distinto en dos pantallas. Diseño completo y decisiones: `docs/RECARGOS.md`.
 
 ### Remate asistido
 `POST /contracts/{id}/auction` (permiso `contracts.auction`): en una transacción — contrato→`auctioned`, items→`auctioned`, crear `inventory_item` en `draft` (cost = saldo capital + intereses pendientes, `origin='auction'`, `source_contract_id`, vínculo en `contract_item.inventory_item_id`), crear `inventory_entry`, auditar. Luego `POST /inventory/items/{id}/publish` emite el código. Exige precio siempre y **foto solo en piezas únicas** — que es el caso del remate: la foto es la evidencia de qué prenda dejó el cliente. Para mercancía fungible la foto es opcional y vive en el producto, no en el lote (00034).
@@ -58,7 +71,9 @@ La **letra de origen** dice de dónde salió la pieza, y se deriva de sus punter
 Los punteros son **excluyentes** entre sí. `R`, `P`, `T` y `D` están reservadas: un proveedor no puede tomarlas (se valida al escribir, no hacia atrás — hay códigos impresos).
 
 ### Caja (acto único diario)
-- Una sesión por día por caja (fase 1: una caja por empresa, base ÚNICA de efectivo). Sin sesión `open` → toda operación de dinero se rechaza.
+- Una sesión por día por caja (fase 1: **una sola cuenta `cash` operativa por empresa**, garantizada por el servicio desde `00049` — el índice parcial de `00024` NO lo aseguraba pese a lo que dice su comentario). Sin sesión `open` → toda operación de dinero **contra una cuenta `cash`** se rechaza; quién la exige es el TIPO DE CUENTA, no la operación.
+- **El saldo del cajón es de la CUENTA, no del turno (`00048`).** Se deriva de sus movimientos, existe con la caja cerrada, y cada cuenta tiene el suyo. Abrir un turno no declara un saldo: lo hereda. Contar al abrir o al cerrar emite un `adjustment` (`session_id = NULL` a propósito — dentro de la sesión, `expected_cash` lo contaría dos veces al abrir y produciría un acta que siempre cuadra al cerrar).
+- **`vault`** (`00049`) es efectivo físico que NO es un punto de cobro: caja fuerte, fondo de menudos. Ninguna operación de negocio la elige; entra y sale solo por **traslado**, y no participa del arqueo diario del cajón. Nada se configura: "¿esta empresa tiene caja fuerte?" se responde con "¿existe esa cuenta?". Modelo completo: `docs/CAJA_TRAZABILIDAD.md`.
 - Movimientos SOLO generados por servicios desde documentos (abono, venta, compra, gasto), etiquetados `module` (pawn/store/general) + medio de pago + referencia. Manual: solo gastos/ajustes.
 - Cierre: backend calcula `expected_cash` (base + efectivo in − efectivo out) y desglose module×concept×medio; usuario registra `counted_cash`; diferencia SIEMPRE con justificación (sin tolerancia); sesión cerrada = inmutable; acta PDF (secciones EMPEÑO / TIENDA / GASTOS / conciliación de otros medios). Reapertura: permiso `cashbox.reopen`, motivo, auditada.
 
