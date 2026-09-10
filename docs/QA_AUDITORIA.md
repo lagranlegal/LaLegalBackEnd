@@ -1048,7 +1048,7 @@ Dos comprobaciones que necesitan historia de caja, que la empresa espejo todaví
 
 ## El laboratorio (cómo retomarlo)
 
-Todo vive en el proyecto Supabase de **dev** (`driyubkodnsqxbtxcmaz`). Las empresas reales (*La Legal*, *LA GRAN LEGAL*, *Empresa Demo Front*) **no se tocan** salvo autorización explícita.
+Todo vive en el proyecto Supabase de **dev** (`driyubkodnsqxbtxcmaz`). Las empresas reales (*La Legal*, *LA GRAN LEGAL*, *Empresa Demo Front*) **no se tocan** salvo autorización explícita — que ya ocurrió una vez: ver "Datos de prueba en LA GRAN LEGAL" abajo.
 
 ### Empresas y usuarios de prueba
 
@@ -1075,6 +1075,37 @@ El super-admin de plataforma es la cuenta de Mateo (claim `app_metadata.platform
 - **Categorías con herencia repartida a propósito:** *Joyería* (nivel 1) define plazo/ventana/LTV y sus hijas *Oro* → *Cadena*/*Anillo* no definen nada (prueba que la herencia sube dos niveles); *Tecnología* define solo la ventana y su hija *Celulares* solo el plazo (prueba que la herencia es **por campo**, no por categoría).
 - **Cuentas de los tres tipos:** `Caja principal` (cash), `Bancolombia QA` (bank), `Sistecrédito QA` (settlement).
 - **Contrato `QA-JOB-TEST-1`** con fechas manipuladas en la base a propósito, para la demostración de H-01.
+
+### Datos de prueba en LA GRAN LEGAL (09/09/2026)
+
+**La excepción a la regla de arriba, autorizada explícitamente por Mateo.** La empresa tenía cinco contratos, todos `active` y creados el mismo día: no había con qué probar la pantalla de contratos, los filtros por estado, la cola de remate ni el paz y salvo. Se sembraron **22 contratos que cubren los seis estados**, 3–4 de cada uno, con `scripts/qa/seed_contratos.py`.
+
+| Prefijo | Estado resultante | Cuántos |
+|---|---|---|
+| `DEMO-A*` | `active` | 4 (uno con interés pagado por adelantado — `interest_paid_until` en el futuro) |
+| `DEMO-M*` | `in_arrears` | 4 (1, 2, 3 y 4 meses adeudados) |
+| `DEMO-P*` | `in_extension`, prórroga **vigente** | 4 |
+| `DEMO-R*` | `in_extension`, prórroga **vencida** → `ready-for-auction` | 4 |
+| `DEMO-X*` | `auctioned` | 3 |
+| `DEMO-S*` | `paid` | 3 |
+
+**La llave fue `POST /contracts/import`, no `POST /contracts`.** Dos razones, y las dos importan:
+
+1. **No desembolsa.** La creación normal saca el préstamo de la caja: 22 contratos por ahí le habrían movido el efectivo esperado de la sesión a una empresa que la tiene abierta desde el 03/09. El import existe justo para la foto financiera al corte — sin sesión y sin `cash_movement` (`docs/MIGRACION_CONTRATOS.md`).
+2. **Es el único camino que permite fabricar estados.** `status` no se acepta en ningún body: el backend lo DERIVA de `interest_paid_until` contra hoy, con la ventana del snapshot del contrato. `POST /contracts` fija `start_date = hoy`, así que solo puede producir `active`. El import acepta las dos fechas, y el mismo recálculo de `GET /contracts/{id}` persiste el estado antes de responder.
+
+**Lo que hay que saber para leer los números.** "Listo para remate" **no es un `status`**: es `in_extension` con `extension_ends_at` en el pasado, que es lo que consulta `GET /contracts/ready-for-auction`. Por eso el conteo por estado muestra 8 `in_extension` (4 vigentes + 4 vencidas) y la cola de remate muestra 4.
+
+**Un contrato de Tecnología nunca puede estar `in_arrears`** en esta empresa: su `arrears_window_months` es 1, así que el primer mes adeudado ya dispara la prórroga. Los cuatro de mora son de Joyería por necesidad, no por elección.
+
+**Los efectos colaterales, elegidos:**
+
+- Los 3 `paid` generan su `contract_payment` y su `cash_movement`, **por transferencia a Bancolombia** — verificado que no existe ni un movimiento en efectivo, así que el arqueo del cajón queda intacto. Recibos #1 a #3.
+- Los 3 `auctioned` crean su `inventory_item` en `draft` con `origin='auction'`, costo = capital + interés pendiente (p. ej. 1.300.000 + 7 meses × 5% = 1.755.000). Quedan **sin publicar**: no tienen código y no están en vitrina.
+
+**El actor.** Los contratos los firma `qa.datos.prueba@qalab.com` ("Datos de prueba (QA)"), creado a propósito con nombre explícito para que en la UI se lea *creado por* y se distinga del trabajo real de Wilderson. No se pudo invitar por API (`POST /identity/invitations` exige `identity.manage_users`, que exige ya ser usuario de la empresa): se hizo el bootstrap del RUNBOOK — auth user con el service role + fila `app_user` con el rol Admin. **Queda `inactive` al terminar el script**: es un admin con contraseña conocida dentro de la empresa de un cliente. Reejecutar el script lo reactiva solo.
+
+**Reversible.** Todo lleva `legacy_code` con prefijo `DEMO-` y una nota fechada. `python scripts/qa/seed_contratos.py --limpiar` lo borra, localizando cada fila por **ID** y nunca por tipo — borrar `cash_movement` por `reference_type='contract_payment'` alcanzaría abonos reales de la empresa.
 
 ### Cómo se probó
 

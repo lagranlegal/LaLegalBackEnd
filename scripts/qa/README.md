@@ -32,6 +32,7 @@ El laboratorio (empresas espejo, usuarios por rol, datos sembrados) está descri
 | `analyze_matrix.py` | Lee el resultado y saca las discrepancias agrupadas por endpoint. | — |
 | `refresh_sessions.py` | Renueva los JWT del laboratorio cuando expiran a mitad de un barrido. | — |
 | `concurrencia.py` | Lanza N peticiones **en el mismo instante** (todas esperando un evento común, no en fila): ventas de la última unidad, misma clave de idempotencia, aperturas de caja. | **F10-01** — el 500 bajo carrera |
+| `seed_contratos.py` | **Siembra**, no prueba: 22 contratos que cubren los seis estados en LA GRAN LEGAL, vía `POST /contracts/import` (sin caja, sin `cash_movement`). Las fechas se derivan con el `rules.add_months` del backend, así que este archivo no puede discrepar del servidor. `--verificar` cuenta, `--limpiar` borra. | — (herramienta; el registro está en `QA_AUDITORIA.md` → "Datos de prueba en LA GRAN LEGAL") |
 
 **Playwright — la app en vivo, con login real**
 
