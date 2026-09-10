@@ -1,6 +1,6 @@
 # RECARGOS.md — Ampliación de préstamo sobre un contrato vivo (spec)
 
-> **Estado:** análisis y diseño, **sin implementar**. Pedido por Mateo el 09/09/2026 tras probar con el cliente.
+> **Estado:** diseño cerrado, **sin implementar**. Pedido por Mateo el 09/09/2026 tras probar con el cliente; las dos decisiones que lo bloqueaban están respondidas en §8 (10/09/2026).
 > **Qué resuelve:** una prenda avaluada en 2.000.000 sobre la que se prestó 1.000.000 tiene 1.000.000 de cupo sin usar. El cliente vuelve a los pocos días y quiere retirar parte de ese sobrante.
 > **Principio de diseño:** un recargo **no modifica** el contrato: lo **sucede**. Mismo espíritu que `MIGRACION_CONTRATOS.md` — reusar lo que ya existe (máquina de estados, snapshot, consecutivos, caja) en vez de abrir una excepción dentro de las reglas de plata.
 
@@ -81,9 +81,9 @@ disponible = appraisal_value × (max_ltv_pct / 100) − capital_balance
 
 **Ojo con el ejemplo de Mateo:** "avaluado en 2 millones, prestó 1 millón, puede retirar el otro millón" asume LTV del 100 %. Pero el sistema ya tiene `max_ltv_pct` heredado de la categoría — y en LA GRAN LEGAL **está en 10 %**, que daría cupo negativo siempre. Antes de implementar esto hay que revisar ese 10 % (ver §9), o el recargo nace inutilizable.
 
-Sin `appraisal_value` no hay techo que calcular: el recargo se rechaza (`409 CONTRACT_WITHOUT_APPRAISAL`) o se permite sin tope, según §8.
+Sin `appraisal_value` no hay techo que calcular: el recargo se rechaza con `409 CONTRACT_WITHOUT_APPRAISAL` (§9).
 
-**Recomendación: advertir, no bloquear** — es el precedente que el propio proyecto ya tomó con `ltv_warning` al crear un contrato, y el que QA recomendó para los desembolsos sin efectivo (`DECISIONES_PENDIENTES.md` §3). Pasarse del cupo deja `ltv_warning = true` en el sucesor y sigue. Si el negocio prefiere tope duro, es un `if` — pero entonces las tres operaciones deberían comportarse igual, no dos advirtiendo y una bloqueando.
+> **Decidido — ver §8.1.** No es advertir siempre ni bloquear siempre: depende del permiso **`contracts.override_ltv`**. Quien no lo tiene queda bloqueado; quien lo tiene recibe la advertencia y queda auditado como quien autorizó. Y aplica también a `POST /contracts`, para que la misma regla no se comporte distinto en dos pantallas.
 
 ## 5. El interés del mes en curso — la pregunta de fondo
 
@@ -91,7 +91,7 @@ Al momento del recargo el cliente casi siempre está **dentro** de un mes ya emp
 
 | | Qué hace | Costo | Veredicto |
 |---|---|---|---|
-| **(a) El reloj se reinicia** | `interest_paid_until = hoy` en el sucesor; los días corridos sobre el capital viejo se perdonan | Acotado por la ventana: ≤28 días. Sobre 1.000.000 al 5 %, ≤46.000 | **Recomendada.** No rompe ninguna regla existente y no castiga al cliente por volver |
+| **(a) El reloj se reinicia** — **la elegida (§8.2)** | `interest_paid_until = hoy` en el sucesor; los días corridos sobre el capital viejo se perdonan | Acotado por la ventana: ≤28 días. Sobre 1.000.000 al 5 %, ≤46.000 | **Recomendada.** No rompe ninguna regla existente y no castiga al cliente por volver |
 | **(b) Cobrar un mes completo** del capital viejo como condición del recargo | El cliente paga un abono normal de 1 mes antes de ampliar | Cobra 30 días por 5. Duro, pero es lo que hacen muchas compraventas | Viable, cero código nuevo (es un abono normal) |
 | **(c) Prorratear** los días corridos | Cobrar la fracción exacta | Rompe "solo meses completos", que es la regla que sostiene abonos, estados, prórroga y remate | **Descartar** |
 
@@ -126,16 +126,74 @@ create index ix_contract_root on public.contract (company_id, root_contract_id)
 
 > **Ojo operativo:** `alter type ... add value` no corre dentro de una transacción en Postgres. Va en su propia migración, antes de la que use el valor.
 
-## 8. Preguntas que solo puede responder el negocio
+## 8. Las decisiones, tomadas (10/09/2026)
 
-1. **¿Cupo con tope duro o advertencia?** (§4 — recomendación: advertencia, por consistencia con el resto del sistema)
-2. **¿El interés del mes en curso se perdona (a) o se cobra completo (b)?** (§5)
-3. **¿Se puede ampliar un contrato en mora?** Recomendación: sí, pero pagando primero los meses adeudados — que es lo que el paso 2 del flujo ya exige.
+Mateo respondió las dos que bloqueaban. Quedan escritas con su porqué para que no se vuelvan a discutir.
+
+### 8.1 · El cupo: un permiso, no una advertencia fija ni un interruptor
+
+Mateo propuso una casilla por empresa ("advierte" / "bloquea"). Se descartó por tres razones: nadie sabe responder esa pregunta al dar de alta una empresa; parte el producto en dos comportamientos que hay que documentar, soportar y testear; y contradice al propio sistema, donde **crear** un contrato por encima del LTV advierte — la misma regla se comportaría distinto en dos pantallas.
+
+**La forma que el proyecto ya tiene para esto es un permiso**, y el precedente funciona: `sales.return_override_time_limit` rechaza la devolución fuera de plazo *salvo* que lo tengas.
+
+**`contracts.override_ltv`** (permiso nuevo):
+
+| Quién | Al pasarse del cupo |
+|---|---|
+| Sin el permiso | **Bloqueado**, con un mensaje que nombra a quién pedírselo |
+| Con el permiso | **Advertencia** (`ltv_warning`) + auditado quién autorizó |
+
+Lo que gana sobre el booleano: **la casilla sigue siendo expresable** —quien quiera "siempre advertir" se lo da a todos, quien quiera "siempre bloquear" a nadie— y encima cubre el caso que un booleano no puede: que el asesor no pueda y el dueño sí, que es lo que va a querer la mayoría. Y deja auditado no solo *que* se pasó del LTV, sino **quién lo autorizó**.
+
+**Aplica también a `POST /contracts`**, no solo al recargo: si no, volvemos a la misma regla con dos comportamientos. Eso cambia el comportamiento actual, así que **la migración otorga el permiso a todo rol que hoy pueda crear contratos** — nadie pierde acceso el día del despliegue, y la empresa que quiera apretar se lo quita al Asesor. Mismo criterio que usó `00029` con los permisos de cuentas.
+
+### 8.2 · El interés del mes en curso: perdonar, con la palanca puesta
+
+**Se perdona** (opción (a) de §5): el sucesor arranca con `interest_paid_until = hoy`.
+
+Mateo pidió dejarlo abierto a cobrarlo según reglas futuras, con la intuición de que *"si hizo el recargo al día siguiente del contrato, no tendría sentido perdonarlo"*. **Los números van al revés**, y conviene dejarlo escrito porque es contraintuitivo. Sobre un capital de 1.000.000 al 5 % mensual:
+
+| Recargo el… | Interés corrido perdonado |
+|---|---|
+| día 1 | **1.667** — nada |
+| día 14 | ~23.000 |
+| día 27 | **~45.000** — casi un mes entero |
+
+Al día siguiente no hay nada que perdonar. **El caso que duele es el recargo al final de la ventana**, donde el cliente se lleva plata nueva *y* un mes de interés casi completo del capital viejo. Y hay un segundo efecto en la misma dirección: el reloj se reinicia, así que un recargo el día 27 además corre la próxima fecha de pago 27 días.
+
+**La palanca**, snapshot en el contrato igual que `extension_window_days`:
+
+```sql
+extension_interest_policy text not null default 'forgive'
+  check (extension_interest_policy in ('forgive', 'charge_month'))
+```
+
+| Valor | Qué hace |
+|---|---|
+| `forgive` *(default)* | El reloj se reinicia; los días corridos se perdonan |
+| `charge_month` | Exige el mes de interés pagado antes de ampliar |
+
+Una columna, un default, **cero UI el día uno**. El día que aparezca una regla: se cambia el default o se expone el campo.
+
+**`prorate` no está y no va a estar.** Prorratear rompe la regla de meses completos que sostiene abonos, mora, prórroga y remate — habría que reescribir `quote_payment_options`, `compute_status`, el job nocturno y el remate para un caso de borde.
+
+### 8.3 · Reglas candidatas para cuando haya datos
+
+Ninguna se puede elegir hoy: **hasta que no haya recargos reales no hay con qué medir cuál duele.** Por eso el campo y no la regla.
+
+1. **Umbral de días** *(la más probable)* — perdonar en los primeros N días, cobrar el mes después. Sigue la curva del costo real de §8.2.
+2. **Umbral de monto** — perdonar si el interés corrido es menor a cierto % del recargo entregado. Se autorregula sin fechas.
+3. **Un recargo gratis** — el primero perdona, los siguientes cobran. Es la que corta el encadenamiento de recargos chicos.
+4. **Proporcional al recargo** — si el cliente saca mucho, perdonar sale barato porque el negocio gana con el capital nuevo.
+
+## 9. Preguntas que siguen abiertas
+
+1. **¿Se puede ampliar un contrato en mora?** Recomendación: sí, pero pagando primero los meses adeudados — que es lo que el paso 2 del flujo ya exige.
 4. **¿Se pueden dejar prendas nuevas en el recargo, o solo sacar plata sobre las mismas?** El diseño lo soporta (`items` opcional); es decidir si la pantalla lo ofrece.
 5. **¿Sin tasación se puede ampliar?** Sin `appraisal_value` no hay cupo que calcular.
 6. **¿Cuántos recargos encadenados?** Recomendación: sin límite — la ventana anclada a la raíz (§3) ya los acota sola.
 
-## 9. Lo que hay que revisar de arrastre al implementar
+## 10. Lo que hay que revisar de arrastre al implementar
 
 - **`max_ltv_pct = 10 %` en LA GRAN LEGAL.** Con ese valor el cupo es negativo para cualquier contrato y el recargo no sirve. Casi seguro es un dedazo (un LTV del 10 % significa prestar 100.000 sobre una prenda de un millón); hoy ya hace que 17 de 22 contratos salgan con `ltv_warning`.
 - **Filtros y badges** de `/contratos`: el estado nuevo necesita etiqueta en español y color propio.
@@ -144,7 +202,7 @@ create index ix_contract_root on public.contract (company_id, root_contract_id)
 - **El historial del cliente** debe leer la cadena como una sola historia, no como contratos sueltos — es lo que hace `root_contract_id`.
 - **El nombre en pantalla.** "Recargo" es la palabra del cliente. Para un producto que se le vende a cualquier compraventa, **"Ampliar préstamo"** dice lo que hace sin jerga de una sola casa. Vale usar "recargo" como sinónimo visible si el cliente lo pide, pero la API y los docs deberían hablar de `extend_loan`.
 
-## 10. Definición de Hecho (cuando se implemente)
+## 11. Definición de Hecho (cuando se implemente)
 
 - **Unitarios:** cupo con y sin `max_ltv_pct`; ventana medida desde la raíz de la cadena (incluido el caso de tres recargos encadenados); `superseded` es terminal y `compute_status` no lo mueve.
 - **Integración:** recargo sin caja abierta → `409 CASH_SESSION_NOT_OPEN`; con meses adeudados → `409 CONTRACT_INTEREST_OVERDUE`; fuera de ventana → `409`; el `cash_movement` es **solo** el delta; las prendas viejas quedan `transferred` y las del sucesor `in_custody`; reintento con la misma `Idempotency-Key` → el mismo contrato sucesor; `GET /settlement` sobre un `superseded` → 404.
