@@ -243,13 +243,25 @@ De ahí el catálogo de cuentas (`public.account`, tres tipos):
 
 | tipo | qué es | saldo |
 |---|---|---|
-| `cash` | el cajón físico | base de la sesión abierta + movimientos de esa sesión |
+| `cash` | el cajón físico | `opening_balance` + acumulado histórico *(desde 00048; antes salía de la sesión de caja)* |
 | `bank` | una cuenta bancaria, Nequi, Daviplata | `opening_balance` + acumulado histórico |
 | `settlement` | un convenio que te debe (Sistecrédito) | lo que te deben; baja al liquidar |
 
 **El saldo se DERIVA, nunca se guarda.** Un saldo almacenado hay que mantenerlo sincronizado con cada operación, y en cuanto una falle o alguien inserte a mano queda mintiendo. Derivarlo no puede desincronizarse. Por el mismo motivo `account_balance()` **delega** en `list_accounts()` en vez de tener su propia consulta: dos formas de calcular el mismo saldo terminan divergiendo, y eso fue literalmente un bug (una cuenta recién creada reportaba 0 mientras el listado la mostraba bien, porque una sumaba el `opening_balance` y la otra no).
 
-**El saldo de una `cash` se calcula distinto a propósito.** Es lo que debería haber en el cajón *ahora mismo*: la base con la que se abrió la sesión más los movimientos de esa sesión. Sumar el histórico completo daría un número negativo y sin sentido, porque los préstamos desembolsados superan lo cobrado — la base de apertura **no es un movimiento**. Sin sesión abierta el cajón está cuadrado y cerrado: no hay saldo vivo que reportar.
+**Los tres tipos se calculan IGUAL, y hasta 00048 no era así.** Una cuenta `cash` era la excepción: su saldo salía de la **sesión de caja** abierta — el `opening_balance` que alguien digitaba cada mañana, más los movimientos de esa sesión. El argumento era que la base de apertura "no es un movimiento" y que sumar el histórico daría un número sin sentido. El argumento estaba mal puesto: lo que faltaba no era una fórmula distinta, era **que la base de apertura fuera un movimiento**.
+
+Tres defectos salían de ahí, y los tres desaparecen al derivar el saldo de los movimientos propios de la cuenta:
+
+- **Sin sesión abierta el cajón reportaba `0.00`.** La plata dejaba de existir para el sistema entre el cierre de la noche y la apertura de la mañana.
+- **Todas las cuentas `cash` de una empresa reportaban el MISMO saldo**, porque todas leían la única sesión. Con tres cajones daban los tres el mismo número — un cliente creó dos cuentas de más buscando tener más efectivo disponible y leyó ese número repetido como un "límite de 300.000".
+- **El saldo dependía de un número escrito a mano** que nada comparaba contra el cierre anterior: el único dato de la aplicación que aparecía sin documento, contra la regla 5 de `CLAUDE.md`.
+
+La migración 00048 convierte la historia en movimientos `adjustment` (el saldo de arranque de cada empresa, y cada descuadre de apertura que nadie había mirado), y el arqueo —abrir contando y cerrar contando— emite el suyo. Después de cerrar, el cajón vale lo que se contó, no lo que se esperaba.
+
+Esos ajustes llevan **`session_id = NULL` a propósito**: son correcciones de la *cuenta*, no operaciones del turno. Dentro de la sesión, `expected_cash` los contaría dos veces al abrir, y al cerrar produciría un acta que siempre cuadra. La trazabilidad va por `reference_type`/`reference_id`, que apuntan a la sesión cuyo arqueo los produjo.
+
+**Lo que el turno sigue calculando aparte** es `cashbox._expected_cash`: cuánto debería haber en el cajón *al cerrar hoy*. Es otra pregunta —el arqueo de una ventana de tiempo, no el saldo de una cuenta— y sigue sumando por **tipo de cuenta**, no por medio de pago. El modelo completo y lo que falta: [`CAJA_TRAZABILIDAD.md`](CAJA_TRAZABILIDAD.md).
 
 **`payment_method` se conservó, y es una decisión, no una omisión.** Es el dato del *documento*: una venta se cobró "en efectivo" y eso sigue siendo cierto aunque después la cuenta se renombre o se desactive. El comprobante impreso lo muestra; derivarlo de la cuenta actual haría que un comprobante viejo cambiara de texto porque alguien renombró una cuenta hoy — el mismo problema que ya se evitó congelando el costo en la línea de venta (00019) y la tasa en el snapshot del contrato.
 

@@ -1,6 +1,6 @@
 # CAJA_TRAZABILIDAD.md — El modelo de efectivo (spec)
 
-> **Estado:** análisis y diseño, **sin implementar**. Pedido por Mateo el 09/09/2026 probando con el cliente: *"trazabilidad de todo y sin números inventados"*.
+> **Estado:** el **Paso 1 está hecho** (migración `00048`, 10/09/2026) — el saldo del cajón ya se deriva de sus movimientos, abrir hereda en vez de digitar, y los arqueos de apertura y cierre emiten su ajuste. Faltan los Pasos 2, 3 y 4 de §6. Pedido por Mateo el 09/09/2026 probando con el cliente: *"trazabilidad de todo y sin números inventados"*.
 >
 > **Corrección de una primera versión de este documento.** El primer diseño proponía un *cierre guiado* que preguntaba "¿cuánto consignás, cuánto a la fuerte, cuánto de base?". Mateo lo rechazó con la razón correcta: **esto es un SaaS**. Una empresa tiene caja fuerte y otra no; una consigna todo, otra la mitad, otra reparte en tres; otra consigna el martes lo del lunes. Un producto que codifica *un* ritual de cierre le queda mal a todas menos a una.
 >
@@ -135,7 +135,7 @@ Mientras el modelo siga como está, la guarda hay que ponerla igual: **impedir l
 
 El cambio es de modelo y hay contratos, ventas y una caja real operando. Va por partes, y **cada paso deja el sistema mejor que antes**.
 
-### Paso 1 — El saldo del cajón deja de depender de la sesión *(una migración de datos, sin cambio de esquema)*
+### Paso 1 — El saldo del cajón deja de depender de la sesión — **HECHO (00048)**
 
 El `opening_balance` de cada sesión histórica se convierte en movimientos:
 
@@ -147,15 +147,15 @@ Reconstruye la cadena hacia atrás y deja el saldo derivado cuadrando con el úl
 
 `list_accounts` pasa a calcular el saldo de una `cash` igual que el de una `bank`.
 
-### Paso 2 — Abrir deja de pedir el número
+### Paso 2 — Abrir deja de pedir el número — **HECHO en el backend**, falta la pantalla
 
 El diálogo muestra el saldo que hay y ofrece **contar** (opcional pero recomendado). Si se cuenta y difiere → motivo obligatorio y ajuste, con el responsable del turno que empieza.
 
-### Paso 3 — Cerrar emite el ajuste
+### Paso 3 — Cerrar emite el ajuste — **HECHO**
 
 `close_session` ya calcula la diferencia y ya exige justificación. Solo falta que además escriba el movimiento. Es aditivo: el acta sigue mostrando lo mismo.
 
-### Paso 4 — `vault`, y levantar el límite de una sola cuenta de efectivo
+### Paso 4 — `vault`, y levantar el límite de una sola cuenta de efectivo — pendiente
 
 Ya sin la dependencia de la sesión, varias ubicaciones dejan de ser peligrosas.
 
