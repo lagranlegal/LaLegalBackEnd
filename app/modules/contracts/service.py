@@ -23,10 +23,12 @@ from app.modules.catalogs import repository as catalogs_repo
 from app.modules.contracts import repository, rules
 from app.modules.contracts.schemas import (
     ContractCreateIn,
+    ContractExtendIn,
     ContractImportIn,
     ContractItemOut,
     ContractOut,
     ContractUpdateIn,
+    ExtensionQuoteOut,
     PaymentCreateIn,
     PaymentOptionOut,
     PaymentOut,
@@ -84,6 +86,10 @@ def _row_to_contract(row: Row[Any], items: list[ContractItemOut]) -> ContractOut
         notes=m["notes"],
         signed_photo_url=m["signed_photo_url"],
         created_at=m["created_at"],
+        extension_window_days=m["extension_window_days"],
+        extension_interest_policy=m["extension_interest_policy"],
+        parent_contract_id=m["parent_contract_id"],
+        root_contract_id=m["root_contract_id"],
         items=items,
     )
 
@@ -107,12 +113,49 @@ def _row_to_payment(row: Row[Any]) -> PaymentOut:
     )
 
 
+async def _check_ltv(
+    db: AsyncSession,
+    *,
+    role_id: UUID,
+    principal: Decimal,
+    appraisal_value: Decimal | None,
+    max_ltv_pct: Decimal | None,
+) -> bool:
+    """¿Se pasa del LTV? Devuelve la bandera, o bloquea si no hay permiso.
+
+    Hasta 00051 pasarse solo ADVERTÍA, para todos. Ahora depende de
+    `contracts.override_ltv` (docs/RECARGOS.md §8.1): quien lo tiene recibe
+    la advertencia y queda auditado como quien autorizó; quien no, queda
+    bloqueado con un mensaje que dice a quién pedírselo.
+
+    Se descartó una casilla por empresa ("advierte"/"bloquea"): nadie sabe
+    responder eso al dar de alta una empresa, y un permiso la expresa igual
+    —dárselo a todos o a nadie— y encima cubre el caso que la casilla no
+    puede, que el asesor no pueda y el dueño sí.
+
+    Sin tasación o sin LTV en la categoría no hay nada que comparar: se deja
+    pasar sin bandera, igual que siempre.
+    """
+    if not appraisal_value or appraisal_value <= 0 or max_ltv_pct is None:
+        return False
+    if principal / appraisal_value * 100 <= max_ltv_pct:
+        return False
+    if not await has_permission(db, role_id, "contracts.override_ltv"):
+        raise PermissionDeniedError(
+            "El préstamo supera el LTV máximo de la categoría. Pide a un "
+            "responsable con el permiso para autorizarlo que lo registre.",
+            details={"permission": "contracts.override_ltv", "max_ltv_pct": str(max_ltv_pct)},
+        )
+    return True
+
+
 async def create_contract(
     db: AsyncSession,
     *,
     company_id: UUID,
     body: ContractCreateIn,
     created_by: UUID,
+    role_id: UUID,
     idempotency_key: str,
 ) -> ContractOut:
     existing = await repository.find_contract_by_idempotency_key(
@@ -198,10 +241,22 @@ async def create_contract(
     start_date = await platform_integration.get_company_today(db, company_id=company_id)
     due_date = rules.add_months(start_date, term_months)
 
-    ltv_warning = False
-    if body.appraisal_value and body.appraisal_value > 0 and max_ltv_pct is not None:
-        ltv_pct = body.principal / body.appraisal_value * 100
-        ltv_warning = ltv_pct > max_ltv_pct
+    ltv_warning = await _check_ltv(
+        db,
+        role_id=role_id,
+        principal=body.principal,
+        appraisal_value=body.appraisal_value,
+        max_ltv_pct=max_ltv_pct,
+    )
+
+    # La ventana de recargo sale de la política de la EMPRESA salvo que este
+    # contrato traiga la suya. Se congela acá: cambiar la política mañana no
+    # puede alterar lo que este cliente firmó hoy.
+    extension_window_days = (
+        body.extension_window_days
+        if body.extension_window_days is not None
+        else await platform_integration.get_extension_window_days(db, company_id=company_id)
+    )
 
     contract_id = uuid4()
     number = await repository.next_number(db, company_id=company_id)
@@ -221,6 +276,7 @@ async def create_contract(
         extension_months=body.extension_months,
         start_date=start_date,
         due_date=due_date,
+        extension_window_days=extension_window_days,
         interest_paid_until=start_date,
         ltv_warning=ltv_warning,
         notes=body.notes,
@@ -886,3 +942,276 @@ async def auction_contract(
     )
 
     return await get_contract(db, company_id=company_id, contract_id=contract_id)
+
+
+# ------------------------------------------------- ampliar el préstamo ------
+async def _max_ltv_for_contract(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID
+) -> Decimal | None:
+    """LTV vigente de la categoría de la PRIMERA prenda, heredado del árbol.
+
+    Se lee de la configuración de HOY y no de un snapshot a propósito: el
+    cupo es una decisión de riesgo del presente ("¿cuánto le prestaría hoy
+    sobre esto?"), no una condición pactada como la tasa. Si el negocio baja
+    el LTV, el cupo se achica para todos, y eso es lo correcto.
+    """
+    items = await repository.list_contract_items(db, company_id=company_id, contract_id=contract_id)
+    if not items:
+        return None
+    params = await catalogs_repo.resolve_category_params(
+        db, company_id=company_id, category_id=items[0]._mapping["category_id"]
+    )
+    return params._mapping["max_ltv_pct"] if params is not None else None
+
+
+async def quote_extension(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID
+) -> ExtensionQuoteOut:
+    """Cuánto puede retirar el cliente y hasta cuándo (docs/RECARGOS.md §4).
+
+    Devuelve una respuesta útil SIEMPRE, incluso cuando no se puede ampliar:
+    `blocked_reason` dice por qué. Una pantalla que solo sabe "no se puede"
+    obliga al usuario a adivinar, y el motivo casi siempre tiene arreglo
+    (registrar el avalúo, ponerse al día con los intereses).
+    """
+    row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
+    if row is None:
+        raise NotFoundError("El contrato no existe en esta empresa.")
+    m = row._mapping
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+
+    root_start = await repository.get_root_start_date(
+        db, company_id=company_id, contract_id=contract_id
+    )
+    max_ltv_pct = await _max_ltv_for_contract(
+        db, company_id=company_id, contract_id=contract_id
+    )
+    quote = rules.quote_extension(
+        capital_balance=m["capital_balance"],
+        appraisal_value=m["appraisal_value"],
+        max_ltv_pct=max_ltv_pct,
+        root_start_date=root_start,
+        extension_window_days=m["extension_window_days"],
+    )
+    ventana_abierta = rules.extension_window_is_open(
+        window_ends_on=quote.window_ends_on, today=today
+    )
+
+    # El orden importa: se reporta el motivo que el usuario tiene que
+    # resolver PRIMERO. Decirle "no hay cupo" a quien además está en mora lo
+    # manda a resolver lo que no lo desbloquea.
+    razon: str | None = None
+    if m["status"] in ("paid", "auctioned", "superseded"):
+        razon = "CONTRACT_CLOSED"
+    elif not ventana_abierta:
+        razon = "EXTENSION_WINDOW_CLOSED"
+    elif rules.months_between(m["interest_paid_until"], today) > 0:
+        razon = "CONTRACT_INTEREST_OVERDUE"
+    elif quote.ceiling is None:
+        razon = "CONTRACT_WITHOUT_APPRAISAL"
+    elif quote.available <= 0:
+        razon = "EXTENSION_NO_HEADROOM"
+
+    return ExtensionQuoteOut(
+        ceiling=quote.ceiling,
+        available=quote.available,
+        window_ends_on=quote.window_ends_on,
+        is_open=razon is None,
+        blocked_reason=razon,
+    )
+
+
+async def extend_loan(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    contract_id: UUID,
+    body: ContractExtendIn,
+    user: CurrentUser,
+    idempotency_key: str,
+) -> ContractOut:
+    """Amplía el préstamo: el contrato viejo se SUCEDE, no se modifica.
+
+    Por qué no puede ser un `UPDATE` del capital (docs/RECARGOS.md §1): el
+    interés se cobra en meses completos anclados a `interest_paid_until` y
+    toda la máquina de estados cuelga de esa ancla. Y el papel firmado dice
+    un capital — si cambia, ese papel ya no describe la deuda.
+
+    Todo en UNA transacción (CLAUDE.md regla 4).
+    """
+    existing = await repository.find_contract_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if existing is not None:
+        return await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"])
+
+    if body.amount <= 0:
+        raise AppError("El monto a entregar debe ser mayor a cero.")
+
+    row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
+    if row is None:
+        raise NotFoundError("El contrato no existe en esta empresa.")
+    viejo = row._mapping
+
+    quote = await quote_extension(db, company_id=company_id, contract_id=contract_id)
+    if quote.blocked_reason == "CONTRACT_CLOSED":
+        raise AppError(
+            "El contrato ya está cerrado; no admite ampliaciones.", code="CONTRACT_CLOSED"
+        )
+    if quote.blocked_reason == "EXTENSION_WINDOW_CLOSED":
+        raise ConflictError(
+            "Pasó la ventana para ampliar este préstamo."
+            + (f" Vencía el {quote.window_ends_on}." if quote.window_ends_on else ""),
+            code="EXTENSION_WINDOW_CLOSED",
+            details={"window_ends_on": str(quote.window_ends_on)},
+        )
+    if quote.blocked_reason == "CONTRACT_INTEREST_OVERDUE":
+        # El interés adeudado NUNCA se suma al capital nuevo: capitalizar
+        # interés es anatocismo, y además volvería el saldo imposible de
+        # auditar contra los recibos.
+        raise ConflictError(
+            "Primero hay que ponerse al día con los intereses. Registra el "
+            "abono y vuelve a intentarlo.",
+            code="CONTRACT_INTEREST_OVERDUE",
+        )
+    if quote.blocked_reason == "CONTRACT_WITHOUT_APPRAISAL":
+        raise ConflictError(
+            "Sin avalúo no se puede calcular cuánto puede retirar el cliente. "
+            "Regístralo en Editar y vuelve a intentarlo.",
+            code="CONTRACT_WITHOUT_APPRAISAL",
+        )
+
+    # Pasarse del cupo es la misma decisión que prestar por encima del LTV al
+    # crear: lo gobierna `contracts.override_ltv`, no una casilla (§8.1).
+    ltv_warning = bool(viejo["ltv_warning"])
+    if body.amount > quote.available:
+        if not await has_permission(db, user.role_id, "contracts.override_ltv"):
+            raise PermissionDeniedError(
+                f"El cliente puede retirar hasta {quote.available} sobre esta garantía. "
+                "Pide a un responsable con el permiso para autorizarlo que lo registre.",
+                details={
+                    "permission": "contracts.override_ltv",
+                    "available": str(quote.available),
+                },
+            )
+        ltv_warning = True
+
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    nuevo_capital = quantize(viejo["capital_balance"] + body.amount)
+
+    # --- El sucesor -------------------------------------------------------
+    nuevo_id = uuid4()
+    number = await repository.next_number(db, company_id=company_id)
+    await repository.insert_contract(
+        db,
+        contract_id=nuevo_id,
+        company_id=company_id,
+        number=number,
+        legacy_code=None,
+        customer_id=viejo["customer_id"],
+        principal=nuevo_capital,
+        capital_balance=nuevo_capital,
+        appraisal_value=viejo["appraisal_value"],
+        # Tasa, plazo, ventana y prórroga se COPIAN del viejo, no se releen de
+        # la categoría: ampliar no renegocia lo pactado.
+        interest_rate_pct=viejo["interest_rate_pct"],
+        term_months=viejo["term_months"],
+        arrears_window_months=viejo["arrears_window_months"],
+        extension_months=viejo["extension_months"],
+        start_date=today,
+        due_date=rules.add_months(today, viejo["term_months"]),
+        # El reloj se reinicia: los días corridos sobre el capital viejo se
+        # perdonan (política `forgive`, §8.2). Acotado por la ventana.
+        interest_paid_until=today,
+        ltv_warning=ltv_warning,
+        notes=viejo["notes"],
+        # Nace SIN foto firmada: hay que imprimirlo y firmarlo. Esa es su
+        # razón de ser.
+        signed_photo_url=None,
+        created_by=user.id,
+        idempotency_key=idempotency_key,
+        extension_window_days=viejo["extension_window_days"],
+        extension_interest_policy=viejo["extension_interest_policy"],
+        parent_contract_id=contract_id,
+        # La ventana se mide desde la RAÍZ de la cadena, así que el sucesor
+        # hereda la raíz del viejo — o al viejo mismo si era el primero.
+        root_contract_id=viejo["root_contract_id"] or contract_id,
+    )
+
+    # Las mismas prendas, en filas nuevas: `contract_item` cuelga de
+    # `contract_id`, y las viejas quedan como evidencia de qué respaldaba el
+    # contrato anterior.
+    items_viejos = await repository.list_contract_items(
+        db, company_id=company_id, contract_id=contract_id
+    )
+    for item in items_viejos:
+        im = item._mapping
+        await repository.insert_contract_item(
+            db,
+            item_id=uuid4(),
+            company_id=company_id,
+            contract_id=nuevo_id,
+            category_id=im["category_id"],
+            description=im["description"],
+            weight_grams=im["weight_grams"],
+            serial_imei=im["serial_imei"],
+            item_appraisal=im["item_appraisal"],
+            photos=list(im["photos"] or []),
+        )
+
+    # --- El viejo se cierra ----------------------------------------------
+    await repository.update_contract_status(
+        db,
+        company_id=company_id,
+        contract_id=contract_id,
+        status="superseded",
+        extension_ends_at=None,
+    )
+    await repository.mark_items_transferred(db, company_id=company_id, contract_id=contract_id)
+
+    # --- La caja: SOLO el delta ------------------------------------------
+    # El capital viejo ya salió el día del contrato original. Volver a moverlo
+    # lo contaría dos veces en `/reports/pawn-performance`.
+    resolved = await cashbox_integration.resolve_account_for_movement(
+        db,
+        company_id=company_id,
+        payment_method=body.payment_method,
+        account_id=body.account_id,
+        direction="out",
+    )
+    await cashbox_integration.record_movement(
+        db,
+        session_id=resolved.session_id,
+        company_id=company_id,
+        module="pawn",
+        direction="out",
+        concept="loan_disbursed",
+        amount=body.amount,
+        payment_method=body.payment_method,
+        reference_type="contract",
+        reference_id=nuevo_id,
+        created_by=user.id,
+        account_id=resolved.account_id,
+    )
+
+    await identity_repo.insert_audit_log(
+        db,
+        company_id=company_id,
+        user_id=user.id,
+        module="contracts",
+        action="extend_loan",
+        entity_type="contract",
+        entity_id=nuevo_id,
+        before={
+            "contract_id": str(contract_id),
+            "number": str(viejo["number"]),
+            "capital_balance": str(viejo["capital_balance"]),
+        },
+        after={
+            "number": str(number),
+            "amount_disbursed": str(body.amount),
+            "capital_balance": str(nuevo_capital),
+            "ltv_warning": str(ltv_warning),
+        },
+    )
+    return await get_contract(db, company_id=company_id, contract_id=nuevo_id)

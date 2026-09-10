@@ -5,12 +5,17 @@ resto del módulo solo persiste lo que esta capa calcula.
 
 import calendar
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from app.common.money import quantize
 
-_TERMINAL_STATUSES = {"paid", "auctioned"}
+#: `superseded` (00051) entra acá por la misma razón que los otros dos: un
+#: contrato que ya fue ampliado no vuelve a moverse. Sin esto, el recálculo
+#: en lectura y el job nocturno lo devolverían a `in_arrears` en cuanto
+#: pasara un mes, y aparecería en la cola de cobro un documento que ya no
+#: existe como obligación.
+_TERMINAL_STATUSES = {"paid", "auctioned", "superseded"}
 
 
 def add_months(d: date, n: int) -> date:
@@ -102,8 +107,10 @@ def compute_status(
     today: date,
 ) -> tuple[str, date | None]:
     """Máquina de estados (CLAUDE.md): active → in_arrears → in_extension.
-    `paid`/`auctioned` son terminales — nunca se recalculan (paid lo cierra
-    el servicio de abonos; auctioned SOLO la acción manual Rematar).
+
+    Los TERMINALES nunca se recalculan, cada uno lo fija quien corresponde:
+    `paid` el servicio de abonos, `auctioned` SOLO la acción manual Rematar,
+    y `superseded` la ampliación de préstamo (00051).
     `in_extension` se dispara UNA vez; no se vuelve a calcular `extension_ends_at`
     mientras siga en ese estado (aunque sigan pasando meses sin pagar).
     """
@@ -122,3 +129,57 @@ def compute_status(
     trigger_date = add_months(interest_paid_until, arrears_window_months)
     new_extension_ends_at = add_months(trigger_date, extension_months)
     return "in_extension", new_extension_ends_at
+
+
+# ------------------------------------------------------ ampliar préstamo ----
+@dataclass(frozen=True)
+class ExtensionQuote:
+    """Cuánto puede retirar el cliente sobre la garantía que ya dejó."""
+
+    #: Techo que impone la tasación: `avalúo × LTV`. `None` si no hay
+    #: tasación o la categoría no define LTV — sin techo no hay cupo que
+    #: calcular, y prestar sin techo es prestar a ciegas.
+    ceiling: Decimal | None
+    #: Lo que queda libre bajo ese techo. Nunca negativo hacia afuera: si el
+    #: contrato ya está por encima (pasa cuando el LTV se corrige a la baja
+    #: después de firmar), el cupo es cero, no una deuda.
+    available: Decimal
+    #: Último día en que se admite un recargo, medido desde la RAÍZ de la
+    #: cadena. `None` si la ventana es 0 (recargos apagados).
+    window_ends_on: date | None
+
+
+def quote_extension(
+    *,
+    capital_balance: Decimal,
+    appraisal_value: Decimal | None,
+    max_ltv_pct: Decimal | None,
+    root_start_date: date,
+    extension_window_days: int,
+) -> ExtensionQuote:
+    """El cupo y la ventana de un recargo (docs/RECARGOS.md §3 y §4).
+
+    **La ventana se mide desde `root_start_date`**, la fecha del PRIMER
+    contrato de la cadena, nunca desde el actual. Sin eso, un recargo de $1
+    el día 27 reinicia el reloj y el cliente encadena recargos para siempre;
+    con el ancla en la raíz, 28 días son 28 días haya habido uno o cinco.
+    """
+    if appraisal_value is None or appraisal_value <= 0 or max_ltv_pct is None:
+        ceiling: Decimal | None = None
+        available = Decimal("0.00")
+    else:
+        ceiling = quantize(appraisal_value * max_ltv_pct / Decimal(100))
+        available = max(quantize(ceiling - capital_balance), Decimal("0.00"))
+
+    window_ends_on = (
+        root_start_date + timedelta(days=extension_window_days)
+        if extension_window_days > 0
+        else None
+    )
+    return ExtensionQuote(ceiling=ceiling, available=available, window_ends_on=window_ends_on)
+
+
+def extension_window_is_open(*, window_ends_on: date | None, today: date) -> bool:
+    """Con la ventana en 0 (`window_ends_on is None`) no hay recargos: es
+    cómo una empresa —o un contrato puntual— apaga la función."""
+    return window_ends_on is not None and today <= window_ends_on

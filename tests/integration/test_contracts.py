@@ -3,6 +3,7 @@
 ready-for-auction. Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -64,8 +65,21 @@ async def contract_tenant(
         "contracts.auction",
         "payments.create",
         "payments.apply_discount",
+        # 00051: ampliar el préstamo, y autorizar por encima del LTV. El rol
+        # `limited` NO los tiene a propósito — es con el que se prueba que
+        # sin permiso se bloquea.
+        "contracts.extend_loan",
+        "contracts.override_ltv",
     )
-    limited_codes = ("contracts.view", "contracts.create", "payments.create")
+    # `limited` SÍ puede ampliar préstamos, pero NO tiene
+    # `contracts.override_ltv`: es el rol con el que se prueba que pasarse del
+    # cupo se bloquea, que es el caso real (el asesor no puede, el dueño sí).
+    limited_codes = (
+        "contracts.view",
+        "contracts.create",
+        "payments.create",
+        "contracts.extend_loan",
+    )
 
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
@@ -810,3 +824,304 @@ async def test_settlement_info_requires_paid_status_and_matches_the_payoff_payme
     body = settlement.json()
     assert body["receipt_number"] == payoff.json()["receipt_number"]
     assert body["settled_at"] == payoff.json()["paid_at"]
+
+
+# ==========================================================================
+# Ampliar el préstamo — "recargo" (00051, docs/RECARGOS.md)
+# ==========================================================================
+async def _set_ltv(*, company_id, category_id, pct: int) -> None:
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "update public.category set max_ltv_pct = :pct "
+                "where id = :id and company_id = :cid"
+            ),
+            {"pct": pct, "id": str(category_id), "cid": str(company_id)},
+        )
+
+
+async def _contrato_ampliable(client: TestClient, tenant: dict, **overrides: object) -> dict:
+    """Un contrato con tasación y LTV, listo para ampliar: 1.000.000 prestados
+    sobre una prenda de 2.000.000 al 70% → 400.000 de cupo."""
+    await _open_cash_session(company_id=tenant["company_id"], register_id=tenant["register_id"])
+    await _set_ltv(company_id=tenant["company_id"], category_id=tenant["category_id"], pct=70)
+    response = client.post(
+        "/api/v1/contracts",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(tenant, appraisal_value="2000000.00", **overrides),
+    )
+    assert response.status_code == 201, response.text
+    return dict(response.json())
+
+
+async def test_el_cupo_es_el_sobrante_de_la_tasacion(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    contrato = await _contrato_ampliable(client, contract_tenant)
+    cupo = client.get(
+        f"/api/v1/contracts/{contrato['id']}/extension-options",
+        headers=_headers(contract_tenant["full_token"]),
+    )
+    assert cupo.status_code == 200, cupo.text
+    assert cupo.json()["ceiling"] == "1400000.00"
+    assert cupo.json()["available"] == "400000.00"
+    assert cupo.json()["is_open"] is True
+    assert cupo.json()["blocked_reason"] is None
+
+
+async def test_ampliar_sucede_el_contrato_en_vez_de_modificarlo(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El corazón del diseño: no se toca el capital del contrato firmado — se
+    cierra y nace otro, porque el papel que el cliente firmó dice un capital
+    y si cambia ya no describe la deuda."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+
+    nuevo = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+    n = nuevo.json()
+
+    # Es OTRO contrato, con su número.
+    assert n["id"] != viejo["id"]
+    assert n["number"] != viejo["number"]
+    assert n["capital_balance"] == "1400000.00"
+    # Nace SIN foto firmada: hay que imprimirlo y firmarlo. Es su razón de ser.
+    assert n["signed_photo_url"] is None
+    # La cadena queda visible en los dos sentidos.
+    assert n["parent_contract_id"] == viejo["id"]
+    assert n["root_contract_id"] == viejo["id"]
+    # Tasa y plazo se COPIAN: ampliar no renegocia lo pactado.
+    assert n["interest_rate_pct"] == viejo["interest_rate_pct"]
+    assert n["term_months"] == viejo["term_months"]
+
+    cerrado = client.get(
+        f"/api/v1/contracts/{viejo['id']}", headers=_headers(contract_tenant["full_token"])
+    )
+    assert cerrado.json()["status"] == "superseded"
+    # Las prendas siguen en custodia, no se le devolvieron a nadie.
+    assert all(i["status"] == "transferred" for i in cerrado.json()["items"])
+    assert len(nuevo.json()["items"]) == len(viejo["items"])
+
+
+async def test_a_la_caja_sale_SOLO_el_delta(client: TestClient, contract_tenant: dict) -> None:
+    """El capital viejo ya salió el día del contrato original. Volver a
+    moverlo lo contaría dos veces en `/reports/pawn-performance`."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    nuevo = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+
+    async with AsyncSessionLocal() as session:
+        total = (
+            await session.execute(
+                text(
+                    "select coalesce(sum(amount), 0) from public.cash_movement "
+                    "where company_id = :cid and concept = 'loan_disbursed'"
+                ),
+                {"cid": str(contract_tenant["company_id"])},
+            )
+        ).scalar_one()
+    # 1.000.000 del contrato original + 400.000 del recargo. NO 2.400.000.
+    assert Decimal(str(total)) == Decimal("1400000.00")
+
+
+async def test_pasarse_del_cupo_sin_permiso_se_bloquea(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El rol `limited` SÍ puede ampliar, pero no tiene
+    `contracts.override_ltv` — que es el caso real: el asesor no puede
+    autorizar la excepción, el dueño sí.
+
+    Y comprueba las dos mitades: dentro del cupo pasa, por encima se bloquea.
+    Sin la primera mitad el test podría estar pasando porque le falta el
+    permiso del endpoint, no por el LTV."""
+    contrato = await _contrato_ampliable(client, contract_tenant)
+
+    dentro = client.post(
+        f"/api/v1/contracts/{contrato['id']}/extend-loan",
+        headers=_headers(contract_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert dentro.status_code == 201, dentro.text
+
+    # Ese sucesor ya no tiene cupo (1.400.000 de saldo contra un techo de
+    # 1.400.000), así que cualquier monto se pasa.
+    respuesta = client.post(
+        f"/api/v1/contracts/{dentro.json()['id']}/extend-loan",
+        headers=_headers(contract_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    )
+    assert respuesta.status_code == 403, respuesta.text
+    assert respuesta.json()["code"] == "PERMISSION_DENIED"
+    assert respuesta.json()["details"]["permission"] == "contracts.override_ltv"
+
+
+async def test_pasarse_del_cupo_CON_permiso_advierte_y_deja_pasar(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Quien tiene `contracts.override_ltv` autoriza la excepción, y el
+    contrato queda marcado — la advertencia no se pierde."""
+    contrato = await _contrato_ampliable(client, contract_tenant)
+    nuevo = client.post(
+        f"/api/v1/contracts/{contrato['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "900000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+    assert nuevo.json()["ltv_warning"] is True
+    assert nuevo.json()["capital_balance"] == "1900000.00"
+
+
+async def test_no_se_puede_ampliar_con_intereses_adeudados(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El interés vencido NUNCA se suma al capital nuevo: capitalizar interés
+    es anatocismo y volvería el saldo imposible de auditar contra los
+    recibos."""
+    contrato = await _contrato_ampliable(client, contract_tenant)
+    await _backdate_interest_paid_until(
+        company_id=contract_tenant["company_id"], contract_id=contrato["id"], months=2
+    )
+    respuesta = client.post(
+        f"/api/v1/contracts/{contrato['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    )
+    assert respuesta.status_code == 409, respuesta.text
+    assert respuesta.json()["code"] == "CONTRACT_INTEREST_OVERDUE"
+
+
+async def test_fuera_de_la_ventana_no_se_puede_ampliar(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    contrato = await _contrato_ampliable(client, contract_tenant, extension_window_days=0)
+    assert contrato["extension_window_days"] == 0
+
+    cupo = client.get(
+        f"/api/v1/contracts/{contrato['id']}/extension-options",
+        headers=_headers(contract_tenant["full_token"]),
+    )
+    assert cupo.json()["window_ends_on"] is None
+    assert cupo.json()["blocked_reason"] == "EXTENSION_WINDOW_CLOSED"
+
+    respuesta = client.post(
+        f"/api/v1/contracts/{contrato['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    )
+    assert respuesta.status_code == 409, respuesta.text
+    assert respuesta.json()["code"] == "EXTENSION_WINDOW_CLOSED"
+
+
+async def test_sin_tasacion_no_se_puede_ampliar(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Prestar sin techo es prestar a ciegas, y el mensaje dice cómo
+    arreglarlo."""
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    await _set_ltv(
+        company_id=contract_tenant["company_id"],
+        category_id=contract_tenant["category_id"],
+        pct=70,
+    )
+    creado = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),  # sin appraisal_value
+    )
+    respuesta = client.post(
+        f"/api/v1/contracts/{creado.json()['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    )
+    assert respuesta.status_code == 409, respuesta.text
+    assert respuesta.json()["code"] == "CONTRACT_WITHOUT_APPRAISAL"
+
+
+async def test_un_contrato_ya_ampliado_no_se_puede_volver_a_ampliar(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    )
+    repetido = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    )
+    assert repetido.status_code == 400, repetido.text
+    assert repetido.json()["code"] == "CONTRACT_CLOSED"
+
+
+async def test_la_cadena_conserva_la_raiz_al_encadenar_recargos(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El anti-abuso: el SEGUNDO recargo sigue midiendo su ventana desde el
+    contrato original, no desde el sucesor. Sin esto, un recargo de $1 el
+    último día reiniciaría el reloj para siempre."""
+    raiz = await _contrato_ampliable(client, contract_tenant)
+    segundo = client.post(
+        f"/api/v1/contracts/{raiz['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    ).json()
+    tercero = client.post(
+        f"/api/v1/contracts/{segundo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    ).json()
+
+    assert segundo["root_contract_id"] == raiz["id"]
+    assert tercero["root_contract_id"] == raiz["id"]      # la RAÍZ, no el segundo
+    assert tercero["parent_contract_id"] == segundo["id"]  # el padre sí avanza
+    assert tercero["capital_balance"] == "1200000.00"
+
+
+async def test_reintentar_con_la_misma_clave_devuelve_el_mismo_sucesor(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Es una operación de dinero: un reintento de red no puede desembolsar
+    dos veces."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    clave = str(uuid4())
+    body = {"amount": "400000.00", "payment_method": "cash"}
+    uno = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=clave),
+        json=body,
+    )
+    dos = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=clave),
+        json=body,
+    )
+    assert uno.json()["id"] == dos.json()["id"]
+
+
+async def test_un_contrato_ampliado_no_genera_paz_y_salvo(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El cliente sigue debiendo, solo que en otro documento."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "100000.00", "payment_method": "cash"},
+    )
+    paz = client.get(
+        f"/api/v1/contracts/{viejo['id']}/settlement",
+        headers=_headers(contract_tenant["full_token"]),
+    )
+    assert paz.status_code == 404, paz.text

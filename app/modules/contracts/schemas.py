@@ -44,6 +44,9 @@ class ContractCreateIn(BaseModel):
     extension_months: int = Field(default=1, ge=1)
     legacy_code: str | None = None
     notes: str | None = None
+    #: Días para pedir un recargo. Si no viene, se toma la política de la
+    #: empresa (`company.settings.extension_window_days`, default 28).
+    extension_window_days: int | None = Field(default=None, ge=0)
 
 
 class ContractImportIn(BaseModel):
@@ -79,6 +82,46 @@ class ContractUpdateIn(BaseModel):
     signed_photo_url: str | None = None
 
 
+class ExtensionQuoteOut(BaseModel):
+    """Cuánto puede retirar el cliente sobre la garantía que ya dejó, y hasta
+    cuándo. Se devuelve siempre —aunque no se pueda ampliar— porque la
+    pantalla necesita explicar POR QUÉ no se puede: una card que desaparece
+    sin decir nada deja al usuario buscándola."""
+
+    #: `avalúo × LTV`. `None` sin tasación o sin LTV en la categoría: sin
+    #: techo no hay cupo que calcular, y prestar sin techo es prestar a
+    #: ciegas.
+    ceiling: Decimal | None
+    available: Decimal
+    #: Último día en que se admite un recargo, medido desde la RAÍZ de la
+    #: cadena. `None` = esta empresa o este contrato no admite recargos.
+    window_ends_on: date | None
+    #: Si hoy se puede o no. Lo calcula el backend para que la UI no tenga
+    #: que repetir la aritmética de fechas en la zona de la empresa.
+    is_open: bool
+    #: Por qué no se puede, en el idioma del catálogo de errores. `None` si
+    #: sí se puede.
+    blocked_reason: (
+        Literal[
+            "CONTRACT_CLOSED",
+            "EXTENSION_WINDOW_CLOSED",
+            "CONTRACT_WITHOUT_APPRAISAL",
+            "CONTRACT_INTEREST_OVERDUE",
+            "EXTENSION_NO_HEADROOM",
+        ]
+        | None
+    ) = None
+
+
+class ContractExtendIn(BaseModel):
+    """Lo que se entrega HOY. El capital viejo NO viaja: lo pone el backend
+    desde el contrato que se está ampliando."""
+
+    amount: Money
+    payment_method: PaymentMethod
+    account_id: UUID | None = None
+
+
 class ContractOut(BaseModel):
     id: UUID
     number: int
@@ -100,6 +143,14 @@ class ContractOut(BaseModel):
     notes: str | None
     signed_photo_url: str | None
     created_at: datetime
+    #: Ventana de recargo (00051), SNAPSHOT: se precarga de la política de la
+    #: empresa al crear y se congela. 0 = este contrato no admite recargos.
+    extension_window_days: int
+    extension_interest_policy: str
+    #: La cadena de ampliaciones. `None` en un contrato que nunca se amplió
+    #: ni sucede a otro.
+    parent_contract_id: UUID | None
+    root_contract_id: UUID | None
     items: list[ContractItemOut]
 
 

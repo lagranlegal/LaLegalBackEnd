@@ -38,6 +38,7 @@ ACCIONES_AUDITADAS = {
     "create_payment",
     "apply_payment_discount",
     "auction_contract",
+    "extend_loan",
     # sales
     "create_sale",
     "apply_sale_discount",

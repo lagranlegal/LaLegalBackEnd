@@ -12,7 +12,8 @@ _CONTRACT_COLUMNS = (
     "id, number, legacy_code, customer_id, principal, capital_balance, appraisal_value, "
     "interest_rate_pct, term_months, arrears_window_months, extension_months, start_date, "
     "due_date, interest_paid_until, status, extension_ends_at, ltv_warning, notes, "
-    "signed_photo_url, created_at"
+    "signed_photo_url, created_at, extension_window_days, extension_interest_policy, "
+    "parent_contract_id, root_contract_id"
 )
 _ITEM_COLUMNS = (
     "id, category_id, description, weight_grams, serial_imei, item_appraisal, status, photos, "
@@ -62,6 +63,13 @@ async def insert_contract(
     signed_photo_url: str | None,
     created_by: UUID,
     idempotency_key: str,
+    # 00051 — ampliar préstamo. Con default para no tocar a quien ya llamaba
+    # a esta función: un contrato normal nace con la política de su empresa
+    # y sin cadena.
+    extension_window_days: int = 28,
+    extension_interest_policy: str = "forgive",
+    parent_contract_id: UUID | None = None,
+    root_contract_id: UUID | None = None,
 ) -> None:
     await db.execute(
         text(
@@ -70,13 +78,16 @@ async def insert_contract(
                 (id, company_id, number, legacy_code, customer_id, principal, capital_balance,
                  appraisal_value, interest_rate_pct, term_months, arrears_window_months,
                  extension_months, start_date, due_date, interest_paid_until, ltv_warning, notes,
-                 signed_photo_url, created_by, idempotency_key)
+                 signed_photo_url, created_by, idempotency_key,
+                 extension_window_days, extension_interest_policy,
+                 parent_contract_id, root_contract_id)
             values
                 (:id, :company_id, :number, :legacy_code, :customer_id, :principal,
                  :capital_balance, :appraisal_value, :interest_rate_pct, :term_months,
                  :arrears_window_months, :extension_months, :start_date, :due_date,
                  :interest_paid_until, :ltv_warning, :notes, :signed_photo_url, :created_by,
-                 :idempotency_key)
+                 :idempotency_key, :extension_window_days, :extension_interest_policy,
+                 :parent_contract_id, :root_contract_id)
             """
         ),
         {
@@ -98,6 +109,10 @@ async def insert_contract(
             "ltv_warning": ltv_warning,
             "notes": notes,
             "signed_photo_url": signed_photo_url,
+            "extension_window_days": extension_window_days,
+            "extension_interest_policy": extension_interest_policy,
+            "parent_contract_id": str(parent_contract_id) if parent_contract_id else None,
+            "root_contract_id": str(root_contract_id) if root_contract_id else None,
             "created_by": str(created_by),
             "idempotency_key": idempotency_key,
         },
@@ -227,6 +242,44 @@ async def mark_items_returned(db: AsyncSession, *, company_id: UUID, contract_id
         ),
         {"company_id": str(company_id), "contract_id": str(contract_id)},
     )
+
+
+async def mark_items_transferred(db: AsyncSession, *, company_id: UUID, contract_id: UUID) -> None:
+    """Al ampliar el préstamo (00051) las prendas pasan al contrato sucesor.
+
+    `transferred` y no `returned`: al cliente no se le devolvió nada — las
+    mismas prendas siguen en custodia, respaldando el contrato nuevo. Si
+    dijeran `returned`, el historial afirmaría que salieron de la bóveda.
+    """
+    await db.execute(
+        text(
+            """
+            update public.contract_item set status = 'transferred'
+            where company_id = :company_id and contract_id = :contract_id
+            """
+        ),
+        {"company_id": str(company_id), "contract_id": str(contract_id)},
+    )
+
+
+async def get_root_start_date(db: AsyncSession, *, company_id: UUID, contract_id: UUID) -> date:
+    """`start_date` de la RAÍZ de la cadena — el ancla de la ventana de
+    recargo. Para un contrato sin cadena es su propia fecha."""
+    result = await db.execute(
+        text(
+            """
+            select c.start_date
+            from public.contract c
+            where c.company_id = :cid
+              and c.id = coalesce(
+                    (select root_contract_id from public.contract
+                     where company_id = :cid and id = :id),
+                    :id)
+            """
+        ),
+        {"cid": str(company_id), "id": str(contract_id)},
+    )
+    return date.fromisoformat(str(result.scalar_one()))
 
 
 async def list_contracts(

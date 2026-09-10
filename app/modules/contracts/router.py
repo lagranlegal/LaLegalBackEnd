@@ -10,9 +10,11 @@ from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.contracts import service
 from app.modules.contracts.schemas import (
     ContractCreateIn,
+    ContractExtendIn,
     ContractImportIn,
     ContractOut,
     ContractUpdateIn,
+    ExtensionQuoteOut,
     PaymentCreateIn,
     PaymentOut,
     PaymentQuoteOut,
@@ -27,6 +29,7 @@ _edit = require_permission("contracts.edit")
 _pay = require_permission("payments.create")
 _auction = require_permission("contracts.auction")
 _import = require_permission("contracts.import")
+_extend = require_permission("contracts.extend_loan")
 
 
 @router.get("/ready-for-auction", response_model=list[ContractOut])
@@ -49,6 +52,7 @@ async def create_contract(
         company_id=user.company_id,
         body=body,
         created_by=user.id,
+        role_id=user.role_id,
         idempotency_key=idempotency_key,
     )
 
@@ -172,6 +176,48 @@ async def get_settlement_info(
     contrato que sigue vigente."""
     return await service.get_settlement_info(
         db, company_id=user.company_id, contract_id=contract_id
+    )
+
+
+@router.get("/{contract_id}/extension-options", response_model=ExtensionQuoteOut)
+async def get_extension_options(
+    contract_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> ExtensionQuoteOut:
+    """Cuánto puede retirar el cliente sobre la garantía que ya dejó.
+
+    Va con `contracts.view` y no con `contracts.extend_loan`: el cupo es
+    información del contrato —"a este cliente le queda cupo hasta el 7 de
+    octubre"— y sirve para atender aunque quien mira no pueda ejecutarlo.
+
+    Responde siempre, incluso cuando no se puede ampliar: `blocked_reason`
+    dice por qué, para que la pantalla pueda explicarlo en vez de esconder
+    la opción sin más.
+    """
+    return await service.quote_extension(
+        db, company_id=user.company_id, contract_id=contract_id
+    )
+
+
+@router.post("/{contract_id}/extend-loan", response_model=ContractOut, status_code=201)
+async def extend_loan(
+    contract_id: UUID,
+    body: ContractExtendIn,
+    user: Annotated[CurrentUser, Depends(_extend)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+) -> ContractOut:
+    """Amplía el préstamo ("recargo"). Devuelve el contrato SUCESOR, con un
+    número nuevo — el viejo queda `superseded` y hay que imprimir y firmar
+    el nuevo (docs/RECARGOS.md)."""
+    return await service.extend_loan(
+        db,
+        company_id=user.company_id,
+        contract_id=contract_id,
+        body=body,
+        user=user,
+        idempotency_key=idempotency_key,
     )
 
 

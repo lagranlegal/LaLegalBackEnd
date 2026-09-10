@@ -44,6 +44,25 @@ async def get_return_window_days(db: AsyncSession, *, company_id: UUID) -> int:
     return int(result.scalar_one())
 
 
+async def get_extension_window_days(db: AsyncSession, *, company_id: UUID) -> int:
+    """Política de la empresa: hasta cuántos días después de firmar se admite
+    un recargo (00051). El default de 28 es una recomendación, no una regla —
+    cada compraventa maneja la suya.
+
+    Se lee al CREAR el contrato y se congela ahí: cambiar la política no
+    puede alterar un contrato ya firmado. Mismo patrón que
+    `return_window_days` (00045).
+    """
+    result = await db.execute(
+        text(
+            "select coalesce((settings->>'extension_window_days')::int, 28) "
+            "from public.company where id = :id"
+        ),
+        {"id": str(company_id)},
+    )
+    return int(result.scalar_one())
+
+
 async def get_plan_id_by_code(db: AsyncSession, *, code: str) -> UUID | None:
     result = await db.execute(
         text("select id from public.plan where code = :code and active"),

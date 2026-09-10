@@ -31,6 +31,13 @@ async def get_company_today(db: AsyncSession, *, company_id: UUID) -> date:
     return today_in(tz_name)
 
 
+async def get_extension_window_days(db: AsyncSession, *, company_id: UUID) -> int:
+    """Sin caché a propósito, al revés que `return_window_days`: se lee UNA
+    vez por contrato creado, no en cada lectura. Un caché acá solo agregaría
+    una vía por la que la política tarda en aplicarse."""
+    return await repository.get_extension_window_days(db, company_id=company_id)
+
+
 async def get_return_window_days(db: AsyncSession, *, company_id: UUID) -> int:
     days = _return_window_cache.get(company_id)
     if days is None:
