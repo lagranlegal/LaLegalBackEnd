@@ -246,6 +246,24 @@ De ahí el catálogo de cuentas (`public.account`, tres tipos):
 | `cash` | el cajón físico | `opening_balance` + acumulado histórico *(desde 00048; antes salía de la sesión de caja)* |
 | `bank` | una cuenta bancaria, Nequi, Daviplata | `opening_balance` + acumulado histórico |
 | `settlement` | un convenio que te debe (Sistecrédito) | lo que te deben; baja al liquidar |
+| `vault` | efectivo fuera del cajón: caja fuerte, fondo de menudos *(00049)* | `opening_balance` + acumulado histórico |
+
+**`type` responde DOS preguntas, y hasta 00049 solo cabían tres de las cuatro respuestas:**
+
+| | ¿es efectivo físico?<br>(se cuenta a mano) | ¿es operativa?<br>(una venta la puede elegir) |
+|---|---|---|
+| `cash` | sí | sí |
+| **`vault`** | **sí** | **no** |
+| `bank` | no | no |
+| `settlement` | no | no (y no puede financiar salidas) |
+
+La caja fuerte era la combinación que faltaba, así que una empresa que guardara plata fuera del cajón la tenía **invisible** para el sistema. Ponerla como `bank` cuadra los números pero hace que el efectivo en custodia figure como saldo bancario —y sobre plata el día que alguien concilie contra el extracto—; ponerla como `cash` hace que el arqueo diario del cajón pida contar también la caja fuerte.
+
+Una `vault` **no es un punto de cobro**: `resolve_account_for_movement` la rechaza en las **dos** direcciones, no solo en la salida como a una `settlement`. Aceptar una venta cobrada "a la caja fuerte" saltaría el arqueo del cajón sin que nada lo note. Su única puerta es el **traslado**, que ya existe y ya deja documento numerado.
+
+Y nada de esto se configura: *"¿esta empresa tiene caja fuerte?"* se responde con *"¿existe esa cuenta?"*.
+
+**Una sola cuenta `cash` activa por empresa** (`409 CASH_ACCOUNT_ALREADY_EXISTS`). `00024` afirmaba en un comentario que su índice parcial lo aseguraba; ese índice asegura una cuenta *por defecto* por tipo, que es otra cosa, y por el hueco una empresa terminó con tres cajones. Medido: un gasto pagado desde el segundo dejó ese cajón en −70.000 y bajó el arqueo del turno a un número que no correspondía a ninguno de los dos. **Un arqueo que mezcla dos cajones es incuadrable por construcción.** Se valida solo al escribir — las empresas que ya las tienen siguen funcionando. Cuando llegue multi-caja la regla pasa a ser una `cash` activa **por caja registradora**, vía `account.register_id` (existe vacía desde 00049; `cash_session` ya cuelga de `register_id` y su índice de sesión abierta ya es por registradora).
 
 **El saldo se DERIVA, nunca se guarda.** Un saldo almacenado hay que mantenerlo sincronizado con cada operación, y en cuanto una falle o alguien inserte a mano queda mintiendo. Derivarlo no puede desincronizarse. Por el mismo motivo `account_balance()` **delega** en `list_accounts()` en vez de tener su propia consulta: dos formas de calcular el mismo saldo terminan divergiendo, y eso fue literalmente un bug (una cuenta recién creada reportaba 0 mientras el listado la mostraba bien, porque una sumaba el `opening_balance` y la otra no).
 

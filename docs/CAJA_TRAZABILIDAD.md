@@ -1,6 +1,6 @@
 # CAJA_TRAZABILIDAD.md — El modelo de efectivo (spec)
 
-> **Estado:** el **Paso 1 está hecho** (migración `00048`, 10/09/2026) — el saldo del cajón ya se deriva de sus movimientos, abrir hereda en vez de digitar, y los arqueos de apertura y cierre emiten su ajuste. Faltan los Pasos 2, 3 y 4 de §6. Pedido por Mateo el 09/09/2026 probando con el cliente: *"trazabilidad de todo y sin números inventados"*.
+> **Estado:** **los cuatro pasos de §6 están hechos** (migraciones `00048` y `00049`, 10/09/2026) — el saldo del cajón ya se deriva de sus movimientos, abrir hereda en vez de digitar, y los arqueos de apertura y cierre emiten su ajuste. Queda pendiente el multi-mostrador: la columna `account.register_id` está puesta y vacía, y `cash_session` ya cuelga de `register_id`, así que falta conectar la UI y el arqueo por caja — no rediseñar nada. Pedido por Mateo el 09/09/2026 probando con el cliente: *"trazabilidad de todo y sin números inventados"*.
 >
 > **Corrección de una primera versión de este documento.** El primer diseño proponía un *cierre guiado* que preguntaba "¿cuánto consignás, cuánto a la fuerte, cuánto de base?". Mateo lo rechazó con la razón correcta: **esto es un SaaS**. Una empresa tiene caja fuerte y otra no; una consigna todo, otra la mitad, otra reparte en tres; otra consigna el martes lo del lunes. Un producto que codifica *un* ritual de cierre le queda mal a todas menos a una.
 >
@@ -155,7 +155,7 @@ El diálogo muestra el saldo que hay y ofrece **contar** (opcional pero recomend
 
 `close_session` ya calcula la diferencia y ya exige justificación. Solo falta que además escriba el movimiento. Es aditivo: el acta sigue mostrando lo mismo.
 
-### Paso 4 — `vault`, y levantar el límite de una sola cuenta de efectivo — pendiente
+### Paso 4 — `vault`, y el vínculo cuenta↔caja — **HECHO (00049)**
 
 Ya sin la dependencia de la sesión, varias ubicaciones dejan de ser peligrosas.
 
