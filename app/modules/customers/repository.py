@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 _COLUMNS = (
     "id, full_name, doc_type, doc_number, doc_issue_place, address, phone, email, "
-    "doc_photo_url, status, alert_reason, notes, created_at"
+    "doc_photo_url, doc_photos, status, alert_reason, notes, created_at"
 )
 
 
@@ -39,6 +39,7 @@ async def insert_customer(
     phone: str,
     email: str | None,
     doc_photo_url: str | None,
+    doc_photos: str,
     notes: str | None,
     created_by: UUID,
 ) -> None:
@@ -47,10 +48,10 @@ async def insert_customer(
             """
             insert into public.customer
                 (id, company_id, full_name, doc_type, doc_number, doc_issue_place, address,
-                 phone, email, doc_photo_url, notes, created_by)
+                 phone, email, doc_photo_url, doc_photos, notes, created_by)
             values
                 (:id, :company_id, :full_name, :doc_type, :doc_number, :doc_issue_place, :address,
-                 :phone, :email, :doc_photo_url, :notes, :created_by)
+                 :phone, :email, :doc_photo_url, cast(:doc_photos as jsonb), :notes, :created_by)
             """
         ),
         {
@@ -64,6 +65,7 @@ async def insert_customer(
             "phone": phone,
             "email": email,
             "doc_photo_url": doc_photo_url,
+            "doc_photos": doc_photos,
             "notes": notes,
             "created_by": str(created_by),
         },
@@ -111,7 +113,13 @@ async def update_customer(
     """
     if not fields:
         return
-    assignments = ", ".join(f"{key} = :{key}" for key in fields)
+    # `doc_photos` es `jsonb`: sin el cast, asyncpg manda el string y Postgres
+    # se niega a asignarlo a la columna. El resto de las columnas son
+    # escalares y no lo necesitan.
+    assignments = ", ".join(
+        f"{key} = cast(:{key} as jsonb)" if key == "doc_photos" else f"{key} = :{key}"
+        for key in fields
+    )
     params = {**fields, "company_id": str(company_id), "id": str(customer_id)}
     await db.execute(
         text(

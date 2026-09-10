@@ -1,3 +1,4 @@
+import json
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -11,6 +12,27 @@ from app.modules.customers.schemas import CustomerCreateIn, CustomerOut, Custome
 from app.modules.identity import repository as identity_repo
 
 
+def _resolver_fotos(
+    doc_photos: list[str] | None, doc_photo_url: str | None
+) -> tuple[list[str], str | None]:
+    """Concilia el campo nuevo con el deprecado (00050).
+
+    Un documento tiene dos caras, así que `doc_photos` es la verdad. Pero
+    `doc_photo_url` se sigue aceptando y devolviendo porque el despliegue no
+    es atómico: entre que sale el backend y sale el front hay una ventana en
+    la que el bundle viejo manda y lee el campo único, y en esa ventana
+    registrar un cliente no puede perder su foto.
+
+    `doc_photos` gana siempre que venga. Si solo viene el deprecado, se
+    interpreta como lo que era: la única foto, que es el frente.
+    """
+    if doc_photos is not None:
+        return doc_photos, (doc_photos[0] if doc_photos else None)
+    if doc_photo_url is not None:
+        return [doc_photo_url], doc_photo_url
+    return [], None
+
+
 def _row_to_customer(row: Row[Any]) -> CustomerOut:
     m = row._mapping
     return CustomerOut(
@@ -22,6 +44,7 @@ def _row_to_customer(row: Row[Any]) -> CustomerOut:
         address=m["address"],
         phone=m["phone"],
         email=m["email"],
+        doc_photos=list(m["doc_photos"] or []),
         doc_photo_url=m["doc_photo_url"],
         status=m["status"],
         alert_reason=m["alert_reason"],
@@ -42,6 +65,8 @@ async def create_customer(
             details={"doc_type": body.doc_type, "doc_number": body.doc_number},
         )
 
+    fotos, foto_principal = _resolver_fotos(body.doc_photos, body.doc_photo_url)
+
     customer_id = uuid4()
     await repository.insert_customer(
         db,
@@ -54,7 +79,8 @@ async def create_customer(
         address=body.address,
         phone=body.phone,
         email=body.email,
-        doc_photo_url=body.doc_photo_url,
+        doc_photo_url=foto_principal,
+        doc_photos=json.dumps(fotos),
         notes=body.notes,
         created_by=created_by,
     )
@@ -107,6 +133,16 @@ async def update_customer(
         raise NotFoundError("El cliente no existe en esta empresa.")
 
     fields = body.model_dump(exclude_unset=True)
+    # Las dos claves viajan juntas o no viajan: escribir una sin la otra las
+    # dejaría contradiciéndose, que es el modo exacto en que una migración de
+    # expandir/contraer se rompe.
+    if "doc_photos" in fields or "doc_photo_url" in fields:
+        fotos, foto_principal = _resolver_fotos(
+            fields.get("doc_photos"), fields.get("doc_photo_url")
+        )
+        fields["doc_photos"] = json.dumps(fotos)
+        fields["doc_photo_url"] = foto_principal
+
     await repository.update_customer(
         db, company_id=company_id, customer_id=customer_id, fields=fields
     )

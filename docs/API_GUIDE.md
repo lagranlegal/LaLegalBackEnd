@@ -157,7 +157,7 @@ Si no hay ninguna plantilla activa, el frontend sigue renderizando el documento 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
 | `GET` | `/api/v1/customers` | `customers.view` | Lista clientes (paginado). `?q=texto` busca por nombre (full-text en español) **o por `doc_number`** (coincidencia exacta o por prefijo — pensado para tipear la cédula tal cual, no fragmentos como en un nombre). |
-| `POST` | `/api/v1/customers` | `customers.create` | Crea cliente. Body: `{full_name, doc_type, doc_number, phone, address?, email?, doc_issue_place?, doc_photo_url?, notes?}`. `doc_type` ∈ `cc\|ce\|passport\|nit`. |
+| `POST` | `/api/v1/customers` | `customers.create` | Crea cliente. Body: `{full_name, doc_type, doc_number, phone, address?, email?, doc_issue_place?, doc_photos?, notes?}`. `doc_type` ∈ `cc\|ce\|passport\|nit`. **`doc_photos`** (00050) es la lista de fotos del documento **en orden: `[frente, reverso]`** — el orden ES la semántica, no hay dos campos con nombre. `doc_photo_url` sigue aceptándose **deprecado**: se interpreta como la única foto (el frente) y sale sincronizado con `doc_photos[0]` hasta que se contraiga la columna. |
 | `GET` | `/api/v1/customers/{id}` | `customers.view` | Detalle. |
 | `PATCH` | `/api/v1/customers/{id}` | `customers.create` | Edición parcial (no hay `customers.edit` en el catálogo de permisos — usa el mismo que crear). No permite cambiar `doc_type`/`doc_number` (identidad del cliente). |
 
