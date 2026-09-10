@@ -12,7 +12,28 @@ CashModule = Literal["pawn", "store", "general"]
 
 
 class SessionOpenIn(BaseModel):
-    opening_balance: Money
+    """Abrir un turno ya NO declara cuánta plata hay (00048).
+
+    El saldo del cajón se deriva de sus movimientos y se sabe solo, así que
+    no hay nada que digitar: abrir dice "desde ahora respondo yo".
+
+    Lo que sí se puede hacer —y conviene— es CONTAR. `counted_cash` es ese
+    conteo de apertura: si no coincide con lo que el sistema cree que hay,
+    la diferencia se registra como un ajuste con motivo, exactamente igual
+    que el descuadre de cierre. Ese es el punto: el faltante queda atribuido
+    al turno donde apareció y no al siguiente.
+    """
+
+    counted_cash: Money | None = None
+    difference_reason: str | None = None
+
+    #: DEPRECADO. Era el saldo de apertura escrito a mano, y hasta 00048 fue
+    #: el único número de toda la aplicación que aparecía sin documento. Se
+    #: sigue aceptando —un bundle viejo del front lo manda y quedarse sin
+    #: poder abrir la caja es peor que cualquier otra cosa— y se interpreta
+    #: como lo que siempre fue en la práctica: un conteo del cajón. Se
+    #: elimina cuando el front desplegado use `counted_cash`.
+    opening_balance: Money | None = None
 
 
 class SessionCloseIn(BaseModel):

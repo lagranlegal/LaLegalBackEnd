@@ -15,6 +15,7 @@ from app.core.errors import (
     NotFoundError,
     PermissionDeniedError,
 )
+from app.modules.accounts import integration as accounts_integration
 from app.modules.cashbox import integration, repository
 from app.modules.cashbox.schemas import (
     BreakdownLineOut,
@@ -65,8 +66,21 @@ def _row_to_expense(row: Row[Any]) -> ExpenseOut:
 
 
 async def open_session(
-    db: AsyncSession, *, company_id: UUID, opened_by: UUID, opening_balance: Decimal
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    opened_by: UUID,
+    counted_cash: Decimal | None,
+    difference_reason: str | None = None,
 ) -> SessionOut:
+    """Abre el turno. Desde 00048 el saldo de apertura NO se digita.
+
+    Sale del efectivo derivado de las cuentas de efectivo, que es continuo y
+    no depende de que haya un turno abierto. Si el cajero cuenta al abrir
+    —opcional pero recomendado— y no coincide, la diferencia se registra
+    como un `adjustment` con motivo, y ahí queda: atribuida a quien abrió y
+    al día en que apareció, en vez de disolverse en el turno siguiente.
+    """
     register = await repository.get_active_register(db, company_id=company_id)
     if register is None:
         raise NotFoundError("La empresa no tiene una caja activa configurada.")
@@ -81,6 +95,23 @@ async def open_session(
             code="CASH_SESSION_ALREADY_CLOSED_TODAY",
         )
 
+    saldo_derivado = await accounts_integration.get_cash_on_hand(db, company_id=company_id)
+    if counted_cash is None:
+        opening_balance = saldo_derivado
+        diferencia = Decimal("0.00")
+    else:
+        opening_balance = counted_cash
+        diferencia = counted_cash - saldo_derivado
+        if diferencia != 0 and not difference_reason:
+            # Mismo rigor que el descuadre de cierre, y por la misma razón:
+            # es la misma clase de hecho. Sin tolerancia.
+            raise AppError(
+                "El conteo de apertura no coincide con el efectivo registrado; "
+                "toda diferencia exige justificación.",
+                details={"difference": str(diferencia), "cash_on_hand": str(saldo_derivado)},
+                code="CASH_OPENING_DIFFERENCE_UNJUSTIFIED",
+            )
+
     session_id = uuid4()
     await repository.insert_session(
         db,
@@ -91,6 +122,27 @@ async def open_session(
         opening_balance=opening_balance,
         session_date=today,
     )
+
+    if diferencia != 0:
+        # `session_id=None` a propósito: no es una operación del turno, es una
+        # corrección de la CUENTA que ocurre ANTES de que el turno empiece.
+        # Metida dentro de la sesión, `expected_cash` la contaría dos veces
+        # (ya está en `opening_balance`). Trazable igual: la referencia apunta
+        # a la sesión cuyo arqueo la produjo.
+        await integration.record_movement(
+            db,
+            session_id=None,
+            company_id=company_id,
+            module="general",
+            direction="in" if diferencia > 0 else "out",
+            concept="adjustment",
+            amount=abs(diferencia),
+            payment_method="cash",
+            reference_type="cash_session",
+            reference_id=session_id,
+            created_by=opened_by,
+            notes=f"Descuadre en el conteo de apertura: {difference_reason}",
+        )
     # Se auditaba cerrar y reabrir, pero no ABRIR — y la app ya tenía la
     # etiqueta "Abrió la caja" en pantalla para una acción que nunca se
     # escribía. Abrir es el primer acto del turno: sin él, el histórico
@@ -103,7 +155,16 @@ async def open_session(
         action="open_session",
         entity_type="cash_session",
         entity_id=session_id,
-        after={"opening_balance": str(opening_balance), "session_date": str(today)},
+        after={
+            "opening_balance": str(opening_balance),
+            "session_date": str(today),
+            # Qué creía el sistema y qué se contó: sin los dos números, un
+            # descuadre de apertura queda sin forma de reconstruirse.
+            "cash_on_hand": str(saldo_derivado),
+            "counted_cash": str(counted_cash) if counted_cash is not None else None,
+            "difference": str(diferencia),
+            "difference_reason": difference_reason if diferencia != 0 else None,
+        },
     )
     row = await repository.get_session(db, company_id=company_id, session_id=session_id)
     assert row is not None
@@ -287,6 +348,33 @@ async def close_session(
         difference_reason=body.difference_reason,
         closed_by=closed_by,
     )
+
+    if difference != 0:
+        # El descuadre deja de ser SOLO un campo del acta y pasa a mover el
+        # saldo (00048): después de cerrar, el cajón vale lo que se contó.
+        # Antes el saldo seguía diciendo lo esperado hasta que la apertura
+        # siguiente lo pisaba con otro número a mano, y la plata que faltó no
+        # quedaba en ninguna parte consultable.
+        #
+        # `session_id=None` como en la apertura: el acta ya reporta esta
+        # diferencia en su propio campo, y meterla además como movimiento del
+        # turno haría que `get_report` recalculara un `expected_cash` igual al
+        # contado — un acta que siempre cuadra, que es justo lo contrario de
+        # lo que tiene que hacer.
+        await integration.record_movement(
+            db,
+            session_id=None,
+            company_id=company_id,
+            module="general",
+            direction="in" if difference > 0 else "out",
+            concept="adjustment",
+            amount=abs(difference),
+            payment_method="cash",
+            reference_type="cash_session",
+            reference_id=session_id,
+            created_by=closed_by,
+            notes=f"Descuadre del arqueo de cierre: {body.difference_reason}",
+        )
     await identity_repo.insert_audit_log(
         db,
         company_id=company_id,

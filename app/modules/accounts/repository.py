@@ -21,41 +21,33 @@ async def list_accounts(
     problema de doble fuente de verdad que ya costó una corrección con el
     precio de los lotes. Derivarlo no puede desincronizarse.
     """
-    # El saldo se calcula distinto según el tipo, porque los tipos SON
-    # distintos:
+    # TODOS los tipos se calculan igual: `opening_balance` de la cuenta más
+    # sus propios movimientos. Es la definición de saldo de un libro mayor y
+    # no puede desincronizarse.
     #
-    #   cash        lo que debería haber EN EL CAJÓN ahora mismo: la base con
-    #               la que se abrió la sesión más los movimientos de esa
-    #               sesión. Sumar el histórico completo daría un número sin
-    #               sentido —y negativo, porque los préstamos desembolsados
-    #               superan lo cobrado— ya que la base de apertura NO es un
-    #               movimiento. Sin sesión abierta el cajón está cuadrado y
-    #               cerrado, así que no hay saldo vivo que reportar.
+    # Hasta 00048 una cuenta `cash` era la excepción: su saldo salía de la
+    # SESIÓN de caja abierta (su `opening_balance` digitado a mano más los
+    # movimientos de esa sesión). Tres cosas rotas por el mismo error:
     #
-    #   bank y      arrancan en cero y todo lo que entra o sale queda como
-    #   settlement  movimiento, así que el acumulado histórico SÍ es el saldo.
-    #               En una `settlement` ese saldo es lo que te DEBEN.
+    #   · Sin sesión abierta el cajón reportaba 0.00 — la plata dejaba de
+    #     existir entre el cierre de la noche y la apertura de la mañana.
+    #   · TODAS las cuentas de efectivo de una empresa reportaban el MISMO
+    #     saldo, porque todas leían la única sesión. Con tres cajones daban
+    #     los tres el mismo número.
+    #   · El saldo dependía de un número escrito a mano cada mañana que nada
+    #     comparaba contra el cierre anterior — el único dato de la
+    #     aplicación que aparecía sin documento.
+    #
+    # La 00048 convirtió esa historia en movimientos (`adjustment`), así que
+    # el saldo derivado arranca donde tiene que arrancar. Lo que el turno
+    # necesita —cuánto DEBERÍA haber en el cajón al cerrar hoy— sigue siendo
+    # asunto de `cashbox._expected_cash`, que es otra pregunta.
     query = f"""
-        with sesion_abierta as (
-          select id, opening_balance from public.cash_session
-          where company_id = :company_id and status = 'open'
-          limit 1
-        )
         select {", ".join("a." + c for c in _COLUMNS.split(", "))},
-          case
-            when a.type = 'cash' then
-              coalesce((select opening_balance from sesion_abierta), 0::numeric(14, 2))
-              + coalesce(sum(
-                  case when m.session_id = (select id from sesion_abierta)
-                       then case when m.direction = 'in' then m.amount else -m.amount end
-                  end
-                ), 0::numeric(14, 2))
-            else
-              a.opening_balance + coalesce(
-                sum(case when m.direction = 'in' then m.amount else -m.amount end),
-                0::numeric(14, 2)
-              )
-          end as balance
+          a.opening_balance + coalesce(
+            sum(case when m.direction = 'in' then m.amount else -m.amount end),
+            0::numeric(14, 2)
+          ) as balance
         from public.account a
         left join public.cash_movement m
           on m.account_id = a.id and m.company_id = a.company_id

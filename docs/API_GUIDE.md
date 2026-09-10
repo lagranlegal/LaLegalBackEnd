@@ -220,7 +220,7 @@ Acto único diario de apertura/cierre, base única de efectivo (fase 1: una sola
 
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
-| `POST` | `/api/v1/cashbox/sessions/open` | `cashbox.open_close` | Body `{opening_balance}`. `409 CASH_SESSION_ALREADY_OPEN` si ya hay una abierta; `409 CASH_SESSION_ALREADY_CLOSED_TODAY` si la de hoy ya se cerró (un solo ciclo apertura/cierre por día calendario). |
+| `POST` | `/api/v1/cashbox/sessions/open` | `cashbox.open_close` | Body `{counted_cash?, difference_reason?}`. **El saldo de apertura ya no se digita** (00048): sale del efectivo derivado de las cuentas `cash`. `counted_cash` es el conteo de apertura, opcional; si difiere del registrado se emite un `adjustment` y el motivo es obligatorio (`400 CASH_OPENING_DIFFERENCE_UNJUSTIFIED`). `opening_balance` sigue aceptándose **deprecado** y se interpreta como ese conteo. `409 CASH_SESSION_ALREADY_OPEN` si ya hay una abierta; `409 CASH_SESSION_ALREADY_CLOSED_TODAY` si la de hoy ya se cerró (un solo ciclo apertura/cierre por día calendario). |
 | `GET` | `/api/v1/cashbox/sessions/current` | `cashbox.view` | La sesión abierta ahora mismo, o `404` si no hay ninguna. |
 | `GET` | `/api/v1/cashbox/sessions` | `cashbox.view` | Historial paginado. |
 | `GET` | `/api/v1/cashbox/sessions/{id}` | `cashbox.view` | Detalle. |
@@ -438,6 +438,7 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `CASH_SESSION_NOT_OPEN` | 409 · **404** | Se intentó desembolsar/cobrar/registrar un gasto sin una sesión de caja abierta. **Excepción deliberada:** en `GET /cashbox/sessions/current` viaja con **404**, porque ahí "no hay caja abierta" no es un rechazo sino el estado consultado. El front distingue por el `code`, nunca por el status — cuando ese endpoint devolvía `NOT_FOUND` a secas, la franja global decía "No se pudo consultar el estado de la caja" y toda la rama de "Caja cerrada" era código muerto (03/09/2026). |
 | `CASH_SESSION_ALREADY_OPEN` | 409 | Se intentó abrir una sesión (o reabrir una) habiendo ya otra abierta para esa caja. |
 | `CASH_SESSION_ALREADY_CLOSED_TODAY` | 409 | Se intentó abrir una sesión el mismo día en que ya se cerró una (un solo ciclo diario). |
+| `CASH_OPENING_DIFFERENCE_UNJUSTIFIED` | 400 | Se abrió el turno declarando un conteo de efectivo distinto del registrado, sin `difference_reason`. Mismo rigor y misma razón que el descuadre de cierre: es la misma clase de hecho, y sin tolerancia. |
 | `PAYMENT_PARTIAL_INTEREST_REJECTED` | 422 | Abono con `capital_amount` sin cubrir todos los meses de interés adeudados. |
 | `CONTRACT_CLOSED` | 400 | Abono sobre un contrato ya `paid`/`auctioned`. |
 | `CONTRACT_NOT_READY_FOR_AUCTION` | 409 | Se intentó Rematar un contrato que no está en `in_extension` con la prórroga vencida. |

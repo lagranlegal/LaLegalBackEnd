@@ -38,8 +38,26 @@ async def open_session(
     user: Annotated[CurrentUser, Depends(_open_close)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> SessionOut:
+    # `opening_balance` es el campo deprecado (00048): un bundle viejo del
+    # front lo sigue mandando y se interpreta como lo que siempre fue en la
+    # práctica, un conteo del cajón. Quedarse sin poder abrir la caja por un
+    # despliegue a medias es peor que cualquier otra cosa — ya pasó once días
+    # en agosto por otra razón.
+    #
+    # Ese camino viejo no puede exigir justificación: el formulario que manda
+    # ese campo ni siquiera tiene dónde escribirla, así que exigirla dejaría
+    # la caja sin poder abrirse hasta que el front nuevo esté desplegado. Se
+    # registra el ajuste igual, con un motivo que dice exactamente lo que
+    # pasó — que es más de lo que había antes, cuando el número entraba sin
+    # dejar rastro de ninguna clase.
+    legacy = body.counted_cash is None and body.opening_balance is not None
+    motivo_legacy = "Saldo declarado al abrir, sin conteo contra el efectivo registrado"
     return await service.open_session(
-        db, company_id=user.company_id, opened_by=user.id, opening_balance=body.opening_balance
+        db,
+        company_id=user.company_id,
+        opened_by=user.id,
+        counted_cash=body.counted_cash if body.counted_cash is not None else body.opening_balance,
+        difference_reason=body.difference_reason or (motivo_legacy if legacy else None),
     )
 
 
