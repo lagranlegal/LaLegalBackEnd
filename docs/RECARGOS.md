@@ -1,6 +1,8 @@
 # RECARGOS.md — Ampliación de préstamo sobre un contrato vivo (spec)
 
-> **Estado:** diseño cerrado, **sin implementar**. Pedido por Mateo el 09/09/2026 tras probar con el cliente; las dos decisiones que lo bloqueaban están respondidas en §8 (10/09/2026).
+> **Estado: IMPLEMENTADO** (migración `00051`, backend y frontend desplegados el 10/09/2026). Pedido por Mateo el 09/09/2026 tras probar con el cliente; las dos decisiones que lo bloqueaban se respondieron en §8.
+>
+> Verificado en vivo, no solo en tests: contrato #28 (1.000.000 sobre una prenda de 2.000.000 al 70 % → 400.000 de cupo) ampliado a #29 con capital 1.400.000, el viejo `superseded` con sus prendas `transferred`, interés mensual de 50.000 a 70.000, y a la caja salieron **solo los 400.000**. La pantalla comprobada con un navegador real (`scripts/qa/ui_recargo.js`): la cadena se ve en los dos sentidos, el panel no aparece en el contrato cerrado, y en el sucesor —que ya agotó el cupo— explica por qué no se puede en vez de esconderse.
 > **Qué resuelve:** una prenda avaluada en 2.000.000 sobre la que se prestó 1.000.000 tiene 1.000.000 de cupo sin usar. El cliente vuelve a los pocos días y quiere retirar parte de ese sobrante.
 > **Principio de diseño:** un recargo **no modifica** el contrato: lo **sucede**. Mismo espíritu que `MIGRACION_CONTRATOS.md` — reusar lo que ya existe (máquina de estados, snapshot, consecutivos, caja) en vez de abrir una excepción dentro de las reglas de plata.
 

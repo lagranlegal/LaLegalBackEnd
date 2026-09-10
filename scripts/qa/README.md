@@ -51,6 +51,7 @@ Resuelven Playwright desde el caché de npx (no es dependencia del proyecto, ver
 | `ui_plataforma.js` | El panel de super-admin por UI (se había probado solo por API). | Empresas sin plan y vencidas se ven igual (cola de H-14) |
 | `ui_print.js` | Impresión de paz y salvo y comprobante de venta, interceptando `window.print`. | Correctas |
 | `ui_acta.js` | El acta de cierre de caja, que exige una sesión ya cerrada. | Completa, con desglose y justificación |
+| `ui_recargo.js` | La pantalla de ampliar préstamo sobre la cadena real (viejo → sucesor), incluido el desborde a 360 px. Existe porque **buscar los textos en el JS servido prueba que se desplegó, no que se ve**: el panel está detrás de un permiso, de un cupo y de un motivo de bloqueo. | Correcta |
 
 ## Correr
 
