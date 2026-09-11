@@ -7,6 +7,7 @@ from app.core.logging import configure_logging
 from app.core.settings import get_settings
 from app.modules.accounts.router import router as accounts_router
 from app.modules.audit.router import router as audit_router
+from app.modules.capital.router import router as capital_router
 from app.modules.cashbox.router import router as cashbox_router
 from app.modules.catalogs.router import router as catalogs_router
 from app.modules.company.router import router as company_router
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(catalogs_router)
     app.include_router(contracts_router)
     app.include_router(cashbox_router)
+    app.include_router(capital_router)
     app.include_router(inventory_router)
     app.include_router(sales_router)
     app.include_router(credit_notes_router)

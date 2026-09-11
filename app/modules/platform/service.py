@@ -82,6 +82,14 @@ _MODERADOR_EXCLUDED_CODES = {
     # una operación rutinaria. sales.return SÍ se conserva, mismo criterio
     # que sales.void.
     "sales.return_override_time_limit",
+    # El patrimonio del DUEÑO (00054). Los tres, incluido `view`: cuánto puso
+    # el dueño y cuánto se ha llevado no es dato de operación — es la
+    # información que se le enseña a un socio o a un contador, no al
+    # mostrador. Y `withdraw` es la única operación de la app que le saca
+    # capital a la empresa sin nada a cambio.
+    "capital.view",
+    "capital.contribute",
+    "capital.withdraw",
 }
 
 

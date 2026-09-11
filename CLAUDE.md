@@ -45,10 +45,11 @@ Backend (FastAPI) de una plataforma SaaS **multi-tenant** para compraventas (cas
 
 **No es un `UPDATE` del capital, y no es una preferencia:** el interés se cobra en meses completos anclados a `interest_paid_until` y toda la máquina de estados cuelga de esa ancla; y el papel que el cliente firmó dice un capital, así que si cambia ya no describe la deuda.
 
-Tres invariantes, cada una con su test:
+Cuatro invariantes, cada una con su test:
 - **La ventana se mide desde `root_contract_id.start_date`**, la raíz de la cadena. Si se midiera desde el contrato actual, un recargo de $1 el último día reiniciaría el reloj para siempre.
 - **A la caja sale SOLO el delta.** El capital viejo ya salió el día del contrato original.
 - **El interés vencido nunca se suma al capital** (anatocismo): con meses adeudados se rechaza y hay que abonar primero.
+- **El sucesor hereda el ancla, no la reinicia** (`00053`): `start_date` sale de la **raíz** de la cadena y `interest_paid_until`/`due_date` del **padre**. Así la fecha de cobro del cliente no se mueve — presta el 1, recarga el 25, y el 1 del mes siguiente se le cobra sobre el capital nuevo completo. Disuelve la pregunta del "mes en curso" en vez de contestarla. **Y por eso mismo el sucesor puede quedar antedatado:** cuándo se entregó la plata vive en `extended_on`/`extension_amount`, y la pantalla **y el impreso** muestran las dos fechas. Un papel firmado hoy que solo diga la fecha vieja es un documento antedatado.
 
 Pasarse del cupo exige **`contracts.override_ltv`** — que rige igual en `POST /contracts`, para que la misma regla no se comporte distinto en dos pantallas. Diseño completo y decisiones: `docs/RECARGOS.md`.
 
@@ -80,6 +81,13 @@ Los punteros son **excluyentes** entre sí. `R`, `P`, `T` y `D` están reservada
 ### Ventas
 Cliente opcional. Confirmar venta = transacción: validar stock/estado, emitir número, descontar stock, `cash_movement(module=store)`, comprobante interno (sin DIAN). Anular: permiso, motivo, repone stock, contra-movimiento, auditada. Descuentos (venta y abono): permiso especial + motivo + auditoría.
 
+### Capital del dueño (aportes y retiros)
+`POST /capital/contributions` y `/capital/withdrawals` (`00054`). **Ni un aporte es un ingreso, ni un retiro es un gasto:** los dos mueven el PATRIMONIO, no el resultado del período. Un retiro registrado como gasto falsearía la utilidad por todo el monto retirado — el mismo error que el capital de los contratos ya costó tres veces.
+
+**No hace falta partida doble para cumplirlo:** el estado de resultados lee DOCUMENTOS (`sale`, `contract_payment`, `expense`) y un `capital_movement` no es ninguno de los tres, así que queda fuera por construcción. Un documento (no un `cash_movement` suelto) con conceptos propios `owner_contribution` / `owner_withdrawal`, aporte y retiro en la MISMA tabla con `direction` — son el mismo concepto en dos sentidos, como un traslado.
+
+Lo que sí se rechaza: retirar más de lo que hay en la cuenta, una cuenta `settlement`, efectivo con la caja cerrada, y un retiro sin motivo. Lo que solo se **advierte**: retirar por encima de la utilidad — `GET /capital/position` dice dónde está realmente la plata (caja + prestado + inventario **al costo**), porque en una compraventa retirar "lo que hay en caja" es descapitalizar. Diseño completo: `docs/CAPITAL_DEL_DUENO.md`.
+
 ### Suscripciones (gestión manual)
 Super-admin crea empresa (con roles semilla + caja principal + invitación del primer admin) y habilita módulos; renovación = ampliar `expires_at`. Job diario marca `expired` → bloqueo de acceso (login y API). Precios fuera del sistema. Suspender/expirar NUNCA borra datos.
 
@@ -105,6 +113,7 @@ app/
     inventory/     # artículos, ingresos, egresos, códigos
     sales/
     cashbox/       # sesiones, movimientos, gastos, cierre
+    capital/       # aportes y retiros del dueño (patrimonio, NO resultado)
     audit/
     reports/
   jobs/            # job nocturno (estados, suscripciones)

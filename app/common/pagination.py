@@ -1,6 +1,6 @@
 import base64
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -68,4 +68,41 @@ def make_time_page[T](
     has_more = len(rows) > limit
     items = rows[:limit]
     next_cursor = encode_time_cursor(*key_getter(items[-1])) if has_more and items else None
+    return CursorPage(items=items, next_cursor=next_cursor)
+
+
+# ---------------------------------------------------------------------------
+# La misma llave, pero sobre una FECHA DE DOCUMENTO (`date`, no `datetime`).
+#
+# La diferencia con `encode_time_cursor` no es de tipo, es de significado:
+# `created_at` dice cuándo se REGISTRÓ algo y la fecha del documento dice
+# cuándo OCURRIÓ. En un aporte de capital son distintas a propósito — el
+# dueño puede registrar el lunes la plata que metió el viernes — y el
+# historial tiene que salir por lo que pasó, no por lo que se tecleó.
+#
+# Mismo par `(fecha, id)`: la fecha manda y el id desempata, así que dos
+# documentos del mismo día nunca se pierden ni se repiten al paginar. Con
+# `date` sola no alcanzaría: varias filas comparten fecha todo el tiempo.
+# ---------------------------------------------------------------------------
+
+
+def encode_date_cursor(document_date: date, last_id: UUID) -> str:
+    return base64.urlsafe_b64encode(f"{document_date.isoformat()}|{last_id}".encode()).decode()
+
+
+def decode_date_cursor(cursor: str) -> tuple[date, UUID]:
+    try:
+        crudo = base64.urlsafe_b64decode(cursor.encode()).decode()
+        fecha, ident = crudo.split("|", 1)
+        return date.fromisoformat(fecha), UUID(ident)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise AppError("Cursor de paginación inválido.", details={"cursor": cursor}) from exc
+
+
+def make_date_page[T](
+    rows: list[T], limit: int, key_getter: Callable[[T], tuple[date, UUID]]
+) -> CursorPage[T]:
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    next_cursor = encode_date_cursor(*key_getter(items[-1])) if has_more and items else None
     return CursorPage(items=items, next_cursor=next_cursor)
