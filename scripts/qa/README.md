@@ -36,6 +36,8 @@ El laboratorio (empresas espejo, usuarios por rol, datos sembrados) está descri
 
 | `verificar_sedes.py` | **Vigila la premisa de la que cuelga aplazar multi-sucursal**: que cada empresa opere en un solo lugar físico (una registradora activa, un cajón activo y ligado). Sale con código **1** si encuentra algo, así que sirve en un cron. Es un script y no un test porque **un test de CI corre contra una base efímera y nunca vería que una empresa real creció una segunda caja**. | Las 7 empresas sin ligar, antes de `00052` · Ver [`SUCURSALES.md`](../../docs/SUCURSALES.md) §5 y §7 |
 
+| `verificar_regresion_caja.py` | Regresión de los flujos que toca `_resolve_active_register`, contra el backend **desplegado** y con login real del laboratorio. Comprueba los 4 endpoints que cambiaron, que `AccountOut` **no** expone `register_id` (el contrato de la API no cambió) y que contratos/ventas/inventario siguen intactos — esos resuelven la sesión por otro camino (`integration.get_open_session`). | Todo en verde tras `00052` |
+
 **Playwright — la app en vivo, con login real**
 
 Resuelven Playwright desde el caché de npx (no es dependencia del proyecto, ver `ESTADO.md` → "Trampas del entorno"); se puede apuntar a otra copia con `QA_PLAYWRIGHT`.

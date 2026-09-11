@@ -1076,6 +1076,7 @@ El super-admin de plataforma es la cuenta de Mateo (claim `app_metadata.platform
 - **Cuentas de los tres tipos:** `Caja principal` (cash), `Bancolombia QA` (bank), `Sistecrédito QA` (settlement).
 - **Contrato `QA-JOB-TEST-1`** con fechas manipuladas en la base a propósito, para la demostración de H-01.
 - **Una cuenta `Caja fuerte` (`vault`)** creada el 10/09 al probar `00049` en vivo, con 700.000 tras un traslado desde el cajón. Se dejó a propósito: es el fixture para probar que una caja fuerte no puede cobrar y que no entra al arqueo diario.
+- **Dos gastos de 1.000 con la nota "QA regresión 00052 — borrable"** (11/09/2026), de verificar en vivo que el cambio de `_resolve_active_register` no rompe el registro de un gasto real. Bajaron el efectivo esperado del turno de 770.000 a 768.000. Se dejaron: `cash_movement` es inmutable por trigger y corregirlos exigiría contra-movimientos que ensucian más que los 2.000.
 - **Una cuenta `Cajon 2` desactivada**, y un `cash_movement` de −70.000 con su contra-movimiento de +70.000. Es el rastro de la demostración de por qué **dos cuentas de efectivo hacen incuadrable el arqueo** (el gasto pagado desde el segundo cajón lo dejó en negativo y bajó el arqueo del turno a un número que no correspondía a ninguno de los dos). El movimiento no se pudo borrar —`cash_movement` es inmutable por trigger— así que se corrigió como manda el propio sistema: con un contra-movimiento. **Es el ejemplo vivo de esa disciplina.**
 
 ### Datos de prueba en LA GRAN LEGAL (09/09/2026)
