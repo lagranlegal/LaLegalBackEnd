@@ -1,6 +1,6 @@
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import text
@@ -247,11 +247,21 @@ async def expire_subscription(db: AsyncSession, *, subscription_id: UUID) -> Non
     )
 
 
-async def insert_cash_register(db: AsyncSession, *, company_id: UUID) -> None:
-    await db.execute(
-        text("insert into public.cash_register (company_id) values (:company_id)"),
+async def insert_cash_register(db: AsyncSession, *, company_id: UUID) -> UUID:
+    """Crea la caja registradora de la empresa y **devuelve su id**.
+
+    Devolverlo no es cosmético: el cajón que se crea justo después tiene que
+    quedar ligado a esta registradora (`account.register_id`). Hasta 00052
+    estas dos inserciones corrían seguidas y no se hablaban, así que **ninguna
+    cuenta de efectivo del sistema sabía a qué caja pertenecía** — un dato
+    trivial de poner hoy (una registradora, un cajón) e imposible de deducir
+    el día que haya dos. Ver `docs/SUCURSALES.md` §5.
+    """
+    result = await db.execute(
+        text("insert into public.cash_register (company_id) values (:company_id) returning id"),
         {"company_id": str(company_id)},
     )
+    return cast(UUID, result.scalar_one())
 
 
 async def insert_subscription_event(
@@ -321,12 +331,18 @@ async def list_subscription_events(
     return list(result.all())
 
 
-async def insert_default_accounts(db: AsyncSession, *, company_id: UUID) -> None:
+async def insert_default_accounts(db: AsyncSession, *, company_id: UUID, register_id: UUID) -> None:
     """Cuenta inicial de una empresa nueva: SOLO la de efectivo.
 
     Va acá junto a los roles semilla y la caja principal porque es parte del
     mismo alta: una empresa sin cuenta de efectivo no puede registrar un solo
     cobro.
+
+    `register_id` es OBLIGATORIO a propósito (00052): el cajón nace sabiendo a
+    qué caja registradora pertenece. No habilita multi-caja — nadie lee esa
+    columna todavía — pero evita que vuelva a existir una empresa cuyo
+    efectivo no se pueda atribuir a un mostrador. Que sea un parámetro y no un
+    `None` por defecto es lo que hace imposible olvidarlo.
 
     POR QUÉ YA NO SE SIEMBRAN "Transferencias" NI "Otros medios": eran un
     artefacto de la migración 00024, que tenía que mapear el enum viejo de
@@ -348,10 +364,10 @@ async def insert_default_accounts(db: AsyncSession, *, company_id: UUID) -> None
     await db.execute(
         text(
             """
-            insert into public.account (company_id, name, type, is_default)
-            values (:cid, 'Caja principal', 'cash', true)
+            insert into public.account (company_id, name, type, is_default, register_id)
+            values (:cid, 'Caja principal', 'cash', true, :register_id)
             on conflict (company_id, name) do nothing
             """
         ),
-        {"cid": str(company_id)},
+        {"cid": str(company_id), "register_id": str(register_id)},
     )

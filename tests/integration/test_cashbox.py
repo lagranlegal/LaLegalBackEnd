@@ -224,6 +224,51 @@ async def test_cannot_open_same_day_after_close(client: TestClient, cashbox_tena
     assert reopen_attempt.json()["code"] == "CASH_SESSION_ALREADY_CLOSED_TODAY"
 
 
+async def test_a_second_active_register_fails_loudly_instead_of_picking_one(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """Con dos registradoras activas, el backend RECHAZA en vez de elegir.
+
+    Antes hacía `order by created_at limit 1` — tomaba la más antigua **en
+    silencio**. Con una registradora es correcto; con dos es una respuesta
+    silenciosamente equivocada: la mitad de las operaciones de dinero de la
+    empresa se registrarían contra una caja al azar y nadie se enteraría.
+
+    Este estado **no se puede alcanzar por la API** (ningún endpoint crea
+    registradoras), así que el test lo fabrica insertando directo. Eso es
+    justamente el caso para el que existe el error: que aparezca una segunda
+    por fuera de la aplicación. Ver `docs/SUCURSALES.md` §5, Acción B.
+    """
+    company_id = cashbox_tenant["company_id"]
+    async with AsyncSessionLocal() as session, session.begin():
+        # Nombre propio: `cash_register` tiene `unique (company_id, name)` y el
+        # default es 'Caja principal'. El esquema ya impide dos registradoras
+        # homónimas — lo que no impide es que existan dos.
+        await session.execute(
+            text(
+                "insert into public.cash_register (company_id, name) values (:cid, 'Mostrador 2')"
+            ),
+            {"cid": str(company_id)},
+        )
+
+    headers = _headers(cashbox_tenant["token"])
+    try:
+        response = client.post("/api/v1/cashbox/sessions/open", headers=headers, json={})
+        assert response.status_code == 409
+        assert response.json()["code"] == "MULTIPLE_REGISTERS_NOT_SUPPORTED"
+        # Y la consulta de solo lectura tampoco adivina: la regla vive en un
+        # solo lugar, así que los cuatro caminos que necesitan la registradora
+        # se comportan igual.
+        current = client.get("/api/v1/cashbox/sessions/current", headers=headers)
+        assert current.json()["code"] == "MULTIPLE_REGISTERS_NOT_SUPPORTED"
+    finally:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text("delete from public.cash_register where company_id = :cid and id <> :keep"),
+                {"cid": str(company_id), "keep": str(cashbox_tenant["register_id"])},
+            )
+
+
 async def test_reopen_session_is_audited(client: TestClient, cashbox_tenant: dict) -> None:
     headers = _headers(cashbox_tenant["token"])
     opened = client.post(

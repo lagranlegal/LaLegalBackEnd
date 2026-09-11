@@ -17,15 +17,32 @@ _EXPENSE_COLUMNS = (
 )
 
 
-async def get_active_register(db: AsyncSession, *, company_id: UUID) -> Row[Any] | None:
+async def list_active_registers(db: AsyncSession, *, company_id: UUID) -> list[Row[Any]]:
+    """TODAS las cajas registradoras activas, sin `limit`.
+
+    Antes esto era `get_active_register` con `order by created_at limit 1`, y
+    devolvía **la más antigua** sin decirlo. Con una registradora por empresa
+    —que es el caso hoy, y el único que la API puede producir— esa respuesta
+    es correcta. Con dos sería silenciosamente equivocada, que es la peor
+    clase de error: no falla, contesta mal.
+
+    Es el mismo patrón que este proyecto ya pagó dos veces: el índice de
+    `00024` que "aseguraba" una sola cuenta de efectivo y no lo hacía, y el
+    `GET /cashbox/sessions?limit=1` que devolvía la sesión más VIEJA creyendo
+    que era la más nueva. **Un `limit 1` sobre un conjunto que puede tener
+    más de un elemento es una suposición, no una consulta.**
+
+    Quien decide qué hacer con más de una es el servicio
+    (`_resolve_active_register`), no esta función.
+    """
     result = await db.execute(
         text(
             "select id from public.cash_register where company_id = :company_id and active "
-            "order by created_at limit 1"
+            "order by created_at"
         ),
         {"company_id": str(company_id)},
     )
-    return result.first()
+    return list(result.all())
 
 
 async def session_exists_for_date(

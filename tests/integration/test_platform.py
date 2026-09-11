@@ -217,6 +217,34 @@ async def test_create_company_defaults_creates_seed_roles_and_cash_register(
         ).all()
         assert [(a[0], a[1], a[2]) for a in accounts] == [("Caja principal", "cash", True)]
 
+        # 00052 — el cajón nace LIGADO a la registradora de su empresa.
+        #
+        # No habilita multi-caja: nadie lee `register_id` todavía. Lo que fija
+        # este test es que no vuelva a existir una empresa cuyo efectivo no se
+        # pueda atribuir a un mostrador. Hoy el dato es trivial (una
+        # registradora, un cajón) y el día que haya dos ya no se puede deducir
+        # — ver `docs/SUCURSALES.md` §5, Acción A.
+        cajon_register_id = (
+            await session.execute(
+                text(
+                    "select register_id from public.account "
+                    "where company_id = :id and type = 'cash'"
+                ),
+                {"id": str(company_id)},
+            )
+        ).scalar_one()
+        assert cajon_register_id is not None, (
+            "El cajón de una empresa nueva debe nacer ligado a su caja registradora"
+        )
+
+        register_id = (
+            await session.execute(
+                text("select id from public.cash_register where company_id = :id"),
+                {"id": str(company_id)},
+            )
+        ).scalar_one()
+        assert cajon_register_id == register_id
+
         invited_user = (
             await session.execute(
                 text("select status, role_id from public.app_user where company_id = :id"),

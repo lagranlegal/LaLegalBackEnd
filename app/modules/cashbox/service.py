@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy.engine import Row
@@ -11,6 +11,7 @@ from app.core.errors import (
     AppError,
     CashSessionNotOpenError,
     ConflictError,
+    MultipleRegistersNotSupportedError,
     NoOpenCashSessionError,
     NotFoundError,
     PermissionDeniedError,
@@ -65,6 +66,32 @@ def _row_to_expense(row: Row[Any]) -> ExpenseOut:
     )
 
 
+async def _resolve_active_register(db: AsyncSession, *, company_id: UUID) -> UUID:
+    """La caja registradora de la empresa. **Un solo lugar decide esto.**
+
+    Los cuatro puntos de este módulo que necesitan la registradora repetían
+    las mismas tres líneas. Ahora la regla vive acá, que es lo que permite
+    cambiarla el día que llegue multi-caja sin ir a buscarla a cuatro sitios
+    —y lo que evita que uno de los cuatro se quede con la versión vieja, que
+    es exactamente cómo se separan las reglas duplicadas—.
+
+    Hoy hay **una** registradora por empresa y ningún endpoint puede crear
+    otra (solo `platform.create_company_defaults`, y crea una). Si algún día
+    aparece una segunda, esto **falla en vez de elegir**: ver
+    `MultipleRegistersNotSupportedError` y `docs/SUCURSALES.md` §5.
+    """
+    registers = await repository.list_active_registers(db, company_id=company_id)
+    if not registers:
+        raise NotFoundError("La empresa no tiene una caja activa configurada.")
+    if len(registers) > 1:
+        raise MultipleRegistersNotSupportedError(
+            "La empresa tiene más de una caja registradora activa y todavía no "
+            "se puede operar con varias. Deja una sola activa.",
+            details={"active_registers": len(registers)},
+        )
+    return cast(UUID, registers[0]._mapping["id"])
+
+
 async def open_session(
     db: AsyncSession,
     *,
@@ -81,10 +108,7 @@ async def open_session(
     como un `adjustment` con motivo, y ahí queda: atribuida a quien abrió y
     al día en que apareció, en vez de disolverse en el turno siguiente.
     """
-    register = await repository.get_active_register(db, company_id=company_id)
-    if register is None:
-        raise NotFoundError("La empresa no tiene una caja activa configurada.")
-    register_id = register._mapping["id"]
+    register_id = await _resolve_active_register(db, company_id=company_id)
     today = await platform_integration.get_company_today(db, company_id=company_id)
 
     if await repository.get_open_session_for_register(db, register_id=register_id) is not None:
@@ -172,10 +196,8 @@ async def open_session(
 
 
 async def get_current_session(db: AsyncSession, *, company_id: UUID) -> SessionOut:
-    register = await repository.get_active_register(db, company_id=company_id)
-    if register is None:
-        raise NotFoundError("La empresa no tiene una caja activa configurada.")
-    row = await repository.get_open_session_for_register(db, register_id=register._mapping["id"])
+    register_id = await _resolve_active_register(db, company_id=company_id)
+    row = await repository.get_open_session_for_register(db, register_id=register_id)
     if row is None:
         # `NoOpenCashSessionError`, no `NotFoundError`: el front distingue
         # "caja cerrada" (estado normal, con su CTA de abrirla) de "no se pudo
@@ -203,12 +225,10 @@ async def get_today_session(db: AsyncSession, *, company_id: UUID) -> SessionOut
     cerrado su propio turno. Este endpoint responde esa pregunta con
     `cashbox.view`, que es a quien le corresponde.
     """
-    register = await repository.get_active_register(db, company_id=company_id)
-    if register is None:
-        raise NotFoundError("La empresa no tiene una caja activa configurada.")
+    register_id = await _resolve_active_register(db, company_id=company_id)
     today = await platform_integration.get_company_today(db, company_id=company_id)
     row = await repository.get_session_for_date(
-        db, company_id=company_id, register_id=register._mapping["id"], session_date=today
+        db, company_id=company_id, register_id=register_id, session_date=today
     )
     if row is None:
         raise NotFoundError("Todavía no se ha abierto la caja hoy.")
@@ -469,12 +489,8 @@ async def create_expense(
     if category is None:
         raise NotFoundError("La categoría de gasto no existe en esta empresa.")
 
-    register = await repository.get_active_register(db, company_id=company_id)
-    if register is None:
-        raise NotFoundError("La empresa no tiene una caja activa configurada.")
-    session = await repository.get_open_session_for_register(
-        db, register_id=register._mapping["id"]
-    )
+    register_id = await _resolve_active_register(db, company_id=company_id)
+    session = await repository.get_open_session_for_register(db, register_id=register_id)
     if session is None:
         raise CashSessionNotOpenError("No hay una sesión de caja abierta para registrar el gasto.")
     session_id = session._mapping["id"]

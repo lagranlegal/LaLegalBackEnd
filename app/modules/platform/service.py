@@ -126,8 +126,11 @@ async def create_company_defaults(
     await repository.insert_subscription(
         db, company_id=company_id, plan_id=plan_id, expires_at=subscription_expires_at
     )
-    await repository.insert_cash_register(db, company_id=company_id)
-    await repository.insert_default_accounts(db, company_id=company_id)
+    # El cajón nace ligado a su registradora (00052). Hoy nadie lee
+    # `register_id`; existe para que el día que haya un segundo mostrador la
+    # atribución no haya que adivinarla. Ver `docs/SUCURSALES.md` §5.
+    register_id = await repository.insert_cash_register(db, company_id=company_id)
+    await repository.insert_default_accounts(db, company_id=company_id, register_id=register_id)
 
     all_codes = {row._mapping["code"] for row in await identity_repo.list_permissions(db)}
     seed_matrix = build_seed_role_permissions(all_codes)

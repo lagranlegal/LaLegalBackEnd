@@ -53,6 +53,29 @@ class CashSessionNotOpenError(AppError):
     code = "CASH_SESSION_NOT_OPEN"
 
 
+class MultipleRegistersNotSupportedError(AppError):
+    """La empresa tiene más de una caja registradora activa y multi-caja
+    todavía no está implementado.
+
+    **Hoy no se puede llegar acá por la API**: ningún endpoint crea una
+    `cash_register` — solo `platform.create_company_defaults` al dar de alta
+    la empresa, y crea exactamente una. Este error existe para el caso de que
+    alguien inserte la segunda a mano, o para el día que se empiece a
+    construir multi-caja y algo quede a medias.
+
+    La alternativa era seguir tomando "la más antigua" en silencio. Eso no es
+    un valor por defecto razonable: significa que la mitad de las operaciones
+    de dinero de la empresa se registrarían contra una caja al azar y **nadie
+    se enteraría**. Fallar fuerte convierte un descuadre inexplicable en un
+    mensaje que dice qué pasa.
+
+    Ver `docs/SUCURSALES.md` §5, Acción B.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "MULTIPLE_REGISTERS_NOT_SUPPORTED"
+
+
 class NoOpenCashSessionError(NotFoundError):
     """ "No hay caja abierta" CONSULTADO, no intentado.
 

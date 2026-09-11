@@ -2,6 +2,8 @@
 
 > **Estado:** **los cuatro pasos de §6 están hechos** (migraciones `00048` y `00049`, 10/09/2026) — el saldo del cajón ya se deriva de sus movimientos, abrir hereda en vez de digitar, y los arqueos de apertura y cierre emiten su ajuste. Queda pendiente el multi-mostrador: la columna `account.register_id` está puesta y vacía, y `cash_session` ya cuelga de `register_id`, así que falta conectar la UI y el arqueo por caja — no rediseñar nada. Pedido por Mateo el 09/09/2026 probando con el cliente: *"trazabilidad de todo y sin números inventados"*.
 >
+> **Multi-mostrador y multi-sucursal no son el mismo trabajo, y conviene no confundirlos al estimar.** Lo de acá es el cajón: que un faltante tenga dueño dentro del mismo local, y está casi todo en el modelo. Una sucursal además separa inventario, bóveda, gente y contabilidad — y ahí el modelo **no** tiene nada (`inventory_item` ni siquiera tiene ubicación). Ver [`SUCURSALES.md`](SUCURSALES.md).
+>
 > **Corrección de una primera versión de este documento.** El primer diseño proponía un *cierre guiado* que preguntaba "¿cuánto consignás, cuánto a la fuerte, cuánto de base?". Mateo lo rechazó con la razón correcta: **esto es un SaaS**. Una empresa tiene caja fuerte y otra no; una consigna todo, otra la mitad, otra reparte en tres; otra consigna el martes lo del lunes. Un producto que codifica *un* ritual de cierre le queda mal a todas menos a una.
 >
 > Este documento describe el modelo que **no** tiene ritual: ninguna de esas variantes se configura, porque ninguna necesita existir en el código.

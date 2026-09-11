@@ -159,12 +159,15 @@ async def get_statement(
     El saldo ya se mostraba, pero no CÓMO se llegó a él, y sin eso no hay
     forma de encontrar una diferencia contra el banco.
 
-    En cuentas de **efectivo** `has_running_balance` viene en `false` y los
-    saldos en `null`. No es una carencia: la base del cajón se redeclara en
-    cada apertura y no es un movimiento, así que acumular el histórico daría
-    un número sin significado. El efectivo se verifica **contando**, en el
-    arqueo. Sus movimientos sí se devuelven — sirven para ver qué pasó por el
-    cajón.
+    **Los cuatro tipos llevan saldo corriente desde 00048**, efectivo
+    incluido. Antes el cajón era la excepción (`has_running_balance: false`)
+    con el argumento de que "la base se redeclara en cada apertura y no es un
+    movimiento" — dejó de ser cierto: la base ES un movimiento, así que el
+    acumulado del cajón sí significa algo.
+
+    Que el efectivo además se verifique **contando** no lo contradice: contar
+    es lo que produce el `adjustment` que reconcilia el saldo. Ver el
+    docstring de `service.get_statement`.
     """
     return await service.get_statement(
         db,

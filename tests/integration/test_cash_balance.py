@@ -190,9 +190,7 @@ def _saldo(client: TestClient, token: str, account_id: UUID) -> Decimal:
 
 
 def _abrir(client: TestClient, token: str, **body: object) -> dict:
-    response = client.post(
-        "/api/v1/cashbox/sessions/open", headers=_headers(token), json=body
-    )
+    response = client.post("/api/v1/cashbox/sessions/open", headers=_headers(token), json=body)
     return {"status": response.status_code, "body": response.json()}
 
 
@@ -256,8 +254,20 @@ def test_abrir_sin_contar_hereda_el_saldo_del_cajon(
     async def _envejecer() -> None:
         async with AsyncSessionLocal() as session, session.begin():
             await session.execute(
+                # `session_date - 1`, NO `current_date - 1`.
+                #
+                # `current_date` es la fecha del SERVIDOR (UTC); la sesión se
+                # creó con el "hoy" de la EMPRESA (America/Bogota). Entre las
+                # 7pm y medianoche esas dos fechas no coinciden, así que
+                # `current_date - 1` daba exactamente la fecha que la sesión ya
+                # tenía: el envejecido no hacía nada y el test fallaba con
+                # `CASH_SESSION_ALREADY_CLOSED_TODAY`, pero SOLO de noche.
+                #
+                # Es la misma ventana de 5 horas que el backend ya arregló en
+                # su día (`tenant_time`/`get_company_today`), reaparecida en un
+                # test. Decrementar la columna es independiente de la zona.
                 text(
-                    "update public.cash_session set session_date = current_date - 1 "
+                    "update public.cash_session set session_date = session_date - 1 "
                     "where company_id = :cid"
                 ),
                 {"cid": str(tenant_efectivo["company_id"])},
@@ -271,9 +281,7 @@ def test_abrir_sin_contar_hereda_el_saldo_del_cajon(
     assert segunda["body"]["opening_balance"] == "200000.00"
 
 
-def test_contar_distinto_al_abrir_exige_motivo(
-    client: TestClient, tenant_efectivo: dict
-) -> None:
+def test_contar_distinto_al_abrir_exige_motivo(client: TestClient, tenant_efectivo: dict) -> None:
     """Mismo rigor que el descuadre de cierre, y se asevera por CÓDIGO: un
     test que mira el status y no el `code` no cubre nada."""
     resultado = _abrir(client, tenant_efectivo["token"], counted_cash="50000.00")
@@ -297,9 +305,7 @@ def test_contar_distinto_al_abrir_deja_el_saldo_en_lo_contado(
 # --------------------------------------------------------------------------
 # 4. El descuadre de cierre mueve el saldo, y no contamina el acta
 # --------------------------------------------------------------------------
-def test_el_descuadre_de_cierre_mueve_el_saldo(
-    client: TestClient, tenant_efectivo: dict
-) -> None:
+def test_el_descuadre_de_cierre_mueve_el_saldo(client: TestClient, tenant_efectivo: dict) -> None:
     """Antes el descuadre era SOLO un campo del acta: el saldo seguía
     diciendo lo esperado hasta que la apertura siguiente lo pisaba con otro
     número a mano, y la plata que faltó no quedaba en ninguna parte
@@ -317,9 +323,7 @@ def test_el_descuadre_de_cierre_mueve_el_saldo(
     assert _saldo(client, token, tenant_efectivo["cajon_id"]) == Decimal("92000.00")
 
 
-def test_el_ajuste_de_cierre_no_ensucia_el_acta(
-    client: TestClient, tenant_efectivo: dict
-) -> None:
+def test_el_ajuste_de_cierre_no_ensucia_el_acta(client: TestClient, tenant_efectivo: dict) -> None:
     """El ajuste va con `session_id = NULL` a propósito. Metido dentro de la
     sesión, `get_report` recalcularía un `expected_cash` igual al contado —
     un acta que siempre cuadra, que es lo contrario de lo que tiene que
