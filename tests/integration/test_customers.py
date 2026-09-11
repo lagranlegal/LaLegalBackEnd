@@ -175,6 +175,49 @@ def test_un_apellido_de_puras_stopwords_igual_encuentra(client: TestClient, tena
     assert creado["id"] in [item["id"] for item in r.json()["items"]]
 
 
+def test_la_enie_no_hace_falta_para_encontrar_a_nadie(client: TestClient, tenant: dict) -> None:
+    """El hallazgo real de 00056, y es lo contrario de lo que se había
+    anotado: el stemmer de `spanish` YA normaliza las vocales acentuadas
+    —"jose" encontraba a José y "gomez" a Gómez— pero deja la EÑE intacta.
+
+    Medido sobre apellidos colombianos corrientes fallaban 8 de 11, y los 8
+    por lo mismo. Nadie teclea la eñe al buscar: el teclado del celular la
+    esconde.
+    """
+    creados = {}
+    for i, nombre in enumerate(("Ana Muñoz Peña", "Luis Castaño Ordóñez", "Sara Zúñiga Acuña")):
+        creados[nombre] = client.post(
+            "/api/v1/customers",
+            headers=_headers(tenant["token"]),
+            json=_payload(full_name=nombre, doc_number=f"88{i}1234567"[:10]),
+        ).json()["id"]
+
+    def encuentra(q: str, nombre: str) -> bool:
+        r = client.get("/api/v1/customers", headers=_headers(tenant["token"]), params={"q": q})
+        assert r.status_code == 200, r.text
+        return creados[nombre] in [item["id"] for item in r.json()["items"]]
+
+    # Sin la eñe, que es como se teclea de verdad.
+    assert encuentra("munoz", "Ana Muñoz Peña")
+    assert encuentra("pena", "Ana Muñoz Peña")
+    assert encuentra("castano", "Luis Castaño Ordóñez")
+    assert encuentra("ordonez", "Luis Castaño Ordóñez")
+    assert encuentra("zuniga", "Sara Zúñiga Acuña")
+    assert encuentra("acuna", "Sara Zúñiga Acuña")
+
+    # Y CON la eñe también: normalizar un solo lado rompería este caso, y es
+    # el que nadie probaría porque "obviamente funciona".
+    assert encuentra("muñoz", "Ana Muñoz Peña")
+    assert encuentra("castaño", "Luis Castaño Ordóñez")
+
+    # Desde tres letras, como el resto.
+    assert encuentra("cas", "Luis Castaño Ordóñez")
+    assert encuentra("zun", "Sara Zúñiga Acuña")
+
+    # Y el filtro sigue filtrando: esto no es "encontrar todo".
+    assert not encuentra("zzz", "Ana Muñoz Peña")
+
+
 def test_update_customer(client: TestClient, tenant: dict) -> None:
     created = client.post(
         "/api/v1/customers", headers=_headers(tenant["token"]), json=_payload()

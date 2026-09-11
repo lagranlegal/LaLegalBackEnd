@@ -61,22 +61,39 @@ class TestNameClauses:
         """Las stopwords del español son lexemas VACÍOS: sin el `ilike`,
         "de la" (parte de "De la Cruz") no encontraría a nadie."""
         clauses, params = name_clauses("full_name", "de la", prefix="name")
-        assert "full_name ilike :name_like" in clauses
+        assert "public.f_unaccent(full_name) ilike public.f_unaccent(:name_like)" in clauses
         assert params["name_like"] == "%de la%"
 
     def test_con_lexemas_van_las_dos_clausulas(self) -> None:
         clauses, params = name_clauses("cu.full_name", "mate", prefix="name")
         assert len(clauses) == 2
         assert clauses[0] == (
-            "to_tsvector('spanish', cu.full_name) @@ to_tsquery('spanish', :name_tsq)"
+            "to_tsvector('spanish', public.f_unaccent(cu.full_name)) "
+            "@@ to_tsquery('spanish', public.f_unaccent(:name_tsq))"
         )
         assert params["name_tsq"] == "mate:*"
+
+    def test_el_unaccent_se_aplica_a_LOS_DOS_lados(self) -> None:
+        """Normalizar solo la columna compararía un texto sin eñes contra uno
+        con eñes: no encontraría nada y parecería que el arreglo no sirvió."""
+        clauses, _ = name_clauses("full_name", "munoz", prefix="name")
+        for clausula in clauses:
+            assert clausula.count("f_unaccent") == 2, clausula
+
+    def test_la_expresion_es_LA_MISMA_del_indice(self) -> None:
+        """`ix_customer_name_unaccent` (00056) está creado sobre
+        `to_tsvector('spanish', public.f_unaccent(full_name))`. Si esta
+        cláusula deja de coincidir carácter por carácter, Postgres no usa el
+        índice y no avisa: la búsqueda pasa a seq scan en silencio, que es la
+        peor forma de perderlo."""
+        clauses, _ = name_clauses("full_name", "mate", prefix="name")
+        assert clauses[0].startswith("to_tsvector('spanish', public.f_unaccent(full_name))")
 
     def test_sin_lexemas_queda_solo_el_ilike_y_ningun_parametro_huerfano(self) -> None:
         """Un `:name_tsq` en el SQL sin su valor en `params` es un error de
         vinculación de SQLAlchemy, no un resultado vacío."""
         clauses, params = name_clauses("full_name", "...", prefix="name")
-        assert clauses == ["full_name ilike :name_like"]
+        assert clauses == ["public.f_unaccent(full_name) ilike public.f_unaccent(:name_like)"]
         assert "name_tsq" not in params
 
     def test_el_prefijo_aisla_los_parametros(self) -> None:

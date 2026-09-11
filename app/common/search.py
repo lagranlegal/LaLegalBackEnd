@@ -82,16 +82,31 @@ def name_clauses(column: str, q: str, *, prefix: str) -> tuple[list[str], dict[s
        stopwords del español ("de", "la", "los") son lexemas vacíos, así que
        sin él "De la Cruz" no se encontraría con "de la".
 
+    **Las dos pasan por `f_unaccent` (00056), y el motivo es la EÑE.** El
+    stemmer de `spanish` ya normaliza las vocales acentuadas —"jose"
+    encuentra a José, "gomez" a Gómez— pero deja la eñe intacta, así que
+    "munoz" no encontraba a Muñoz ni "pena" a Peña. Medido sobre apellidos
+    colombianos corrientes, fallaban 8 de 11 y los 8 por lo mismo. Nadie
+    teclea la eñe al buscar: el teclado del celular la esconde.
+
+    Se aplica a los DOS lados —la columna y lo tecleado— o la comparación
+    sería entre un texto normalizado y otro que no. El índice
+    `ix_customer_name_unaccent` está creado sobre exactamente esta
+    expresión; cambiarla acá sin cambiar el índice lo deja inservible en
+    silencio, que es la peor forma de perderlo.
+
     `column` y `prefix` los fija el código que llama —nunca texto de un
     usuario—, así que interpolarlos es seguro. Mismo criterio que
     `customers.update_customer` con sus nombres de columna.
     """
-    clauses = [f"{column} ilike :{prefix}_like"]
+    clauses = [f"public.f_unaccent({column}) ilike public.f_unaccent(:{prefix}_like)"]
     params = {f"{prefix}_like": f"%{q.strip()}%"}
     tsq = prefix_tsquery(q)
     if tsq is not None:
         clauses.insert(
-            0, f"to_tsvector('spanish', {column}) @@ to_tsquery('spanish', :{prefix}_tsq)"
+            0,
+            f"to_tsvector('spanish', public.f_unaccent({column})) "
+            f"@@ to_tsquery('spanish', public.f_unaccent(:{prefix}_tsq))",
         )
         params[f"{prefix}_tsq"] = tsq
     return clauses, params
