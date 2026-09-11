@@ -90,6 +90,8 @@ def _row_to_contract(row: Row[Any], items: list[ContractItemOut]) -> ContractOut
         extension_interest_policy=m["extension_interest_policy"],
         parent_contract_id=m["parent_contract_id"],
         root_contract_id=m["root_contract_id"],
+        extended_on=m["extended_on"],
+        extension_amount=m["extension_amount"],
         items=items,
     )
 
@@ -1037,6 +1039,16 @@ async def extend_loan(
     toda la máquina de estados cuelga de esa ancla. Y el papel firmado dice
     un capital — si cambia, ese papel ya no describe la deuda.
 
+    **Desde 00053 el sucesor no nace hoy: hereda la fecha del contrato
+    ORIGINAL.** Antes arrancaba con `start_date = interest_paid_until = hoy`,
+    así que un recargo el día 25 corría la próxima fecha de cobro al 25 del
+    mes siguiente — el cliente tenía una fecha de pago que se le movía sola
+    cada vez que volvía por plata. Con el ancla heredada se le cobra el día
+    de siempre, sobre el capital nuevo. Cuándo ocurrió el recargo de verdad
+    queda en `extended_on` / `extension_amount`, que es lo que la pantalla y
+    el impreso muestran: un papel firmado el 25 que solo diga "1 de
+    septiembre" sería un documento antedatado.
+
     Todo en UNA transacción (CLAUDE.md regla 4).
     """
     existing = await repository.find_contract_by_idempotency_key(
@@ -1099,6 +1111,40 @@ async def extend_loan(
     today = await platform_integration.get_company_today(db, company_id=company_id)
     nuevo_capital = quantize(viejo["capital_balance"] + body.amount)
 
+    # --- Las fechas del sucesor (00053) -----------------------------------
+    #
+    # `keep_anchor` (default desde 00053): el sucesor NO nace hoy. Hereda la
+    # fecha del contrato ORIGINAL de la cadena y el ancla del interés del
+    # contrato que sucede, así que la fecha de cobro del cliente no se mueve:
+    # presta el día 1, recarga el día 25, y el día 1 del mes siguiente se le
+    # cobra el interés sobre el capital nuevo completo.
+    #
+    # Esto DISUELVE la pregunta de RECARGOS.md §5 en vez de contestarla: no
+    # queda "pedazo de mes corrido sobre el capital viejo" que perdonar ni
+    # que cobrar, porque el mes en curso se cobra entero al capital nuevo
+    # cuando venza.
+    #
+    # El ancla sale del contrato PADRE y no de la raíz: si el cliente abonó
+    # meses en el medio, `interest_paid_until` avanzó, y volver a la raíz le
+    # cobraría de nuevo meses que ya pagó. `start_date` sí sale de la raíz —
+    # es la fecha del papel original y no se mueve nunca.
+    #
+    # `forgive` y `charge_month` conservan el comportamiento viejo para los
+    # contratos firmados bajo esas políticas: la columna es SNAPSHOT.
+    policy = viejo["extension_interest_policy"]
+    if policy == "keep_anchor":
+        root_start = await repository.get_root_start_date(
+            db, company_id=company_id, contract_id=contract_id
+        )
+        start_date = root_start
+        interest_paid_until = viejo["interest_paid_until"]
+        # El plazo tampoco se reinicia: es el mismo préstamo con más capital.
+        due_date = viejo["due_date"]
+    else:
+        start_date = today
+        interest_paid_until = today
+        due_date = rules.add_months(today, viejo["term_months"])
+
     # --- El sucesor -------------------------------------------------------
     nuevo_id = uuid4()
     number = await repository.next_number(db, company_id=company_id)
@@ -1118,11 +1164,9 @@ async def extend_loan(
         term_months=viejo["term_months"],
         arrears_window_months=viejo["arrears_window_months"],
         extension_months=viejo["extension_months"],
-        start_date=today,
-        due_date=rules.add_months(today, viejo["term_months"]),
-        # El reloj se reinicia: los días corridos sobre el capital viejo se
-        # perdonan (política `forgive`, §8.2). Acotado por la ventana.
-        interest_paid_until=today,
+        start_date=start_date,
+        due_date=due_date,
+        interest_paid_until=interest_paid_until,
         ltv_warning=ltv_warning,
         notes=viejo["notes"],
         # Nace SIN foto firmada: hay que imprimirlo y firmarlo. Esa es su
@@ -1136,6 +1180,12 @@ async def extend_loan(
         # La ventana se mide desde la RAÍZ de la cadena, así que el sucesor
         # hereda la raíz del viejo — o al viejo mismo si era el primero.
         root_contract_id=viejo["root_contract_id"] or contract_id,
+        # La trazabilidad del recargo (00053). Con `keep_anchor`, `start_date`
+        # es la fecha del contrato original, así que ya no responde cuándo se
+        # entregó la plata: estos dos campos sí, y son lo que la pantalla y el
+        # impreso muestran para que un papel firmado hoy no parezca antedatado.
+        extended_on=today,
+        extension_amount=body.amount,
     )
 
     # Las mismas prendas, en filas nuevas: `contract_item` cuelga de
@@ -1206,12 +1256,22 @@ async def extend_loan(
             "contract_id": str(contract_id),
             "number": str(viejo["number"]),
             "capital_balance": str(viejo["capital_balance"]),
+            "start_date": str(viejo["start_date"]),
+            "interest_paid_until": str(viejo["interest_paid_until"]),
         },
         after={
             "number": str(number),
             "amount_disbursed": str(body.amount),
             "capital_balance": str(nuevo_capital),
             "ltv_warning": str(ltv_warning),
+            # Las fechas quedan auditadas porque desde 00053 el sucesor puede
+            # nacer ANTEDATADO (hereda la del contrato original). Quien revise
+            # esto dentro de un año tiene que poder ver, en una sola fila, que
+            # el contrato dice "1 de septiembre" y la plata salió el 25.
+            "extension_interest_policy": str(policy),
+            "start_date": str(start_date),
+            "interest_paid_until": str(interest_paid_until),
+            "extended_on": str(today),
         },
     )
     return await get_contract(db, company_id=company_id, contract_id=nuevo_id)

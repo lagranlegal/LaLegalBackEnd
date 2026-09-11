@@ -14,6 +14,7 @@ from sqlalchemy import bindparam, text
 
 from app.core import security
 from app.core.db import AsyncSessionLocal, engine
+from app.modules.platform import integration as platform_integration
 
 
 async def _postgres_available() -> bool:
@@ -784,6 +785,33 @@ async def test_list_contracts_q_searches_number_and_customer(
     assert other.json()["id"] in ids
     assert mine.json()["id"] not in ids
 
+    # --- El piso bajó de 5 a 3 (11/09/2026, pedido del cliente) -----------
+    # El nombre desde TRES letras: antes `plainto_tsquery` exigía la palabra
+    # completa, y como "Gomez" tiene cinco parecía un umbral de cinco.
+    by_prefix = client.get("/api/v1/contracts", headers=headers, params={"q": "gom"})
+    assert by_prefix.status_code == 200
+    assert other.json()["id"] in [c["id"] for c in by_prefix.json()["items"]]
+
+    # El documento desde TRES dígitos.
+    by_short_doc = client.get("/api/v1/contracts", headers=headers, params={"q": other_doc[:3]})
+    assert by_short_doc.status_code == 200
+    assert other.json()["id"] in [c["id"] for c in by_short_doc.json()["items"]]
+
+    # Y el piso va POR CLÁUSULA: el número de contrato se sigue encontrando
+    # desde la PRIMERA tecla. Un piso global lo habría roto, que es el
+    # buscador que hoy funciona bien.
+    numero = str(other.json()["number"])
+    by_one_char = client.get("/api/v1/contracts", headers=headers, params={"q": numero[0]})
+    assert by_one_char.status_code == 200
+    assert other.json()["id"] in [c["id"] for c in by_one_char.json()["items"]]
+
+    # Y un signo suelto no revienta: `to_tsquery` es sintaxis, y un `&` o un
+    # `(` serían un SyntaxError de Postgres — un 500 en el buscador.
+    for q in ("&", "(", ":*", "de la"):
+        assert (
+            client.get("/api/v1/contracts", headers=headers, params={"q": q}).status_code == 200
+        ), f"q={q!r}"
+
 
 async def test_settlement_info_requires_paid_status_and_matches_the_payoff_payment(
     client: TestClient, contract_tenant: dict
@@ -852,6 +880,225 @@ async def _contrato_ampliable(client: TestClient, tenant: dict, **overrides: obj
     )
     assert response.status_code == 201, response.text
     return dict(response.json())
+
+
+async def get_company_today_for(company_id) -> object:
+    """El "hoy" de la EMPRESA, nunca `date.today()` del proceso ni
+    `current_date` de Postgres (que es UTC).
+
+    No es una precaución teórica: este proyecto ya se comió el bug dos veces
+    —una en el backend y otra dentro de un test que solo fallaba de noche—
+    porque entre las 7pm y medianoche de Bogotá la fecha UTC ya es la del día
+    siguiente.
+    """
+    async with AsyncSessionLocal() as session:
+        return await platform_integration.get_company_today(session, company_id=company_id)
+
+
+async def _retroceder_contrato(*, company_id, contract_id, dias: int) -> None:
+    """Mueve el contrato `dias` hacia atrás: `start_date` y el ancla del
+    interés. `POST /contracts` siempre fija `start_date = hoy`, así que es la
+    única forma de armar el caso real — "prestó el 1, recarga el 25" — sin
+    pasar por `/import`, que no acepta el resto del escenario.
+    """
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "update public.contract set "
+                "  start_date = start_date - make_interval(days => :d), "
+                "  interest_paid_until = interest_paid_until - make_interval(days => :d), "
+                "  due_date = due_date - make_interval(days => :d) "
+                "where id = :id and company_id = :cid"
+            ),
+            {"d": dias, "id": str(contract_id), "cid": str(company_id)},
+        )
+
+
+# --------------------------------------------------------------------------
+# La fecha del sucesor (00053): el recargo NO mueve la fecha de cobro
+# --------------------------------------------------------------------------
+async def test_el_sucesor_hereda_la_fecha_del_contrato_original(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El caso que reportó el cliente: presta el día 1, recarga el día 25.
+
+    Hasta 00053 el sucesor nacía con `start_date = interest_paid_until = hoy`,
+    así que la próxima cuota se cobraba 30 días después del RECARGO y no del
+    contrato. El cliente tenía una fecha de pago que se le movía sola cada vez
+    que volvía por plata.
+    """
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    await _retroceder_contrato(
+        company_id=contract_tenant["company_id"], contract_id=viejo["id"], dias=24
+    )
+    antes = client.get(
+        f"/api/v1/contracts/{viejo['id']}", headers=_headers(contract_tenant["full_token"])
+    ).json()
+
+    nuevo = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+    n = nuevo.json()
+
+    # El ancla NO se movió: es lo que hace que el día de cobro se respete.
+    assert n["start_date"] == antes["start_date"]
+    assert n["interest_paid_until"] == antes["interest_paid_until"]
+    # El plazo tampoco se reinicia: es el mismo préstamo con más capital.
+    assert n["due_date"] == antes["due_date"]
+    # Y el capital sí creció, que es el punto entero del recargo.
+    assert n["capital_balance"] == "1400000.00"
+    # El sucesor arranca al día: `extend_loan` exige intereses al día, así que
+    # heredar el ancla no puede meterlo en mora de nacimiento.
+    assert n["status"] == "active"
+
+
+async def test_el_recargo_deja_su_propia_fecha_y_su_monto(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """La otra mitad, y la que vuelve legítimo antedatar `start_date`.
+
+    Con la fecha heredada, `start_date` ya no responde "¿cuándo se entregó la
+    plata?". Si nada más lo respondiera, el papel que el cliente firma hoy
+    saldría fechado semanas atrás y sin explicación — un documento
+    antedatado, que es peor que el problema que se resolvió.
+    """
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    await _retroceder_contrato(
+        company_id=contract_tenant["company_id"], contract_id=viejo["id"], dias=24
+    )
+
+    nuevo = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+    n = nuevo.json()
+
+    hoy = await get_company_today_for(contract_tenant["company_id"])
+    assert n["extended_on"] == str(hoy), "el día REAL del recargo, no el del contrato"
+    assert n["extended_on"] != n["start_date"], "son dos fechas distintas, y ese es el punto"
+    # El DELTA, no el capital total: es lo que salió de la caja hoy.
+    assert n["extension_amount"] == "400000.00"
+
+    # Y en un contrato que no nació de un recargo, ambos son NULL — así
+    # `extended_on is not null` responde "¿es un sucesor?" sin mirar la cadena.
+    assert viejo["extended_on"] is None
+    assert viejo["extension_amount"] is None
+
+
+async def test_la_politica_vieja_sigue_valiendo_para_los_contratos_ya_firmados(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """`extension_interest_policy` es SNAPSHOT. Un contrato firmado bajo
+    `forgive` conserva el comportamiento con el que se firmó, igual que
+    conserva su tasa: cambiar el default no puede alterar lo pactado."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    await _retroceder_contrato(
+        company_id=contract_tenant["company_id"], contract_id=viejo["id"], dias=24
+    )
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "update public.contract set extension_interest_policy = 'forgive' "
+                "where id = :id and company_id = :cid"
+            ),
+            {"id": str(viejo["id"]), "cid": str(contract_tenant["company_id"])},
+        )
+
+    nuevo = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+    hoy = await get_company_today_for(contract_tenant["company_id"])
+    # El reloj se reinicia, que es lo que hacía `forgive`.
+    assert nuevo.json()["start_date"] == str(hoy)
+    assert nuevo.json()["interest_paid_until"] == str(hoy)
+    # Pero la trazabilidad se registra igual: es información del hecho, no de
+    # la política.
+    assert nuevo.json()["extended_on"] == str(hoy)
+    assert nuevo.json()["extension_amount"] == "400000.00"
+
+
+async def test_una_cadena_de_recargos_conserva_la_fecha_de_la_RAIZ(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Con dos recargos encadenados el ancla sigue siendo la del PRIMER
+    contrato, no la del anterior de la cadena. Si se tomara del padre, cada
+    recargo heredaría una fecha ya heredada y bastaría un error para que la
+    cadena entera se corriera."""
+    raiz = await _contrato_ampliable(client, contract_tenant)
+    await _retroceder_contrato(
+        company_id=contract_tenant["company_id"], contract_id=raiz["id"], dias=20
+    )
+    raiz_fecha = client.get(
+        f"/api/v1/contracts/{raiz['id']}", headers=_headers(contract_tenant["full_token"])
+    ).json()["start_date"]
+
+    segundo = client.post(
+        f"/api/v1/contracts/{raiz['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "200000.00", "payment_method": "cash"},
+    )
+    assert segundo.status_code == 201, segundo.text
+    tercero = client.post(
+        f"/api/v1/contracts/{segundo.json()['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "200000.00", "payment_method": "cash"},
+    )
+    assert tercero.status_code == 201, tercero.text
+
+    assert segundo.json()["start_date"] == raiz_fecha
+    assert tercero.json()["start_date"] == raiz_fecha, "la RAÍZ, no el padre"
+    assert tercero.json()["capital_balance"] == "1400000.00"
+
+
+async def test_el_ancla_sale_del_PADRE_y_no_de_la_raiz(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """La asimetría que más fácil se implementa mal: `start_date` viene de la
+    raíz, pero `interest_paid_until` viene del PADRE.
+
+    Si el ancla también saliera de la raíz, a un cliente que abonó meses en el
+    medio se le volverían a cobrar meses que ya pagó — y el recibo que firmó
+    dejaría de cuadrar con el saldo.
+    """
+    # La ventana va a 400 días a propósito: con los 28 por defecto es
+    # imposible construir este caso —hacen falta 30+ días para que haya un mes
+    # que abonar, y a esa altura el recargo ya está fuera de ventana—, y sin
+    # ventana larga la asimetría padre/raíz quedaría sin cubrir.
+    raiz = await _contrato_ampliable(client, contract_tenant, extension_window_days=400)
+    await _retroceder_contrato(
+        company_id=contract_tenant["company_id"], contract_id=raiz["id"], dias=40
+    )
+    # El cliente abona el mes que debe: el ancla del PADRE avanza, la fecha
+    # del contrato no. Y queda al día, que es lo que `extend_loan` exige.
+    pago = client.post(
+        f"/api/v1/contracts/{raiz['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 1, "capital_amount": "0.00", "payment_method": "cash"},
+    )
+    assert pago.status_code == 201, pago.text
+    padre = client.get(
+        f"/api/v1/contracts/{raiz['id']}", headers=_headers(contract_tenant["full_token"])
+    ).json()
+    assert padre["interest_paid_until"] != padre["start_date"], "el abono movió el ancla"
+
+    nuevo = client.post(
+        f"/api/v1/contracts/{raiz['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+    assert nuevo.json()["start_date"] == padre["start_date"], "la fecha del papel original"
+    assert nuevo.json()["interest_paid_until"] == padre["interest_paid_until"], (
+        "el mes que ya pagó no se le vuelve a cobrar"
+    )
 
 
 async def test_el_cupo_es_el_sobrante_de_la_tasacion(

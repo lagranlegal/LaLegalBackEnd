@@ -1,6 +1,6 @@
 # RECARGOS.md — Ampliación de préstamo sobre un contrato vivo (spec)
 
-> **Estado: IMPLEMENTADO** (migración `00051`, backend y frontend desplegados el 10/09/2026). Pedido por Mateo el 09/09/2026 tras probar con el cliente; las dos decisiones que lo bloqueaban se respondieron en §8.
+> **Estado: IMPLEMENTADO** (migración `00051`, backend y frontend desplegados el 10/09/2026); **la fecha del sucesor cambió el 11/09/2026 — leer §4-bis antes que §5 y §8.2, que quedaron superadas** (migración `00053`). Pedido por Mateo el 09/09/2026 tras probar con el cliente; las dos decisiones que lo bloqueaban se respondieron en §8.
 >
 > Verificado en vivo, no solo en tests: contrato #28 (1.000.000 sobre una prenda de 2.000.000 al 70 % → 400.000 de cupo) ampliado a #29 con capital 1.400.000, el viejo `superseded` con sus prendas `transferred`, interés mensual de 50.000 a 70.000, y a la caja salieron **solo los 400.000**. La pantalla comprobada con un navegador real (`scripts/qa/ui_recargo.js`): la cadena se ve en los dos sentidos, el panel no aparece en el contrato cerrado, y en el sucesor —que ya agotó el cupo— explica por qué no se puede en vez de esconderse.
 > **Qué resuelve:** una prenda avaluada en 2.000.000 sobre la que se prestó 1.000.000 tiene 1.000.000 de cupo sin usar. El cliente vuelve a los pocos días y quiere retirar parte de ese sobrante.
@@ -87,7 +87,66 @@ Sin `appraisal_value` no hay techo que calcular: el recargo se rechaza con `409 
 
 > **Decidido — ver §8.1.** No es advertir siempre ni bloquear siempre: depende del permiso **`contracts.override_ltv`**. Quien no lo tiene queda bloqueado; quien lo tiene recibe la advertencia y queda auditado como quien autorizó. Y aplica también a `POST /contracts`, para que la misma regla no se comporte distinto en dos pantallas.
 
+## 4-bis. La fecha del sucesor — **cambiado el 11/09/2026** (migración `00053`)
+
+> Esta sección corrige lo que dicen §5 y §8.2, que quedan como registro de lo que se decidió antes y por qué se cambió.
+
+**Lo que reportó Mateo probando con el cliente:** presta 1.000.000 el día 1, el cliente recarga 500.000 el día 25, y el sucesor nacía con `start_date = interest_paid_until = hoy`. Resultado: la próxima cuota se cobraba el **25 de octubre** en vez del 1. El cliente tenía una fecha de pago que se le movía sola cada vez que volvía por plata.
+
+**La respuesta no es una cuarta política: es la que no necesita política.** El sucesor **hereda el ancla**:
+
+| Campo | De dónde sale |
+|---|---|
+| `start_date` | de la **raíz** de la cadena — la fecha del papel original, que no se mueve nunca |
+| `interest_paid_until` | del contrato **padre** — si el cliente abonó meses en el medio, el ancla ya avanzó, y volver a la raíz le cobraría meses que ya pagó |
+| `due_date` | del padre — el plazo tampoco se reinicia: es el mismo préstamo con más capital |
+
+**Esto disuelve la pregunta de §5 en vez de contestarla.** Ya no hay "pedazo de mes corrido sobre el capital viejo" que perdonar, cobrar o prorratear: el mes en curso se cobra entero al capital nuevo cuando venza. Y le gana a `forgive` por los dos lados — hoy un recargo el día 27 perdonaba ~45.000 **y además** corría la próxima fecha de pago 27 días.
+
+**El filo, dicho en voz alta:** un recargo dos días antes del aniversario hace que el cliente pague un mes completo sobre el capital nuevo casi de inmediato. No es anatocismo —no se capitaliza interés, es plata que se entregó— y es lo que hace la mayoría de compraventas. Pero la pantalla lo dice **antes** de confirmar: *"Próxima cuota: 1 de octubre · $75.000"*. Un cobro correcto que el cliente no vio venir se reclama igual que uno equivocado.
+
+### La palanca ya estaba puesta
+
+`extension_interest_policy` existía desde `00051` con dos valores y **nada la exponía** — §8.2 la dejó ahí para "el día que aparezca una regla". Este es ese día. Se le agregó `keep_anchor`, que pasa a ser el default:
+
+| Valor | Qué hace |
+|---|---|
+| `keep_anchor` *(default desde 00053)* | El sucesor hereda la fecha del original. La fecha de cobro no se mueve |
+| `forgive` | El reloj se reinicia; los días corridos se perdonan |
+| `charge_month` | Exige el mes de interés pagado antes de ampliar |
+
+Los contratos **ya firmados conservan su `forgive`**: la columna es SNAPSHOT y cambiar el default no puede alterar lo pactado, igual que con la tasa.
+
+### La trazabilidad, que con este cambio deja de ser un extra
+
+Antedatar `start_date` rompe las dos cosas que respondían "¿cuándo se hizo el recargo?":
+
+- El detalle del contrato decía *«Sucede a un contrato anterior, ampliado el {start_date}»* — pasaría a mentir con semanas de diferencia.
+- El impreso dice `Fecha: {start_date}`. **El papel que el cliente firma el 25 saldría fechado el 1, sin nada más: un documento antedatado, que es peor que el problema que se resolvió.**
+
+Por eso `00053` agrega dos columnas, ambas `NULL` en un contrato que no nació de un recargo:
+
+```sql
+extended_on      date            -- el día REAL, en la zona de la empresa
+extension_amount numeric(14,2)   -- el DELTA entregado, no el capital total
+```
+
+**Por qué columnas y no derivarlo de `created_at`:** `created_at` es un `timestamptz` y el "día" del negocio es el de la zona de la **empresa** — convertirlo en cada lectura es exactamente el cálculo que a este proyecto ya le costó el bug de las 5 horas dos veces. Además `created_at` no distingue un sucesor de un contrato importado, y **el monto no está en ninguna columna**: vive en el `cash_movement` y en el `audit_log`. Para escribir *"recargo de $500.000 el 25/09"* en la pantalla y en el papel había que cruzar tablas.
+
+De regalo: `extended_on is not null` responde *"¿este contrato es un sucesor?"* sin mirar la cadena.
+
+### Qué muestra la aplicación
+
+- **Detalle del contrato:** *«Sucede a un contrato anterior — recargo de $500.000 entregado el 25/09/2026. Conserva la fecha del contrato original (01/09/2026), así que el interés se sigue cobrando el día de siempre — ahora sobre el capital ampliado.»*
+- **Impreso:** un recuadro propio con las dos fechas y el monto del recargo, para que nadie pueda leer el documento como antedatado.
+- **Antes de confirmar:** la fecha y el monto de la próxima cuota.
+
+---
+
 ## 5. El interés del mes en curso — la pregunta de fondo
+
+> **Superada por §4-bis (11/09/2026).** Con el ancla heredada no hay mes en curso que resolver. Se conserva porque explica por qué `prorate` no existe y por qué el modelo solo entiende meses completos.
+
 
 Al momento del recargo el cliente casi siempre está **dentro** de un mes ya empezado y no vencido (la ventana son 28 días). Ese pedazo de mes corrido sobre el capital viejo hay que resolverlo. Tres respuestas, y la tercera no es viable:
 
@@ -150,6 +209,8 @@ Lo que gana sobre el booleano: **la casilla sigue siendo expresable** —quien q
 **Aplica también a `POST /contracts`**, no solo al recargo: si no, volvemos a la misma regla con dos comportamientos. Eso cambia el comportamiento actual, así que **la migración otorga el permiso a todo rol que hoy pueda crear contratos** — nadie pierde acceso el día del despliegue, y la empresa que quiera apretar se lo quita al Asesor. Mismo criterio que usó `00029` con los permisos de cuentas.
 
 ### 8.2 · El interés del mes en curso: perdonar, con la palanca puesta
+
+> **Revertido el 11/09/2026 — ver §4-bis.** El default pasó a `keep_anchor`: el sucesor hereda el ancla en vez de reiniciarla. Lo que sigue queda como registro de por qué se eligió `forgive` primero, y de que la palanca que se dejó puesta acá fue justo la que hizo falta tres días después.
 
 **Se perdona** (opción (a) de §5): el sucesor arranca con `interest_paid_until = hoy`.
 

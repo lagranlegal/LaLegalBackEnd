@@ -8,12 +8,14 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.search import MIN_SEARCH_CHARS, name_clauses
+
 _CONTRACT_COLUMNS = (
     "id, number, legacy_code, customer_id, principal, capital_balance, appraisal_value, "
     "interest_rate_pct, term_months, arrears_window_months, extension_months, start_date, "
     "due_date, interest_paid_until, status, extension_ends_at, ltv_warning, notes, "
     "signed_photo_url, created_at, extension_window_days, extension_interest_policy, "
-    "parent_contract_id, root_contract_id"
+    "parent_contract_id, root_contract_id, extended_on, extension_amount"
 )
 _ITEM_COLUMNS = (
     "id, category_id, description, weight_grams, serial_imei, item_appraisal, status, photos, "
@@ -66,10 +68,19 @@ async def insert_contract(
     # 00051 — ampliar préstamo. Con default para no tocar a quien ya llamaba
     # a esta función: un contrato normal nace con la política de su empresa
     # y sin cadena.
+    #
+    # `keep_anchor` desde 00053: al ampliar, el sucesor conserva la fecha del
+    # contrato ORIGINAL, así que la fecha de cobro del cliente no se mueve.
+    # El default vive acá Y en la columna: el INSERT manda el valor explícito,
+    # así que cambiar solo el de la columna no habría cambiado nada.
     extension_window_days: int = 28,
-    extension_interest_policy: str = "forgive",
+    extension_interest_policy: str = "keep_anchor",
     parent_contract_id: UUID | None = None,
     root_contract_id: UUID | None = None,
+    # 00053 — la trazabilidad del recargo. NULL en todo contrato que no nació
+    # de uno; `extended_on is not null` responde "¿es un sucesor?".
+    extended_on: date | None = None,
+    extension_amount: Decimal | None = None,
 ) -> None:
     await db.execute(
         text(
@@ -80,14 +91,14 @@ async def insert_contract(
                  extension_months, start_date, due_date, interest_paid_until, ltv_warning, notes,
                  signed_photo_url, created_by, idempotency_key,
                  extension_window_days, extension_interest_policy,
-                 parent_contract_id, root_contract_id)
+                 parent_contract_id, root_contract_id, extended_on, extension_amount)
             values
                 (:id, :company_id, :number, :legacy_code, :customer_id, :principal,
                  :capital_balance, :appraisal_value, :interest_rate_pct, :term_months,
                  :arrears_window_months, :extension_months, :start_date, :due_date,
                  :interest_paid_until, :ltv_warning, :notes, :signed_photo_url, :created_by,
                  :idempotency_key, :extension_window_days, :extension_interest_policy,
-                 :parent_contract_id, :root_contract_id)
+                 :parent_contract_id, :root_contract_id, :extended_on, :extension_amount)
             """
         ),
         {
@@ -113,6 +124,8 @@ async def insert_contract(
             "extension_interest_policy": extension_interest_policy,
             "parent_contract_id": str(parent_contract_id) if parent_contract_id else None,
             "root_contract_id": str(root_contract_id) if root_contract_id else None,
+            "extended_on": extended_on,
+            "extension_amount": extension_amount,
             "created_by": str(created_by),
             "idempotency_key": idempotency_key,
         },
@@ -313,25 +326,32 @@ async def list_contracts(
         # Número: prefijo sobre el texto (se tipea completo o casi completo).
         # legacy_code: prefijo, sin distinguir mayúsculas — se imprimía o se
         # heredaba del sistema anterior con cualquier capitalización. Cliente:
-        # mismo criterio que `customers.list_customers` (nombre full-text,
-        # documento por prefijo) — es la misma pregunta ("¿quién es?") hecha
-        # desde el lado del contrato en vez del cliente.
+        # mismo criterio que `customers.list_customers` (nombre por prefijo
+        # full-text, documento por prefijo) — es la misma pregunta ("¿quién
+        # es?") hecha desde el lado del contrato en vez del cliente.
         #
-        # El documento se busca SOLO con 5+ caracteres: los números de
-        # contrato son cortos (1, 2, 17…) y las cédulas tienen 8-10 dígitos,
-        # así que buscar "5" hacía match por prefijo contra el documento de
-        # CUALQUIER cliente que empezara por 5 — un contrato ajeno aparecía
-        # como si fuera el buscado. Con 5+ caracteres la consulta ya no puede
-        # confundirse con un número de contrato.
+        # EL PISO VA POR CLÁUSULA, no sobre la consulta entera. El número de
+        # contrato se sigue encontrando desde la primera tecla (los
+        # consecutivos son 1, 17, 213…); el nombre y el documento esperan a
+        # los tres caracteres de `MIN_SEARCH_CHARS`.
+        #
+        # Por qué el documento tiene piso: buscar "5" hacía match por prefijo
+        # contra el documento de CUALQUIER cliente que empezara por 5, y un
+        # contrato ajeno aparecía como si fuera el buscado. El piso bajó de 5
+        # a 3 el 11/09/2026 a pedido del cliente. El solape con un número de
+        # contrato de 3-4 dígitos vuelve a ser posible, pero acotado: son dos
+        # cláusulas de un OR, así que el contrato buscado NUNCA desaparece —
+        # a lo sumo aparece acompañado.
         clauses = [
             "c.number::text like :q_prefix",
             "c.legacy_code ilike :q_prefix",
-            "to_tsvector('spanish', cu.full_name) @@ plainto_tsquery('spanish', :q)",
         ]
-        if len(q) >= 5:
+        if len(q) >= MIN_SEARCH_CHARS:
+            name_sql, name_params = name_clauses("cu.full_name", q, prefix="name")
+            clauses.extend(name_sql)
             clauses.append("cu.doc_number like :q_prefix")
+            params.update(name_params)
         query += " and (" + " or ".join(clauses) + ")"
-        params["q"] = q
         params["q_prefix"] = f"{q}%"
     if cursor is not None:
         query += " and c.id > :cursor"

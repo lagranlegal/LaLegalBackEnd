@@ -151,6 +151,17 @@ class ContractOut(BaseModel):
     #: ni sucede a otro.
     parent_contract_id: UUID | None
     root_contract_id: UUID | None
+    #: 00053 — cuándo se hizo el recargo que dio origen a este contrato, y
+    #: cuánto se entregó en ÉL (el delta, no el capital total). `None` si el
+    #: contrato no nació de un recargo.
+    #:
+    #: Van aparte de `start_date` porque desde 00053 `start_date` es la fecha
+    #: del contrato ORIGINAL de la cadena —el ancla legal del interés—, así
+    #: que ya no responde cuándo se entregó la plata nueva. La pantalla y el
+    #: impreso necesitan las DOS fechas: un papel firmado el 25 que solo diga
+    #: "1 de septiembre" es un documento antedatado.
+    extended_on: date | None
+    extension_amount: Decimal | None
     items: list[ContractItemOut]
 
 
