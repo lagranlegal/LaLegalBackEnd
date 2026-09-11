@@ -33,14 +33,14 @@ El laboratorio (empresas espejo, usuarios por rol, datos sembrados) está descri
 | `refresh_sessions.py` | Renueva los JWT del laboratorio cuando expiran a mitad de un barrido. | — |
 | `concurrencia.py` | Lanza N peticiones **en el mismo instante** (todas esperando un evento común, no en fila): ventas de la última unidad, misma clave de idempotencia, aperturas de caja. | **F10-01** — el 500 bajo carrera |
 | `seed_contratos.py` | **Siembra**, no prueba: 22 contratos que cubren los seis estados en LA GRAN LEGAL, vía `POST /contracts/import` (sin caja, sin `cash_movement`). Las fechas se derivan con el `rules.add_months` del backend, así que este archivo no puede discrepar del servidor. `--verificar` cuenta, `--limpiar` borra. | — (herramienta; el registro está en `QA_AUDITORIA.md` → "Datos de prueba en LA GRAN LEGAL") |
-
 | `verificar_sedes.py` | **Vigila la premisa de la que cuelga aplazar multi-sucursal**: que cada empresa opere en un solo lugar físico (una registradora activa, un cajón activo y ligado). Sale con código **1** si encuentra algo, así que sirve en un cron. Es un script y no un test porque **un test de CI corre contra una base efímera y nunca vería que una empresa real creció una segunda caja**. | Las 7 empresas sin ligar, antes de `00052` · Ver [`SUCURSALES.md`](../../docs/SUCURSALES.md) §5 y §7 |
-
 | `verificar_regresion_caja.py` | Regresión de los flujos que toca `_resolve_active_register`, contra el backend **desplegado** y con login real del laboratorio. Comprueba los 4 endpoints que cambiaron, que `AccountOut` **no** expone `register_id` (el contrato de la API no cambió) y que contratos/ventas/inventario siguen intactos — esos resuelven la sesión por otro camino (`integration.get_open_session`). | Todo en verde tras `00052` |
 
 **Playwright — la app en vivo, con login real**
 
 Resuelven Playwright desde el caché de npx (no es dependencia del proyecto, ver `ESTADO.md` → "Trampas del entorno"); se puede apuntar a otra copia con `QA_PLAYWRIGHT`.
+
+> **El navegador puede no estar, aunque Playwright sí.** El 11/09/2026 `~/Library/Caches/ms-playwright` tenía solo `ffmpeg`: el Chromium se había ido, y `launch()` falla pidiendo `npx playwright install`. `ui_ltv.js` cae solo al **Chrome del sistema** (`channel: 'chrome'`), que no requiere descargar nada; los demás scripts todavía no. Si uno falla con *"Executable doesn't exist"*, es esto — no hace falta reinstalar nada si hay Chrome.
 
 | Script | Qué hace | Qué encontró |
 |---|---|---|
@@ -55,6 +55,7 @@ Resuelven Playwright desde el caché de npx (no es dependencia del proyecto, ver
 | `ui_plataforma.js` | El panel de super-admin por UI (se había probado solo por API). | Empresas sin plan y vencidas se ven igual (cola de H-14) |
 | `ui_print.js` | Impresión de paz y salvo y comprobante de venta, interceptando `window.print`. | Correctas |
 | `ui_acta.js` | El acta de cierre de caja, que exige una sesión ya cerrada. | Completa, con desglose y justificación |
+| `ui_ltv.js` | El aviso de cupo del LTV en el formulario de contrato. Elige categoría, escribe monto y avalúo, y comprueba las DOS ramas del texto según `contracts.override_ltv`. Cae al Chrome del sistema si el Chromium de Playwright no está descargado. | **El cupo calculado 100× por encima** — los tests no lo vieron porque usaban el texto enmascarado |
 | `ui_recargo.js` | La pantalla de ampliar préstamo sobre la cadena real (viejo → sucesor), incluido el desborde a 360 px. Existe porque **buscar los textos en el JS servido prueba que se desplegó, no que se ve**: el panel está detrás de un permiso, de un cupo y de un motivo de bloqueo. | Correcta |
 
 ## Correr
