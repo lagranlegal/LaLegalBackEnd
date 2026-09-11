@@ -4,7 +4,7 @@
 >
 > **Lo que sí se hizo** es adecuar la arquitectura para que esa puerta no se cierre: que los datos que se crean hoy sigan sirviendo cuando llegue. Verificado contra dev el 10/09/2026 (§4) y aplicadas las tres adecuaciones de §5 — **ninguna construye la función**.
 >
-> **Falta desplegar el backend** (`fly deploy`) para que la Acción B valga en dev. La A ya está aplicada en las dos bases.
+> **Desplegado y verificado el 11/09/2026** (Fly + Vercel), sobre lo servido y no sobre el push. La regresión de los flujos existentes está en `scripts/qa/verificar_regresion_caja.py` — ver §5.
 >
 > **Parte I** es el estado de hoy y por qué aplazar es seguro. **Parte II** es la guía de implementación completa para el día que se construya: qué cubre, cómo funcionaría, qué falta y en qué orden.
 
@@ -86,10 +86,26 @@ Ninguna construye multi-caja ni multi-sucursal. Las tres son baratas, reversible
 | | Qué | Estado |
 |---|---|---|
 | **A** | `account.register_id` poblado, y las empresas nuevas nacen ligadas | ✅ migración `00052`, aplicada en **local y dev** |
-| **B** | `get_active_register` falla fuerte en vez de tomar "la más antigua" | ✅ código y test — **falta `fly deploy`** |
+| **B** | `get_active_register` falla fuerte en vez de tomar "la más antigua" | ✅ desplegado y verificado en vivo (11/09) |
 | **C** | El guardián: un test para el código, un script para los datos vivos | ✅ |
 
-**Suite: 372 tests en verde** (371 previos + 1 nuevo). `ruff` y `mypy` limpios.
+**Suite: 372 tests backend · 169 front.** `ruff` y `mypy` limpios.
+
+### La regresión: que esto no rompa lo que ya existía
+
+`scripts/qa/verificar_regresion_caja.py`, contra el backend **desplegado** y con login real del laboratorio:
+
+| Comprobación | Resultado |
+|---|---|
+| Los 4 endpoints que cambiaron, con una sola registradora | Idénticos a antes; ninguno dispara el error nuevo |
+| `AccountOut` **no** expone `register_id` | El contrato de la API no se movió |
+| `gen:api` contra el backend desplegado | **Cero cambios de schema** — el único diff en `types/api.ts` fue un comentario |
+| El cajón lleva saldo corriente (`has_running_balance: true`) | Correcto — lo que `00048` dejó y el docstring negaba |
+| Un gasto real de 1.000 | `201`, y el efectivo esperado bajó como debe |
+| Contratos, ventas, inventario, clientes, auditoría, dashboard | Intactos — resuelven la sesión por `integration.get_open_session`, que **no pasa por el helper** |
+| **El error nuevo, en lo servido** | Con una segunda registradora insertada a mano en el laboratorio, los 4 caminos dieron `409 MULTIPLE_REGISTERS_NOT_SUPPORTED`. Eliminada después; `verificar_sedes.py` vuelve a verde |
+
+Que contratos y ventas no pasen por el helper es lo que acota el radio de este cambio, y conviene saberlo antes de tocarlo otra vez: usan `cashbox.integration.get_open_session`, que consulta `cash_session` directo por `company_id`.
 
 ### Acción A · `account.register_id` poblado
 
