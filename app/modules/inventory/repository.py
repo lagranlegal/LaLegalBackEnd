@@ -8,6 +8,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.search import name_clauses
+
 # Desde 00022 el nombre, la categoría, la descripción y el precio viven en
 # `product`: el lote solo guarda lo que es propio de ESA compra. `ItemOut`
 # conserva su forma —sigue exponiendo esos campos— pero salen del JOIN, así
@@ -169,11 +171,13 @@ async def list_items(
         # `code` es NULL mientras el artículo está en borrador (se emite al
         # publicar), y `like` sobre NULL da NULL, no false — por eso el
         # `coalesce`: sin él, buscar por nombre nunca encontraría un borrador.
-        query += (
-            " and (coalesce(i.code, '') ilike :code_prefix"
-            " or to_tsvector('spanish', p.name) @@ plainto_tsquery('spanish', :q))"
-        )
-        params["q"] = q
+        # El nombre va por PREFIJO desde el 11/09/2026: con `plainto_tsquery`
+        # comparaba lexemas enteros, así que "cad" no encontraba "cadena" y
+        # el buscador parecía no responder hasta la palabra completa.
+        clauses, name_params = name_clauses("p.name", q, prefix="name")
+        clauses.insert(0, "coalesce(i.code, '') ilike :code_prefix")
+        query += " and (" + " or ".join(clauses) + ")"
+        params.update(name_params)
         params["code_prefix"] = f"{q}%"
     for column, value in (
         ("cat1_id", cat1_id),
@@ -808,11 +812,11 @@ async def list_products(
         query += " and p.active = :active"
         params["active"] = active
     if q:
-        query += (
-            " and (coalesce(p.code, '') ilike :code_prefix"
-            " or to_tsvector('spanish', p.name) @@ plainto_tsquery('spanish', :q))"
-        )
-        params["q"] = q
+        # Mismo criterio que `list_items`: prefijo, no palabra completa.
+        clauses, name_params = name_clauses("p.name", q, prefix="name")
+        clauses.insert(0, "coalesce(p.code, '') ilike :code_prefix")
+        query += " and (" + " or ".join(clauses) + ")"
+        params.update(name_params)
         params["code_prefix"] = f"{q}%"
     if cursor is not None:
         query += " and p.id > :cursor"

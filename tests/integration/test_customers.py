@@ -108,6 +108,73 @@ def test_list_customers_search_matches_doc_number(client: TestClient, tenant: di
     assert created["id"] not in [item["id"] for item in no_match.json()["items"]]
 
 
+# --------------------------------------------------------------------------
+# El buscador filtra desde la TERCERA letra, no desde la palabra completa
+# (11/09/2026, reportado por el cliente como "solo filtra desde la quinta")
+# --------------------------------------------------------------------------
+def test_el_nombre_se_encuentra_por_prefijo_no_por_palabra_completa(
+    client: TestClient, tenant: dict
+) -> None:
+    """La causa real del "solo filtra desde la quinta letra".
+
+    `plainto_tsquery` comparaba lexemas ENTEROS: "Mateo" encontraba a Mateo
+    y "Mate" no encontraba nada. Como los nombres de pila suelen tener cinco
+    o seis letras, en el mostrador se veía como un umbral de cinco.
+    """
+    creado = client.post(
+        "/api/v1/customers",
+        headers=_headers(tenant["token"]),
+        json=_payload(full_name="Mateo Jaramillo Restrepo", doc_number="1098765432"),
+    ).json()
+
+    def encuentra(q: str) -> bool:
+        r = client.get("/api/v1/customers", headers=_headers(tenant["token"]), params={"q": q})
+        assert r.status_code == 200, r.text
+        return creado["id"] in [item["id"] for item in r.json()["items"]]
+
+    assert encuentra("mat"), "tres letras del nombre: es lo que pidió el cliente"
+    assert encuentra("jara"), "el apellido tampoco necesita estar completo"
+    assert encuentra("restr"), "cualquiera de las tres palabras, no solo la primera"
+    assert encuentra("jara mateo"), "el orden de las palabras no importa (full-text)"
+    assert not encuentra("zzz"), "el filtro sigue filtrando"
+
+
+def test_el_documento_se_encuentra_por_prefijo_corto(client: TestClient, tenant: dict) -> None:
+    """El otro lado del mismo pedido: la cédula desde tres dígitos."""
+    creado = client.post(
+        "/api/v1/customers",
+        headers=_headers(tenant["token"]),
+        json=_payload(full_name="Sin Coincidencia Textual", doc_number="4471234567"),
+    ).json()
+
+    r = client.get("/api/v1/customers", headers=_headers(tenant["token"]), params={"q": "447"})
+    assert creado["id"] in [item["id"] for item in r.json()["items"]]
+
+
+def test_una_busqueda_de_puro_signo_no_revienta(client: TestClient, tenant: dict) -> None:
+    """`to_tsquery` es sintaxis: un `&` o un `(` sueltos son un SyntaxError
+    de Postgres, o sea un 500 en el buscador. Con `plainto_tsquery` esto no
+    podía pasar, así que es riesgo NUEVO del cambio."""
+    for q in ("&", "(", ":*", "&|()", "de la", "  "):
+        r = client.get("/api/v1/customers", headers=_headers(tenant["token"]), params={"q": q})
+        assert r.status_code == 200, f"q={q!r} devolvió {r.status_code}: {r.text}"
+
+
+def test_un_apellido_de_puras_stopwords_igual_encuentra(client: TestClient, tenant: dict) -> None:
+    """Las stopwords del español —"de", "la", "los"— son lexemas VACÍOS:
+    el full-text no puede verlos. Sin el `ilike` de respaldo, "De la Cruz" no
+    se encontraría tecleando "de la"."""
+    creado = client.post(
+        "/api/v1/customers",
+        headers=_headers(tenant["token"]),
+        json=_payload(full_name="Rosa De La Cruz", doc_number="7781234567"),
+    ).json()
+
+    r = client.get("/api/v1/customers", headers=_headers(tenant["token"]), params={"q": "de la"})
+    assert r.status_code == 200, r.text
+    assert creado["id"] in [item["id"] for item in r.json()["items"]]
+
+
 def test_update_customer(client: TestClient, tenant: dict) -> None:
     created = client.post(
         "/api/v1/customers", headers=_headers(tenant["token"]), json=_payload()

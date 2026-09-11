@@ -5,6 +5,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.search import name_clauses
+
 _COLUMNS = (
     "id, full_name, doc_type, doc_number, doc_issue_place, address, phone, email, "
     "doc_photo_url, doc_photos, status, alert_reason, notes, created_at"
@@ -86,16 +88,21 @@ async def list_customers(
     query = f"select {_COLUMNS} from public.customer where company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if q:
-        # Nombre: full-text (fragmentos, tildes, orden de palabras). Documento:
-        # coincidencia exacta o por prefijo — en el mostrador se tipea el
-        # número completo o casi completo, nunca un fragmento suelto como en
-        # un nombre, así que no necesita full-text ahí.
-        query += (
-            " and (to_tsvector('spanish', full_name) @@ plainto_tsquery('spanish', :q)"
-            " or doc_number like :doc_prefix)"
-        )
-        params["q"] = q
-        params["doc_prefix"] = f"{q}%"
+        # Nombre: full-text CON PREFIJO en la última palabra (`common/search.py`).
+        # Antes era `plainto_tsquery`, que compara lexemas enteros: "Mateo"
+        # encontraba a Mateo y "Mate" no encontraba nada. Documento: prefijo —
+        # en el mostrador se teclea el número completo o casi, nunca un
+        # fragmento suelto como en un nombre, así que no necesita full-text.
+        #
+        # Acá NO hay piso de caracteres, y es a propósito: este listado no
+        # tiene con qué confundirse. El piso de tres vive en contratos, donde
+        # un documento corto compite con un número de contrato, y en la
+        # pantalla, que no dispara la consulta antes.
+        clauses, name_params = name_clauses("full_name", q, prefix="name")
+        clauses.append("doc_number like :doc_prefix")
+        query += " and (" + " or ".join(clauses) + ")"
+        params.update(name_params)
+        params["doc_prefix"] = f"{q.strip()}%"
     if cursor is not None:
         query += " and id > :cursor"
         params["cursor"] = str(cursor)
