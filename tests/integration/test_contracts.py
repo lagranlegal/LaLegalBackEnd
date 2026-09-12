@@ -861,8 +861,7 @@ async def _set_ltv(*, company_id, category_id, pct: int) -> None:
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
             text(
-                "update public.category set max_ltv_pct = :pct "
-                "where id = :id and company_id = :cid"
+                "update public.category set max_ltv_pct = :pct where id = :id and company_id = :cid"
             ),
             {"pct": pct, "id": str(category_id), "cid": str(company_id)},
         )
@@ -1267,9 +1266,7 @@ async def test_fuera_de_la_ventana_no_se_puede_ampliar(
     assert respuesta.json()["code"] == "EXTENSION_WINDOW_CLOSED"
 
 
-async def test_sin_tasacion_no_se_puede_ampliar(
-    client: TestClient, contract_tenant: dict
-) -> None:
+async def test_sin_tasacion_no_se_puede_ampliar(client: TestClient, contract_tenant: dict) -> None:
     """Prestar sin techo es prestar a ciegas, y el mensaje dice cómo
     arreglarlo."""
     await _open_cash_session(
@@ -1331,7 +1328,7 @@ async def test_la_cadena_conserva_la_raiz_al_encadenar_recargos(
     ).json()
 
     assert segundo["root_contract_id"] == raiz["id"]
-    assert tercero["root_contract_id"] == raiz["id"]      # la RAÍZ, no el segundo
+    assert tercero["root_contract_id"] == raiz["id"]  # la RAÍZ, no el segundo
     assert tercero["parent_contract_id"] == segundo["id"]  # el padre sí avanza
     assert tercero["capital_balance"] == "1200000.00"
 

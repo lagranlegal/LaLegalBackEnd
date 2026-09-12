@@ -195,9 +195,7 @@ async def get_extension_options(
     dice por qué, para que la pantalla pueda explicarlo en vez de esconder
     la opción sin más.
     """
-    return await service.quote_extension(
-        db, company_id=user.company_id, contract_id=contract_id
-    )
+    return await service.quote_extension(db, company_id=user.company_id, contract_id=contract_id)
 
 
 @router.post("/{contract_id}/extend-loan", response_model=ContractOut, status_code=201)

@@ -39,7 +39,10 @@ def main() -> None:
 
     print(f"\n  Ajustes de efectivo en la empresa ({len(ajustes)}):")
     for m in ajustes:
-        print(f"    {m['direction']:3s} {m['amount']:>12}  sesión={m['session_id']}  ref={m['reference_type']}")
+        print(
+            f"    {m['direction']:3s} {m['amount']:>12}  "
+            f"sesión={m['session_id']}  ref={m['reference_type']}"
+        )
         print(f"        {m['notes']}")
 
     client = seed.ensure_actor()
@@ -69,9 +72,11 @@ def main() -> None:
         print(f"    efectivo esperado     {esperado:>14}   (arqueo del turno)")
         print(f"    suma de cuentas cash  {efectivo:>14}   (saldo derivado)")
         cuadra = esperado == efectivo
-        print(f"\n  {'CUADRA' if cuadra else 'NO CUADRA'}: los dos caminos dan el mismo número."
-              if cuadra else
-              f"\n  NO CUADRA — diferencia de {efectivo - esperado}")
+        print(
+            f"\n  {'CUADRA' if cuadra else 'NO CUADRA'}: los dos caminos dan el mismo número."
+            if cuadra
+            else f"\n  NO CUADRA — diferencia de {efectivo - esperado}"
+        )
         if not cuadra:
             raise SystemExit(1)
     finally:

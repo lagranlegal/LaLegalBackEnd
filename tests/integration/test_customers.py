@@ -238,9 +238,7 @@ def test_update_customer(client: TestClient, tenant: dict) -> None:
 # --------------------------------------------------------------------------
 # Un documento tiene dos caras (00050)
 # --------------------------------------------------------------------------
-def test_customer_stores_both_sides_of_the_document(
-    client: TestClient, tenant: dict
-) -> None:
+def test_customer_stores_both_sides_of_the_document(client: TestClient, tenant: dict) -> None:
     """`doc_photo_url` aceptaba UNA foto y una cédula tiene frente y reverso.
 
     El orden es la semántica: `doc_photos[0]` es el frente. No hacen falta
@@ -274,9 +272,7 @@ def test_the_deprecated_single_photo_still_works(client: TestClient, tenant: dic
     assert creado.json()["doc_photo_url"] == unica
 
 
-def test_updating_the_photos_keeps_both_fields_in_sync(
-    client: TestClient, tenant: dict
-) -> None:
+def test_updating_the_photos_keeps_both_fields_in_sync(client: TestClient, tenant: dict) -> None:
     """Escribir una sin la otra las dejaría contradiciéndose, que es el modo
     exacto en que una migración de expandir/contraer se rompe."""
     creado = client.post(

@@ -138,8 +138,7 @@ def main() -> int:
                 despues = c.get(f"/cashbox/sessions/{sid}/report")
                 qa.check(
                     "el gasto bajó el efectivo esperado",
-                    despues.ok
-                    and despues.body["expected_cash"] != reporte.body["expected_cash"],
+                    despues.ok and despues.body["expected_cash"] != reporte.body["expected_cash"],
                     f"antes {reporte.body['expected_cash']} → "
                     f"después {despues.body.get('expected_cash')}",
                 )

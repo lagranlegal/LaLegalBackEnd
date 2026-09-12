@@ -174,6 +174,12 @@ def _tec(cat: str, desc: str, serial: str, avaluo: int) -> dict:
 # script comprueba el estado REAL que devolvió el backend contra `bucket`, así
 # que si se corre otro día y una fecha ya no produce el estado esperado, FALLA
 # en vez de sembrar algo distinto en silencio.
+# `fmt: off` a propósito y no por descuido: esta lista es una TABLA DE DATOS,
+# y está alineada a mano para poder leerla como tal — cada fila es un caso de
+# prueba y las columnas se comparan de un vistazo. El formateador la explota a
+# un argumento por línea (unas 300 líneas en vez de 80) y deja de verse qué
+# distingue un caso del siguiente, que es justo para lo que existe el archivo.
+# fmt: off
 SEEDS: list[Seed] = [
     # ---- active: owed == 0 -------------------------------------------------
     Seed("DEMO-A1", "active", JOYERIA, date(2026, 5, 12), 3, 1_200_000, 1_200_000, "5",
@@ -257,6 +263,7 @@ SEEDS: list[Seed] = [
          [_tec(IPHONE, "iPhone SE 2020 64GB", "356444555666777", 900_000)],
          appraisal=900_000, payoff=True),
 ]
+# fmt: on
 
 
 # ------------------------------------------------------------------ actor ----
@@ -360,8 +367,10 @@ def contar() -> None:
     print("\n  Contratos por estado en LA GRAN LEGAL (total / de los que sembramos):")
     for st in sorted(set(total) | set(demo)):
         print(f"    {st:14s} {total.get(st, 0):3d}   ({demo.get(st, 0)} DEMO)")
-    print(f"    {'LISTOS REMATE':14s} {len(listos):3d}"
-          f"   ({sum(1 for x in listos if (x['legacy_code'] or '').startswith('DEMO-'))} DEMO)")
+    print(
+        f"    {'LISTOS REMATE':14s} {len(listos):3d}"
+        f"   ({sum(1 for x in listos if (x['legacy_code'] or '').startswith('DEMO-'))} DEMO)"
+    )
     print(f"    {'TOTAL':14s} {sum(total.values()):3d}   ({sum(demo.values())} DEMO)")
 
 
@@ -535,9 +544,19 @@ def sembrar() -> None:
             continue
         qa.check(f"{s.code} → auctioned", r.body["status"] == "auctioned", str(r.body), "alta")
 
-    qa.save("seed_contratos", [{"code": s.code, "bucket": s.bucket, "id": s.resultado.get("id"),
-                                "number": s.resultado.get("number"),
-                                "status": s.resultado.get("status")} for s in SEEDS])
+    qa.save(
+        "seed_contratos",
+        [
+            {
+                "code": s.code,
+                "bucket": s.bucket,
+                "id": s.resultado.get("id"),
+                "number": s.resultado.get("number"),
+                "status": s.resultado.get("status"),
+            }
+            for s in SEEDS
+        ],
+    )
     contar()
 
     if qa.FINDINGS:

@@ -985,9 +985,7 @@ async def quote_extension(
     root_start = await repository.get_root_start_date(
         db, company_id=company_id, contract_id=contract_id
     )
-    max_ltv_pct = await _max_ltv_for_contract(
-        db, company_id=company_id, contract_id=contract_id
-    )
+    max_ltv_pct = await _max_ltv_for_contract(db, company_id=company_id, contract_id=contract_id)
     quote = rules.quote_extension(
         capital_balance=m["capital_balance"],
         appraisal_value=m["appraisal_value"],
