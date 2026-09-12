@@ -1,0 +1,21 @@
+-- =====================================================================
+-- 00057_drop_old_name_index.sql — la contracción de 00056.
+--
+-- `ix_customer_name` indexa `to_tsvector('spanish', full_name)` SIN
+-- unaccent. Desde 00056 ninguna consulta usa esa expresión: el buscador
+-- pasa por `f_unaccent` y tiene su propio índice
+-- (`ix_customer_name_unaccent`), comprobado con EXPLAIN.
+--
+-- Un índice que nadie usa no es gratis: ocupa espacio y encarece CADA
+-- escritura en `customer` — cada alta y cada edición de cliente paga por
+-- mantenerlo al día para nada.
+--
+-- POR QUÉ VA EN SU PROPIA MIGRACIÓN Y NO DENTRO DE 00056: el orden de
+-- despliegue del proyecto es expandir → desplegar → contraer. Cuando se
+-- aplicó 00056, el backend que estaba corriendo todavía consultaba por la
+-- expresión vieja; borrarlo ahí habría dejado el buscador en vivo haciendo
+-- seq scan hasta el deploy. Ya desplegado (`43fdc80`) y verificado en vivo
+-- —14 de 14 comprobaciones con apellidos con eñe—, sobra.
+-- =====================================================================
+
+drop index if exists public.ix_customer_name;
