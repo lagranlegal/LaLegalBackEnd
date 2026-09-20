@@ -43,6 +43,15 @@ Entidades DISTINTAS: art. contrato = prenda en garantía (categoría+descripció
 Principal (Joyería, Tecnología) → Secundaria (Oro, Plata) → Terciaria (Cadena, Anillo). Todas creadas dinámicamente por empresa. Cada una con letra de código (1–3 chars, única entre hermanas de la rama). No se eliminan con histórico: se inactivan. Catálogo compartido empeño+tienda.
 
 ### Codificación de artículos de inventario
+> ⚠️ **SUPERADO — este párrafo describe el esquema de PIEZA ÚNICA, que ya no existe.** Se dejó como registro de la decisión original (14/08/2026). **El esquema vigente lo define `app/modules/inventory/rules.py`** (`build_product_code` / `build_lot_code`) y son DOS códigos encadenados, porque el modelo se partió en producto + lote:
+>
+> - **Producto (SKU):** `[Cat1][Cat2][Cat3][Consecutivo 4]` → `JAO0007`. **SIN letra de proveedor** — el proveedor pertenece al lote, no al producto: el mismo producto puede comprarse a varios.
+> - **Lote:** `{SKU}-{lote 2 dígitos}{letra de origen}` → `JAO0007-01I` · `JAO0007-03M` · `JAO0007-01R`. Es el que va en la etiqueta.
+> - **Cinco orígenes**, no dos: `R` remate · `P` propio (inventario inicial o sobrante de conteo, 00033) · `T` transformado (00039) · `D` devuelto por cliente (00044) · cualquier otra letra = proveedor. Las **cuatro** primeras están reservadas (`RESERVED_SUPPLIER_LETTERS` en `catalogs/schemas.py`) y se validan **solo al escribir**: un proveedor que ya tuviera una sigue funcionando, porque los códigos emitidos son inmutables y están impresos en la mercancía.
+> - El precio vive en el **producto** (aplica a todos sus lotes); el costo, en el **lote**.
+>
+> *Si vas a documentar la codificación, lee `rules.py` — no este párrafo. Ya indujo un error.*
+
 `[Letra Cat1][Cat2][Cat3][Consecutivo 4 dígitos][Letra proveedor | R]` → **DECIDIDO:** consecutivo 0001 y sufijo **R** para remates. Ej.: **JOC0001I** (compra a proveedor I) / **JOC0001R** (remate). Consecutivo por prefijo+empresa con contador transaccional. Código ≠ id técnico (UUID), inmutable una vez emitido. **Costos DECIDIDOS:** identificación específica — cada pieza/lote conserva su costo real de compra (estándar joyero, NIIF); accesorios por lote FIFO; nunca promediar.
 
 ### Venta vs. Movimiento de caja
@@ -82,7 +91,7 @@ Contratos, Inventario, Clientes (ficha única + historial cruzado contratos+comp
 1. ¿Venta de mostrador sin cliente permitida? (recomendado: sí, cliente opcional). Política de devoluciones de ventas.
 2. Recategorización de artículo: propuesta "el código emitido no cambia" — validar formalmente.
 3. Celdas DEFINIR de la matriz de permisos para Moderador (rematar / caja / reportes) — es matriz inicial editable, pero conviene fijar el arranque.
-4. Insumos no técnicos para F0: nombre/marca y dominio de la plataforma, proveedor de correo transaccional (recomendado Resend o SMTP propio en Supabase Auth), datos de la empresa piloto, cuentas de GitHub/Supabase/Fly/Vercel.
+4. Insumos no técnicos para F0: ~~nombre/marca y dominio de la plataforma~~ (**resuelto el 12/09/2026: la plataforma se llama _Prendo_**; paleta esmeralda y logo en `frontend-starter/docs/DESIGN_SYSTEM.md` §1-bis, pendiente de aplicar al código. Dominio: registrar `prendo.com.co`; `prendo.co` estaba en `pendingDelete` y caía ~16/09 — comprobar con `whois -h whois.registry.co`, nunca con el `whois` del sistema, que para `.co` cae a IANA y devuelve datos del TLD), proveedor de correo transaccional (recomendado Resend o SMTP propio en Supabase Auth), datos de la empresa piloto, cuentas de GitHub/Supabase/Fly/Vercel.
 
 ## 7. Entregables ya producidos (en la carpeta del proyecto)
 1. **Analisis_Arquitectura_Compraventa_SaaS.docx** (v1.1, 13 págs.): visión, módulos, definiciones funcionales (secciones 3.4 estados/intereses, 3.5 remate asistido, 3.6 venta vs caja, 3.7 cierre, 3.8 suscripciones), 3 rutas de arquitectura + comparativa (Ruta A aprobada), modelo de datos, seguridad, roadmap, riesgos, pendientes.
