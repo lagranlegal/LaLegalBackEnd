@@ -29,7 +29,7 @@ def create_app() -> FastAPI:
         cors_allow_origins=settings.cors_allow_origins, environment=settings.environment
     )
 
-    app = FastAPI(title="Compraventa Backend", version="0.1.0")
+    app = FastAPI(title="Prendo API", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,

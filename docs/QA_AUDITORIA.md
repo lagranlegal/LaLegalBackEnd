@@ -113,6 +113,37 @@ Las dos pantallas que a 360px todavía tienen contenido más ancho que el viewpo
 
 ---
 
+## Hallazgos sueltos — 20/09/2026 (fuera de fase)
+
+Salieron mientras se preparaban los insumos de la guía de usuario leyendo el código pantalla por pantalla.
+No son de una fase: son de comparar el catálogo de errores del front contra lo que el backend emite de verdad.
+**Ninguno rompe nada visible** — el mensaje del backend igual llega y se muestra — pero los tres impiden que
+la UI reaccione *por código*, que es la regla del proyecto (`errors.ts`, regla 9 de `CLAUDE.md`).
+
+| # | Hallazgo | Dónde | Gravedad |
+|---|---|---|---|
+| F20-01 | **`ALREADY_CLOSED_TODAY` no coincide con lo que emite el backend.** El front cataloga `ALREADY_CLOSED_TODAY`; el backend emite **`CASH_SESSION_ALREADY_CLOSED_TODAY`**. Como `parseApiError` solo tipa lo que está en `KNOWN_CODES`, cae a `UNKNOWN` | `frontend-starter/src/lib/api/errors.ts:19` vs `app/modules/cashbox/service.py:117-119` | Media — ninguna rama de UI puede reaccionar al caso |
+| F20-02 | **`IDEMPOTENCY_IN_PROGRESS` no está en el catálogo del front.** El backend lo emite con un mensaje claramente de mostrador: *«Esta misma operación ya se está registrando. No la repitas»*. Es el caso del doble clic en "Vender" | `app/core/errors.py:162-168` | Media — es un error de usuario real, no técnico |
+| F20-03 | **`MULTIPLE_REGISTERS_NOT_SUPPORTED` tampoco está** | `app/core/errors.py:76` | Baja — el propio docstring dice que hoy no se llega por la API |
+
+**Por qué importa más de lo que parece.** El proyecto ya tiene escrito que *"los códigos de error son un contrato"*
+y que toda aserción de QA va contra el `code`, nunca contra el status. Un código que el backend emite y el
+front no cataloga es un contrato roto de un solo lado: el test que lo cubriera pasaría igual.
+
+**Arreglo sugerido** (no aplicado — sigue la regla de reportar todo y arreglar solo lo crítico): agregar los
+tres a `KNOWN_CODES` y, para F20-01, decidir cuál de los dos nombres es el bueno y alinear el otro.
+
+### Un hallazgo de método, no de código
+
+La guía de usuario tiene escrita la regla *"cada tabla de campos se escribe leyendo el schema de Zod del
+formulario"*. **Esa regla solo se puede cumplir en la mitad de las pantallas:** en todo `features/` hay
+**13 schemas de Zod**, y el resto de los formularios valida a mano con `useState` y chequeos en el submit.
+Para esas pantallas, "obligatorio u opcional" hay que sacarlo del handler de submit y del backend, no de un
+schema que no existe. Conviene corregir la regla antes de escribir las 13 pantallas que faltan, o la guía va
+a afirmar cosas que nadie verificó.
+
+---
+
 ## Fase 10 — Concurrencia y volumen (09/09/2026)
 
 **Veredicto: la integridad aguanta, el manejo del conflicto no.** Cinco cajeros vendiendo la última unidad al mismo tiempo producen **una sola venta** — pero los cuatro que pierden la carrera reciben un `500`, no un error de negocio. Y la promesa de idempotencia se rompe justo en el caso para el que existe.
