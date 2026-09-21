@@ -132,6 +132,20 @@ Los tres primeros son defectos del front que un usuario sí sufre.
 | F21-08 | **La auditoría muestra los movimientos de capital sin traducir.** `capital/service.py:193` escribe `action=direction` (`contribution`/`withdrawal`), y esos códigos no están en `AUDIT_ACTION_LABELS`. Además `accounts` y `capital` faltan en `BUSINESS_MODULE_LABELS`, así que la matriz de permisos y la auditoría los muestran en inglés. Un aporte del dueño se lee literalmente `contribution · capital` | `audit/labels.ts:17-78` · `lib/businessModules.ts:16-29` · `capital/service.py:193-199` | Baja — dos líneas de arreglo, pero se ve en dos pantallas |
 | F21-09 | **`contracts.override_ltv` se reparte automáticamente a todo rol con `contracts.create`**, incluido el Asesor. Es un permiso `is_special` que autoriza prestar por encima del tope de la categoría; si lo tiene todo el mostrador, el LTV deja de ser un límite | `00051_contract_extend_loan.sql:113-119` · `platform/service.py:27-43` | **Media** — decisión de producto, no defecto técnico |
 
+### Pendiente operativo que ningún agente puede cerrar
+
+El backend quedó **commiteado y pusheado pero sin desplegar a Fly** desde el 20/09. `flyctl` está instalado
+en la máquina de Mateo pero **sin sesión** (`fly auth whoami` → *no access token available*), y
+`fly auth login` abre el navegador, así que no hay forma de hacerlo desde una sesión de Claude Code.
+
+```
+fly auth login
+fly deploy --config fly.dev.toml --app compraventa-backend-dev
+```
+
+**No urge.** El único cambio pendiente de desplegar es `FastAPI(title="Prendo API")` — el título que sale en
+`/openapi.json` y en Swagger. No toca el esquema, así que el front no depende de él.
+
 **Método.** Ninguno de estos se encontró leyendo el código a secas: salieron de **escribir la guía y después verificar cada afirmación contra el código**. Documentar el producto es una forma de auditarlo — la guía obliga a decir qué pasa exactamente, y ahí es donde se ve que el front y el backend no dicen lo mismo.
 
 **Sin aplicar**, según la regla de reportar todo y arreglar solo lo crítico. F21-01 es el que más conviene arreglar: es una línea de texto.
