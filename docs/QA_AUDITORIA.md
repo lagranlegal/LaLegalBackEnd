@@ -113,6 +113,25 @@ Las dos pantallas que a 360px todavía tienen contenido más ancho que el viewpo
 
 ---
 
+## Hallazgos sueltos — 21/09/2026 (al escribir la guía de usuario)
+
+Salieron al verificar, **contra el código**, las secciones de Caja y Ventas recién escritas para la guía.
+Los tres primeros son defectos del front que un usuario sí sufre.
+
+| # | Hallazgo | Dónde | Gravedad |
+|---|---|---|---|
+| F21-01 | **El buscador de artículos de la venta dice «(Enter agrega)» y es falso.** No hay handler de teclas, y el input vive dentro del `<form onSubmit>`: presionar Enter **intenta registrar la venta**, no agregar el artículo. El texto de ayuda induce justo la acción peligrosa | `SaleFormPage.tsx:151` (placeholder) · `ItemPicker.tsx:36-60` · `SearchInput.tsx:39-47` | **Alta** — el mensaje empuja a disparar una venta a medio armar |
+| F21-02 | **Anular una venta exige caja abierta y el aviso no lo dice.** El backend lanza `CASH_SESSION_NOT_OPEN` antes de tocar nada, sin importar el medio de pago; el front no mapea ese código y muestra *«No se pudo anular la venta. Intenta de nuevo.»* | `sales/service.py:384-386` vs `SaleReceiptDialog.tsx:73-75` | **Media** — el usuario queda sin saber qué hacer |
+| F21-03 | **Abrir y cerrar caja tapan el mensaje del backend con un genérico.** `CASH_SESSION_ALREADY_OPEN` y `CASH_SESSION_ALREADY_CLOSED_TODAY` traen texto útil, pero el diálogo pinta *«No se pudo abrir la caja. Intenta de nuevo.»* | `OpenSessionDialog.tsx:135-139` · `cashbox/api.ts:52-76` (sin `onError`) | **Media** — relacionado con F20-01 |
+| F21-04 | **La cantidad de una línea de venta con fracciones es un input no controlado.** Se puede escribir 50 y verlo en pantalla aunque el valor quede acotado a 3. El total de arriba sí muestra lo correcto, pero la línea miente | `SaleFormPage.tsx:179` (`defaultValue`) | Baja |
+| F21-05 | **`deactivate_document_template` existe en el catálogo de auditoría pero ningún botón de la UI lo dispara** | `audit/labels.ts:67` vs `DocumentTemplatesPage.tsx` | Baja — verificar si quedó solo en el backend |
+
+**Método.** Ninguno de estos se encontró leyendo el código a secas: salieron de **escribir la guía y después verificar cada afirmación contra el código**. Documentar el producto es una forma de auditarlo — la guía obliga a decir qué pasa exactamente, y ahí es donde se ve que el front y el backend no dicen lo mismo.
+
+**Sin aplicar**, según la regla de reportar todo y arreglar solo lo crítico. F21-01 es el que más conviene arreglar: es una línea de texto.
+
+---
+
 ## Hallazgos sueltos — 20/09/2026 (fuera de fase)
 
 Salieron mientras se preparaban los insumos de la guía de usuario leyendo el código pantalla por pantalla.
