@@ -132,19 +132,74 @@ Los tres primeros son defectos del front que un usuario sí sufre.
 | F21-08 | **La auditoría muestra los movimientos de capital sin traducir.** `capital/service.py:193` escribe `action=direction` (`contribution`/`withdrawal`), y esos códigos no están en `AUDIT_ACTION_LABELS`. Además `accounts` y `capital` faltan en `BUSINESS_MODULE_LABELS`, así que la matriz de permisos y la auditoría los muestran en inglés. Un aporte del dueño se lee literalmente `contribution · capital` | `audit/labels.ts:17-78` · `lib/businessModules.ts:16-29` · `capital/service.py:193-199` | Baja — dos líneas de arreglo, pero se ve en dos pantallas |
 | F21-09 | **`contracts.override_ltv` se reparte automáticamente a todo rol con `contracts.create`**, incluido el Asesor. Es un permiso `is_special` que autoriza prestar por encima del tope de la categoría; si lo tiene todo el mostrador, el LTV deja de ser un límite | `00051_contract_extend_loan.sql:113-119` · `platform/service.py:27-43` | **Media** — decisión de producto, no defecto técnico |
 
+### 🔴 F21-10 — El job nocturno resucitaba contratos reemplazados (21/09/2026)
+
+**El más grave de toda esta tanda, y el único con datos posiblemente dañados.**
+
+`fly.dev.toml` y `docs/ARCHITECTURE.md:221-237` ya advertían que la Machine programada del job nocturno
+**no se actualiza con `fly deploy`**: queda clavada a la imagen con la que se creó. La de
+`compraventa-backend-dev` se creó el **08/09/2026**.
+
+El **10/09** entró el commit `87ce644` (ampliar el préstamo) con este cambio en
+`app/modules/contracts/rules.py:18`:
+
+```diff
+- _TERMINAL_STATUSES = {"paid", "auctioned"}
++ _TERMINAL_STATUSES = {"paid", "auctioned", "superseded"}
+```
+
+`superseded` es el estado del contrato viejo cuando se amplía un préstamo. Y la consulta que alimenta el
+job **no lo excluye**:
+
+```sql
+-- repository.list_active_contracts_for_recompute
+where status not in ('paid', 'auctioned')
+```
+
+O sea: el job **sí toma** los contratos `superseded`, y lo único que impedía recalcularlos era la guarda de
+`compute_status` — que es exactamente lo que la imagen del 08/09 no tenía.
+
+**Consecuencia:** desde el 10/09, cada noche el job tomó los contratos reemplazados por una ampliación y los
+recalculó a `active` / `in_arrears` / `in_extension`, **como si siguieran vivos**. Eso infla la cartera y
+puede hacer que un contrato ya sustituido aparezca en «Listos para remate».
+
+**Arreglado el 21/09:** la Machine se actualizó a la imagen desplegada ese día
+(`fly machine update 805747f63d17d8 --image …`), verificando que el `schedule: daily` sobreviviera — si se
+pierde, el job deja de correr y **su ausencia es silenciosa**.
+
+**SIN VERIFICAR, y es lo primero que hay que mirar:** cuántos contratos quedaron con el estado equivocado.
+Consulta de solo lectura para dimensionarlo — la dev remota tiene datos reales, así que solo contar:
+
+```sql
+-- contratos que tienen un sucesor (fueron ampliados) pero NO están en superseded
+select c.company_id, count(*)
+from public.contract c
+where exists (select 1 from public.contract s where s.superseded_contract_id = c.id)
+  and c.status <> 'superseded'
+group by c.company_id;
+```
+
+*(Verificar el nombre real de la columna que enlaza el sucesor antes de correrla — sale de la migración
+`00051_contract_extend_loan.sql`.)*
+
+Si el conteo da cero, nadie usó la ampliación en esos once días y no hay nada que reparar.
+
+**Y un hallazgo de diseño que queda abierto:** la consulta filtra por lista negra
+(`not in ('paid','auctioned')`) en vez de por `_TERMINAL_STATUSES`. **Cualquier estado terminal nuevo va a
+repetir este bug exacto.** Conviene que la consulta y la constante sean la misma fuente.
+
+---
+
 ### Pendiente operativo que ningún agente puede cerrar
 
-El backend quedó **commiteado y pusheado pero sin desplegar a Fly** desde el 20/09. `flyctl` está instalado
-en la máquina de Mateo pero **sin sesión** (`fly auth whoami` → *no access token available*), y
-`fly auth login` abre el navegador, así que no hay forma de hacerlo desde una sesión de Claude Code.
+✅ **Resuelto el 21/09/2026.** Mateo se autenticó en Fly y el backend quedó desplegado. Verificado sobre lo
+servido: `/openapi.json` responde `title: Prendo API` y `/api/v1/health` responde `ok`.
 
-```
-fly auth login
-fly deploy --config fly.dev.toml --app compraventa-backend-dev
-```
-
-**No urge.** El único cambio pendiente de desplegar es `FastAPI(title="Prendo API")` — el título que sale en
-`/openapi.json` y en Swagger. No toca el esquema, así que el front no depende de él.
+**La lección operativa:** desplegar el backend **no es un solo comando**. `fly deploy` actualiza la app pero
+**no la Machine programada del job nocturno** — eso salió a la luz justo en este despliegue y es el origen
+de F21-10. Después de cada `fly deploy` que cambie lógica del job (`recompute_all_statuses`,
+`expire_overdue_subscriptions` o lo que llamen), hay que actualizar la Machine a mano y **verificar que el
+`schedule` sobreviva**.
 
 **Método.** Ninguno de estos se encontró leyendo el código a secas: salieron de **escribir la guía y después verificar cada afirmación contra el código**. Documentar el producto es una forma de auditarlo — la guía obliga a decir qué pasa exactamente, y ahí es donde se ve que el front y el backend no dicen lo mismo.
 
