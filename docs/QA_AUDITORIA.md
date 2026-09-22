@@ -132,9 +132,11 @@ Los tres primeros son defectos del front que un usuario sí sufre.
 | F21-08 | **La auditoría muestra los movimientos de capital sin traducir.** `capital/service.py:193` escribe `action=direction` (`contribution`/`withdrawal`), y esos códigos no están en `AUDIT_ACTION_LABELS`. Además `accounts` y `capital` faltan en `BUSINESS_MODULE_LABELS`, así que la matriz de permisos y la auditoría los muestran en inglés. Un aporte del dueño se lee literalmente `contribution · capital` | `audit/labels.ts:17-78` · `lib/businessModules.ts:16-29` · `capital/service.py:193-199` | Baja — dos líneas de arreglo, pero se ve en dos pantallas |
 | F21-09 | **`contracts.override_ltv` se reparte automáticamente a todo rol con `contracts.create`**, incluido el Asesor. Es un permiso `is_special` que autoriza prestar por encima del tope de la categoría; si lo tiene todo el mostrador, el LTV deja de ser un límite | `00051_contract_extend_loan.sql:113-119` · `platform/service.py:27-43` | **Media** — decisión de producto, no defecto técnico |
 
-### 🔴 F21-10 — El job nocturno resucitaba contratos reemplazados (21/09/2026)
+### ✅ F21-10 — El job nocturno resucitaba contratos reemplazados (21/09/2026 · causa, datos y diseño cerrados)
 
-**El más grave de toda esta tanda, y el único con datos posiblemente dañados.**
+**El más grave de toda esta tanda, y el único que dañó datos de verdad.** Causa arreglada, **4 contratos
+reparados y verificados**, hallazgo de diseño cerrado con test, y guardián puesto. Queda abierto un solo
+punto, al final: la Machine del job sigue sin process group.
 
 `fly.dev.toml` y `docs/ARCHITECTURE.md:221-237` ya advertían que la Machine programada del job nocturno
 **no se actualiza con `fly deploy`**: queda clavada a la imagen con la que se creó. La de
@@ -167,26 +169,136 @@ puede hacer que un contrato ya sustituido aparezca en «Listos para remate».
 (`fly machine update 805747f63d17d8 --image …`), verificando que el `schedule: daily` sobreviviera — si se
 pierde, el job deja de correr y **su ausencia es silenciosa**.
 
-**SIN VERIFICAR, y es lo primero que hay que mirar:** cuántos contratos quedaron con el estado equivocado.
-Consulta de solo lectura para dimensionarlo — la dev remota tiene datos reales, así que solo contar:
+**✅ MEDIDO Y REPARADO el 21/09/2026. Hubo daño: 4 contratos, el 100 % de las ampliaciones que existen.**
+
+**El borrador de esta consulta tenía la columna equivocada.** `superseded_contract_id` **no existe**. La que
+enlaza sucesor → padre es **`parent_contract_id`** (`supabase/migrations/00051_contract_extend_loan.sql:74`);
+`root_contract_id` es la raíz de la cadena y **no sirve** para este conteo — en un sucesor apunta al abuelo.
+La consulta buena, de solo lectura:
 
 ```sql
 -- contratos que tienen un sucesor (fueron ampliados) pero NO están en superseded
 select c.company_id, count(*)
 from public.contract c
-where exists (select 1 from public.contract s where s.superseded_contract_id = c.id)
+where exists (select 1 from public.contract s where s.parent_contract_id = c.id)
   and c.status <> 'superseded'
 group by c.company_id;
 ```
 
-*(Verificar el nombre real de la columna que enlaza el sucesor antes de correrla — sale de la migración
-`00051_contract_extend_loan.sql`.)*
+| Empresa | Nº | status hallado | `extension_ends_at` | capital |
+|---|---|---|---|---|
+| Empresa Demo Front | 1 | `in_extension` | **2026-10-16** | 1.000.000 |
+| Empresa Demo Front | 20 | `active` | — | 2.000.000 |
+| **LA GRAN LEGAL** | 28 | `active` | — | 1.000.000 |
+| ZZ QA — auditoría 08/09 | 9 | `active` | — | 1.000.000 |
 
-Si el conteo da cero, nadie usó la ampliación en esos once días y no hay nada que reparar.
+**El dato que cierra el caso:** había **cero** contratos `superseded` en toda la base y **4** ampliaciones en
+total. No fue daño parcial — **no hubo ni una ampliación sana**. La función nació el 10/09 y el bug nació el
+mismo día, así que la hipótesis optimista de este hallazgo ("si da cero, nadie la usó") quedó descartada por
+el lado contrario. De los cuatro, **uno solo es de un cliente real**: el Nº 28 de LA GRAN LEGAL.
 
-**Y un hallazgo de diseño que queda abierto:** la consulta filtra por lista negra
-(`not in ('paid','auctioned')`) en vez de por `_TERMINAL_STATUSES`. **Cualquier estado terminal nuevo va a
-repetir este bug exacto.** Conviene que la consulta y la constante sean la misma fuente.
+**La bomba con fecha que tenía, y que era lo que apuraba.** El Nº 1 quedó `in_extension` con prórroga hasta
+el **16/10**: a partir del **17/10 entraba solo a «Listos para remate»** sin que nadie tocara nada — un
+contrato ya sustituido, con sus prendas en `transferred`, ofrecido para rematar.
+
+**Cartera inflada: 5.000.000 COP**, y contada **doble**, porque el sucesor también estaba vivo (20,5 % de la
+cartera de Empresa Demo Front; 4,7 % de la de LA GRAN LEGAL).
+
+**Lo que el daño NO alcanzó**, verificado: el job escribe solo `status` y `extension_ends_at`
+(`repository.update_contract_status`), no capital ni fechas ni ancla de interés; **no hubo un solo abono
+registrado sobre ninguno de los cuatro padres** después del recargo, así que nunca se propagó a plata; las
+prendas ya estaban en `contract_item.status='transferred'` y la foto firmada del Nº 1 quedó intacta.
+
+**La reparación:** `scripts/qa/reparar_f21_10.sql` — acotada a los 4 ids (el predicado es el que hay que
+**vigilar**, no el que se ejecuta a ciegas sobre datos reales), en una transacción, poniendo `status =
+'superseded'` y `extension_ends_at = null`. El `null` no era opcional: dejarlo mantenía la bomba del 17/10
+aunque el status ya dijera `superseded`, y dejaba una fila contradiciendo la invariante de que un estado
+terminal no tiene prórroga viva. Va con **4 filas de `audit_log`** (`action='correct_contract_status'`,
+`user_id` NULL a propósito: no lo hizo un usuario de la empresa), porque ningún servicio las iba a generar y
+la regla 6 de `CLAUDE.md` exige auditar toda acción sensible; su etiqueta se agregó a
+`frontend-starter/src/features/audit/labels.ts` o la pantalla la mostraría en crudo.
+
+**Verificado después de aplicarla:** los 4 en `superseded`, las tres invariantes en cero (contrato con
+sucesor fuera de `superseded`; terminal con prórroga viva; en cola de remate con sucesor) y la cartera de las
+tres empresas bajando exactamente a los valores reales (11.637.222 / 20.250.000 / 12.450.000).
+**La base local no necesitó reparación** — verificado, no supuesto: sus 9 contratos con sucesor están todos
+en `superseded`, porque ahí no corre ningún job y los datos los crea el código actual, ya con la guarda.
+
+**⚠️ Corrección al relato de este hallazgo: el job nocturno NO era el único vector.** `get_contract`
+(`service.py:474-499`) también recalcula y **persiste** el status en cada lectura de detalle, así que durante
+esos once días un simple `GET /contracts/{id}` bastaba para resucitar un contrato reemplazado, sin esperar a
+la medianoche — y la app servida venía sin la guarda hasta el deploy del 21/09. **No se puede saber cuál de
+los dos vectores causó cada fila:** el job no escribe en `audit_log` (`app/jobs/nightly.py`), así que no dejó
+rastro forense. Los dos están cerrados hoy por la guarda de `compute_status`.
+
+**El guardián:** `scripts/qa/verificar_cadenas.py`. Esto fue invisible once días porque **nada avisaba**;
+es la misma forma de `verificar_sedes.py` — una invariante sobre datos reales que un test de CI contra base
+efímera nunca vería. Vigila tres: sucesor ⇒ `superseded`; `contract_item` en `transferred` ⇒ contrato
+`superseded`; terminal ⇒ sin `extension_ends_at`. Sale con **código 1** si alguna se rompe.
+Los estados terminales salen de `rules.TERMINAL_STATUSES`, **no de una lista escrita a mano** — que es
+exactamente el error que costó los once días. Solo lectura verificada, no asumida (`SET TRANSACTION READ
+ONLY` por transacción, porque bajo Supavisor en modo transacción la sesión no es nuestra, más `rollback()`
+explícito), y el reporte no imprime datos personales: id, número, empresa y estado, nada más.
+
+**La detección se ejerció de verdad**, que es lo que separa un guardián de un archivo que siempre dice que
+sí: como la remota ya estaba reparada, se fabricaron las tres roturas en la base **local** (`QA_DATABASE_URL`
+permite apuntarlo a otra base; por defecto va a la dev remota) y el script las cazó las tres con exit 1.
+Sembrado limpiado después; hoy sale en verde contra las dos bases.
+
+🔴 **Queda pendiente ponerlo en un cron.** Sin eso vigila solo cuando alguien se acuerda, que es el problema
+original con otra ropa.
+
+**Cuatro invariantes más, propuestas y no implementadas** (hoy las cuatro dan cero, medido):
+(1) la inversa — un `superseded` **sin** sucesor, que sería plata prestada desaparecida del sistema si el
+recargo fallara a mitad; es la más preocupante. (2) Un `superseded` con prendas que **no** estén
+`transferred`: una prenda en `in_custody` bajo un contrato reemplazado no la reclama nadie. (3) **Bifurcación
+de cadena** — dos hijos con el mismo `parent_contract_id`, o sea dos deudas vivas sobre la misma prenda con
+el cupo LTV calculado una sola vez. (4) Coherencia de `root_contract_id` (que sea
+`coalesce(padre.root_contract_id, padre.id)`, nunca NULL en un sucesor, y que la cadena no cruce
+`company_id`): un `root` mal puesto mueve la ventana de 28 días, que es lo que `00051` más protege.
+
+**Y un riesgo estructural que sigue abierto:** la Machine `nightly-job` **no tiene process group** (campo
+vacío en `fly machine list`). Esa es exactamente la característica por la que el 27/08 alguien la borró
+creyéndola "máquina huérfana" — el borrado que dejó las suscripciones sin expirar nunca. El job nocturno es
+hoy indistinguible de basura a simple vista, y ya lo borraron una vez por eso.
+
+**El hallazgo de diseño — ✅ RESUELTO el 21/09/2026.** La consulta filtraba por lista negra
+(`not in ('paid','auctioned')`) en vez de por `_TERMINAL_STATUSES`: **cualquier estado terminal nuevo iba a
+repetir este bug exacto.** Ahora la consulta y la constante son la misma fuente:
+
+- `rules._TERMINAL_STATUSES` pasó a ser **pública** — `rules.TERMINAL_STATUSES` (`frozenset`) — porque dejó
+  de ser un detalle interno de `compute_status`: es el criterio que comparten la guarda y la consulta.
+- `repository.list_active_contracts_for_recompute` la usa como parámetro expandido
+  (`where status not in :terminal_statuses` + `bindparam(..., expanding=True)`, el mismo patrón que
+  `identity.set_role_permissions` e `inventory.list_items`), leyéndola **en cada llamada** — no una copia al
+  importar, para que monkeypatchearla en un test y agregarle un estado sean lo mismo.
+- Agregar un estado terminal nuevo a la constante ahora **alcanza**: no hay un segundo lugar que tocar.
+
+**El test de regresión:** `tests/unit/test_contract_recompute_query.py`. Corre la consulta contra una sesión
+espía (sin Postgres, así no se salta donde no hay Docker) y saca del SQL el conjunto que el `not in` deja
+afuera. No repite la lista de estados — la deriva de la constante; repetirla reintroduciría el mismo
+acoplamiento. El test central **inventa un cuarto estado terminal** vía `monkeypatch` y exige que la consulta
+lo excluya sin que nadie haya tocado el SQL.
+
+Verificado a la inversa, que es lo que lo vuelve un test:
+
+| Versión de la consulta | Resultado |
+|---|---|
+| La vieja, `not in ('paid','auctioned')` | **3 failed** — `assert {'auctioned','paid'} == {'auctioned','paid','superseded'}` |
+| Lista a mano pero hoy completa, `('paid','auctioned','superseded')` | **2 failed** — el estado inventado se cuela igual |
+| La arreglada, derivada de la constante | 3 passed |
+
+El caso del medio es el que importa: una lista escrita a mano **aunque hoy esté completa** sigue fallando,
+porque lo que se prueba es el invariante ("agregar un estado terminal basta"), no los tres valores de hoy.
+
+Suite completa con Docker arriba: **425 passed** (422 + los 3 nuevos), `ruff check` / `ruff format --check`
+limpios y `mypy app` sin hallazgos.
+
+**Lo que NO se tocó, a propósito** (mismo patrón, otra decisión de negocio — no es el filtro del job):
+`service.py:643` rechaza abonos con `status in ("paid", "auctioned")` —  sin `superseded`, así que un
+contrato ya reemplazado todavía admitiría un abono— y `service.py:1004` repite los tres a mano para el
+cupo de ampliación. Ninguno de los dos es "los terminales" en el sentido de la constante (uno es "cerrado
+para abonos"), así que colapsarlos contra `TERMINAL_STATUSES` cambia comportamiento y pide su propia tanda.
 
 ---
 
@@ -200,6 +312,22 @@ servido: `/openapi.json` responde `title: Prendo API` y `/api/v1/health` respond
 de F21-10. Después de cada `fly deploy` que cambie lógica del job (`recompute_all_statuses`,
 `expire_overdue_subscriptions` o lo que llamen), hay que actualizar la Machine a mano y **verificar que el
 `schedule` sobreviva**.
+
+🔴 **Y no es solo `fly deploy`: `fly secrets set` TAMPOCO la actualiza.** Descubierto el 21/09/2026 al
+agregar `CORS_ALLOW_ORIGINS` para el dominio propio. El rolling update dijo, textual,
+`Updating existing machines … > Updating 83667db7994948 [app]` — **una sola máquina**. Medido después:
+`nightly-job` quedó con `updated_at` en `21:38:06Z` y la máquina `app` en `22:02:37Z`, o sea que la del job
+**no recibió el secret**. La causa es la misma que la del borrado del 27/08: `nightly-job` **no tiene process
+group**, así que las operaciones que iteran por grupo la saltan.
+
+Para CORS da igual —el job no hace peticiones de navegador—, pero **la próxima rotación de `DATABASE_URL` o
+de `SUPABASE_SERVICE_ROLE_KEY` deja al job corriendo con la credencial vieja**, y el job no escribe en
+`audit_log`, así que su fallo (o peor, su éxito contra algo que ya no corresponde) no deja rastro.
+
+**La regla que queda:** después de **cualquier** cambio de secrets o de imagen, comprobar las DOS máquinas,
+no la salida del comando. `flyctl machine list --app compraventa-backend-dev --json` y comparar
+`updated_at`. Y darle un process group a `nightly-job` cerraría de raíz esta familia entera de problemas
+—el borrado por "huérfana", el `fly deploy` que la saltea y este— que ya costó dos incidentes.
 
 **Método.** Ninguno de estos se encontró leyendo el código a secas: salieron de **escribir la guía y después verificar cada afirmación contra el código**. Documentar el producto es una forma de auditarlo — la guía obliga a decir qué pasa exactamente, y ahí es donde se ve que el front y el backend no dicen lo mismo.
 
@@ -325,14 +453,14 @@ El resto del comportamiento es correcto y coherente con lo documentado: `/sessio
 
 **Fix sugerido:** mostrar la fecha en el banner cuando la sesión no es de hoy («Caja abierta desde ayer 08/09, 4:38 PM»), que es dato que ya viaja en la respuesta.
 
-### F9-02 · Los enlaces de acceso mandan a la URL de preview, no a la del cliente — MEDIA, abierto
+### F9-02 · Los enlaces de acceso mandaban a la URL de preview, no a la del cliente — MEDIA, ✅ CERRADO (verificado el 21/09/2026)
 
 ```
 el enlace apunta a : https://la-legal-front-end-git-dev-mateos-projects-85710491.vercel.app
 la app del cliente : https://la-legal-front-end.vercel.app
 ```
 
-`FRONTEND_URL` en Fly sigue apuntando a la URL de preview (confirmado con `fly ssh console -C "printenv FRONTEND_URL"`). Afecta a **los dos** caminos de alta: invitar y recuperar.
+`FRONTEND_URL` en Fly apuntaba entonces a la URL de preview (confirmado con `fly ssh console -C "printenv FRONTEND_URL"`). Afectaba a **los dos** caminos de alta: invitar y recuperar. *(Estado hoy: corregido — ver el recuadro al final de este hallazgo.)*
 
 **Por qué importa:**
 
@@ -347,7 +475,28 @@ se pidió  : https://la-legal-front-end.vercel.app/auth/callback
 devolvió  : https://la-legal-front-end.vercel.app/auth/callback   ✓ respetado
 ```
 
-**El cambio es un `fly secrets set FRONTEND_URL=…` y hoy es seguro.** No lo apliqué: es infraestructura.
+**El cambio era un `fly secrets set FRONTEND_URL=…`, y se aplicó.**
+
+> **Corrección del 21/09/2026.** Este hallazgo decía *«no lo apliqué: es infraestructura»*, y **eso era
+> falso**: el secret ya estaba cambiado. Medido contra la app desplegada, no deducido de un commit:
+>
+> ```bash
+> flyctl ssh console -a compraventa-backend-dev -C "printenv FRONTEND_URL"
+> # → https://la-legal-front-end.vercel.app
+> ```
+>
+> O sea: el valor en vivo es la URL que usa el cliente, sin el nombre interno del proyecto ni del dueño.
+> Los tres motivos de arriba (se lee como phishing · marcador equivocado · dos orígenes distintos) ya no
+> aplican.
+>
+> **Por qué el documento se equivocó y por qué importa.** Un hallazgo de infraestructura no deja rastro en
+> el repo: no hay diff que mirar, así que el estado escrito y el estado real se separan **en silencio** y
+> nadie se entera hasta que alguien mide. Esa es la forma exacta del error, y la regla que deja: **el estado
+> de un hallazgo de infraestructura se cierra leyendo el ambiente, nunca el historial de commits.**
+>
+> Lo que sigue abierto no es esto: es que `FRONTEND_URL` **no está en `.env.example`** ni en los comentarios
+> de `fly secrets set` de `fly.dev.toml` / `fly.prod.toml` — ver `frontend-starter/docs/PLAN_MARCA.md`
+> Fase 4.
 
 ### F9-03 · `sale_return` sin traducir en el acta de cierre — BAJA, abierto
 

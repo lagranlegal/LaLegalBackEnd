@@ -38,6 +38,7 @@ El laboratorio (empresas espejo, usuarios por rol, datos sembrados) está descri
 | `verificar_recargo_ancla.js` | Ejerce el recargo sobre un contrato con fecha **pasada**, que es la única forma de distinguir el comportamiento nuevo del viejo (con un contrato de hoy, heredar la fecha y ponerla en hoy dan lo mismo). Siembra por `/contracts/import`. | 11 OK · 0 MAL — contrato del 22/08 ampliado el 11/09 conserva el 22/08 |
 | `ui_caja_cerrada.js` | El punto 5 tal como lo reportó el cliente: *"no muestra un mensaje"*. Va por navegador porque lo único que prueba el arreglo es **ver** el mensaje. Comprueba el aviso preventivo (*"puedes ampliar por transferencia"*), el modal `Caja cerrada` con su CTA, y de paso el piso de tres letras del buscador de clientes. Necesita una empresa con la caja cerrada (`ZZ QA-B`). | 9 OK · 0 MAL |
 | `verificar_regresion_caja.py` | Regresión de los flujos que toca `_resolve_active_register`, contra el backend **desplegado** y con login real del laboratorio. Comprueba los 4 endpoints que cambiaron, que `AccountOut` **no** expone `register_id` (el contrato de la API no cambió) y que contratos/ventas/inventario siguen intactos — esos resuelven la sesión por otro camino (`integration.get_open_session`). | Todo en verde tras `00052` |
+| `verificar_cadenas.py` | **Vigila las invariantes de las cadenas de contratos** (el recargo, `00051`) **sobre los datos vivos**: (1) todo contrato con sucesor está en `superseded` —la columna es `parent_contract_id`, no `root_contract_id`, que es la raíz de la cadena—, (2) ningún `contract_item` en `transferred` cuelga de un contrato que no lo esté, y (3) ningún contrato **terminal** conserva `extension_ends_at`. Los estados terminales salen de `rules.TERMINAL_STATUSES`, **no de una lista escrita a mano** — escribirla a mano es exactamente el error de F21-10. Va por SQL directo (`DATABASE_URL`) en una transacción **`SET TRANSACTION READ ONLY`**, y no imprime ningún dato personal: solo id, número, empresa y estado. Sale con código **1** si algo está roto, así que sirve en un cron. `QA_DATABASE_URL` apunta a otra base (la local de tests) para ejercer la detección. | **F21-10** — los 4 contratos que el job nocturno resucitó (Empresa Demo Front Nº 1 y Nº 20, LA GRAN LEGAL Nº 28, ZZ QA Nº 9), y la prórroga viva del Nº 1. Reparados el 21/09/2026; el script sale en verde desde entonces |
 
 **Playwright — la app en vivo, con login real**
 
@@ -68,6 +69,8 @@ python scripts/qa/map_endpoints.py     # primero: genera el mapa
 python scripts/qa/matrix.py            # ~5 min, 400+ requests contra dev
 python scripts/qa/analyze_matrix.py
 python scripts/qa/concurrencia.py
+python scripts/qa/verificar_sedes.py     # invariante de datos vivos; exit 1 si falla
+python scripts/qa/verificar_cadenas.py   # invariante de datos vivos; exit 1 si falla
 
 node scripts/qa/ui_test.js             # gates de menú y ruta, por rol
 node scripts/qa/ui_sweep.js            # contraste, 12 pantallas × 2 temas
