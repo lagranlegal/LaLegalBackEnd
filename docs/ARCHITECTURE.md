@@ -197,6 +197,25 @@ Ese último renglón es la regla: **traducir a ciegas convertiría un bug de esq
 - **Costos de Fly (verificado en fly.io/docs/about/pricing, agosto 2026):** ya no existe un tier gratis permanente (lo quitaron en 2024); el billing es por segundo mientras la máquina corre, no por mes fijo. Un `shared-cpu-1x`/256MB siempre encendido cuesta ~$2.02/mes; 512MB ~$3.32/mes. `dev` usa `auto_stop_machines=true` + `min_machines_running=0` (`fly.dev.toml`) — se apaga sola sin tráfico, así que en un ambiente de pruebas de uso intermitente el cómputo puede quedar en centavos al mes (con unos segundos de cold start en el primer request tras estar apagada). `prod` usa `min_machines_running=1` (siempre encendida, sin cold start) — esa sí cuesta el precio de lista completo. Aparte: ancho de banda de salida (~$0.02/GB en Norteamérica/Europa) e IP dedicada si se agrega una (no hace falta: Fly da IPv4 compartida + IPv6 gratis por defecto). Total estimado para los dos ambientes juntos con tráfico bajo: unos pocos dólares al mes, no los $8-25/mes que citan blogs de terceros asumiendo tráfico constante en ambos — pero son precios de lista de Fly, no una promesa: confirmar en el dashboard de facturación antes de asumir un número.
 - **`dev` ya está desplegado**: `https://compraventa-backend-dev.fly.dev` (org `personal`, región **`sjc`** — San José, CA; se movió ahí desde `gru`/São Paulo el 27/08/2026 porque la base vive en AWS `us-west-2` y cada consulta cruzaba el continente. `bog`/Bogotá está deprecada en Fly y no acepta recursos nuevos). 1 máquina `shared-cpu-1x`/**512MB** con `auto_stop`/`auto_start`, secrets apuntando al Supabase `dev` (`driyubkodnsqxbtxcmaz`), más una Fly Machine programada (`nightly-job`, `--schedule daily`) para el job nocturno. `prod` queda pendiente de un proyecto Supabase propio antes de desplegarse igual.
 
+  **Dominio propio (21/09/2026).** El backend de dev atiende además en **`https://api-dev.prendo.com.co`**
+  (`flyctl certs add`, más `A 66.241.124.156` y `AAAA 2a09:8280:1::16e:d34e:0` en GoDaddy). El `AAAA` no es
+  opcional: la app tiene IPv4 **compartida** e IPv6 **dedicada**, y sin él Fly pide un TXT de propiedad.
+  `compraventa-backend-dev.fly.dev` **sigue vivo** y no se apagó, pero el front ya no lo alcanza: su
+  `connect-src` no lo lista y el navegador lo bloquea en modo `enforce`.
+  El certificado tardó seis chequeos en `Issuing...` con el DNS ya correcto — esa espera **se parece a un
+  DNS mal puesto**, así que conviene no tocar nada y volver a mirar.
+
+  ⚠️ **El nombre de la app NO se renombró, y no se puede: Fly no tiene comando de rename.** `flyctl apps`
+  solo ofrece `create`, `destroy` y `move` (entre organizaciones). Renombrar significa crear app nueva y
+  migrar los 7 secrets, **recrear la Machine `nightly-job` con su `schedule`** —justo donde nació F21-10— y
+  actualizar `fly.*.toml`, `.env.example`, `gen-api.mjs`, el CI y 13 scripts de QA. Se decidió no hacerlo:
+  el nombre interno no lo ve nadie fuera de `flyctl`, y lo visible se resolvió con el dominio.
+
+  🔴 **Para cuando se cree producción: la app se llama `prendo-api-prod`, no `compraventa-backend-prod`.**
+  Nombrarla bien desde el principio cuesta cero, y es el ambiente que sí va a ver un cliente. `fly.prod.toml`
+  todavía dice `compraventa-backend-prod`; hay que cambiarlo **antes** del primer `fly apps create`, porque
+  después ya no se puede.
+
   > **Dos trampas de la máquina programada, las dos cobradas ya.**
   >
   > 1. **Se ve como una máquina huérfana y se borra sin querer.** No pertenece al process group `app`, así que en una limpieza de máquinas "sueltas" es lo primero que parece sobrante — pasó el 27/08 y nadie lo notó hasta la auditoría de QA doce días después. Sin ella las suscripciones vencidas nunca se marcan y los contratos se quedan con el estado del día anterior, así que **una prenda lista para remate no aparece en la lista**. Comprobar que existe: `fly machines list --config fly.dev.toml | grep nightly-job`.
