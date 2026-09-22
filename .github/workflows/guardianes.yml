@@ -1,0 +1,81 @@
+# Guardianes de invariantes vivas — lo que ningún test puede ver.
+#
+# POR QUÉ ESTO EXISTE, Y POR QUÉ SOLO VIGILA FLY
+# ----------------------------------------------
+# Hay invariantes que no viven en el código sino en lo que está corriendo, y su
+# violación es silenciosa. Dos ya costaron incidentes (ver `docs/QA_AUDITORIA.md`
+# §F21-10 y el borrado del 27/08/2026).
+#
+# **La Machine del job nocturno tiene que vigilarse desde AFUERA de Fly.** Un
+# guardián que corre dentro de Fly no sirve para esto: si la Machine se borra o
+# se queda sin `schedule`, lo que no corre es justamente el vigilante. Por eso va
+# en GitHub Actions y no en una Machine programada.
+#
+# **El guardián de datos (`verificar_cadenas.py`) NO está acá a propósito.**
+# Necesitaría `DATABASE_URL` de la dev remota como secret de GitHub, y esa base
+# tiene datos personales reales de clientes (cédulas y fotos de documento, Ley
+# 1581). Exportar esa credencial a un tercero para leer tres invariantes amplía
+# el radio de exposición mucho más de lo que aporta. Su lugar natural es dentro
+# del perímetro que ya tiene acceso a la base — ver la nota en
+# `scripts/qa/README.md`.
+#
+# QUÉ HACE FALTA PARA QUE FUNCIONE
+# --------------------------------
+# Un solo secret en el repo: `FLY_API_TOKEN` (Settings → Secrets and variables →
+# Actions). Conviene un token de solo lectura si Fly lo permite; este workflow
+# nunca muta nada.
+#
+# ⚠️ Hasta que ese secret exista, el job **falla a propósito con un mensaje que
+# dice qué agregar**. Es deliberado: un guardián que se saltea en silencio
+# cuando le falta configuración es peor que no tenerlo — sería exactamente el
+# modo de falla que vino a evitar. Si no se va a configurar ahora, comentá el
+# bloque `schedule` en vez de dejarlo fallando cada noche: en este proyecto ya
+# está aprendido que **una CI que siempre falla no dice nada**.
+
+name: Guardianes
+
+on:
+  schedule:
+    # 13:00 UTC = 8:00 a.m. en Bogotá. Después de la corrida del job nocturno,
+    # así que si el job quedó mal, se sabe al empezar el día y no al terminarlo.
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  job-nocturno:
+    name: La Machine del job nocturno existe, se dispara y está al día
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comprobar que el token está configurado
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::Falta el secret FLY_API_TOKEN."
+            echo "Agregalo en Settings → Secrets and variables → Actions."
+            echo "Sin él este guardián no puede verificar nada, y saltearlo en"
+            echo "silencio sería el mismo error que vino a evitar."
+            exit 1
+          fi
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verificar la Machine de dev
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: compraventa-backend-dev
+        run: python scripts/qa/verificar_job_nocturno.py
+
+      # Cuando exista producción (app `prendo-api-prod`), descomentar. Va como
+      # paso aparte y no en una matriz para que el fallo diga cuál ambiente es.
+      # - name: Verificar la Machine de prod
+      #   env:
+      #     FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      #     FLY_APP: prendo-api-prod
+      #   run: python scripts/qa/verificar_job_nocturno.py

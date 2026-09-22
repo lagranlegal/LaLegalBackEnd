@@ -39,6 +39,7 @@ El laboratorio (empresas espejo, usuarios por rol, datos sembrados) está descri
 | `ui_caja_cerrada.js` | El punto 5 tal como lo reportó el cliente: *"no muestra un mensaje"*. Va por navegador porque lo único que prueba el arreglo es **ver** el mensaje. Comprueba el aviso preventivo (*"puedes ampliar por transferencia"*), el modal `Caja cerrada` con su CTA, y de paso el piso de tres letras del buscador de clientes. Necesita una empresa con la caja cerrada (`ZZ QA-B`). | 9 OK · 0 MAL |
 | `verificar_regresion_caja.py` | Regresión de los flujos que toca `_resolve_active_register`, contra el backend **desplegado** y con login real del laboratorio. Comprueba los 4 endpoints que cambiaron, que `AccountOut` **no** expone `register_id` (el contrato de la API no cambió) y que contratos/ventas/inventario siguen intactos — esos resuelven la sesión por otro camino (`integration.get_open_session`). | Todo en verde tras `00052` |
 | `verificar_cadenas.py` | **Vigila las invariantes de las cadenas de contratos** (el recargo, `00051`) **sobre los datos vivos**: (1) todo contrato con sucesor está en `superseded` —la columna es `parent_contract_id`, no `root_contract_id`, que es la raíz de la cadena—, (2) ningún `contract_item` en `transferred` cuelga de un contrato que no lo esté, y (3) ningún contrato **terminal** conserva `extension_ends_at`. Los estados terminales salen de `rules.TERMINAL_STATUSES`, **no de una lista escrita a mano** — escribirla a mano es exactamente el error de F21-10. Va por SQL directo (`DATABASE_URL`) en una transacción **`SET TRANSACTION READ ONLY`**, y no imprime ningún dato personal: solo id, número, empresa y estado. Sale con código **1** si algo está roto, así que sirve en un cron. `QA_DATABASE_URL` apunta a otra base (la local de tests) para ejercer la detección. | **F21-10** — los 4 contratos que el job nocturno resucitó (Empresa Demo Front Nº 1 y Nº 20, LA GRAN LEGAL Nº 28, ZZ QA Nº 9), y la prórroga viva del Nº 1. Reparados el 21/09/2026; el script sale en verde desde entonces |
+| `verificar_job_nocturno.py` | **Vigila la Machine programada del job nocturno en Fly**, que es infraestructura viva y ningún test puede ver: (1) que `nightly-job` **exista**, (2) que conserve su **`schedule`** —si se pierde, el job deja de correr y **su ausencia es silenciosa**: no hay health check ni alerta—, y (3) que su **imagen coincida con el release actual de la app**, que es exactamente lo que F21-10 rompió y lo que nadie estaba mirando. Solo lectura (`flyctl ... --json`). Sale con **1** si algo está roto y con **2** si no pudo verificar (sin `flyctl`, sin auth, timeout): *"no se pudo verificar" no es lo mismo que "está sano"*, y confundirlos sería repetir el error que el script existe para evitar. `FLY_APP` y `FLY_NIGHTLY_MACHINE` permiten apuntarlo a otra app o ejercer la detección. **Imprime un aviso** de que la Machine no tiene process group: es deliberado (ponerle uno puede hacer que `fly deploy` la borre o la recree sin `schedule`), y por eso se vigila en vez de arreglarse. | **Las dos causas de dos incidentes:** el borrado del 27/08/2026 por "máquina huérfana" (ninguna suscripción llegaba a `expired`) y **F21-10**, la imagen del 08/09 sin la guarda de `compute_status`. Detección de las tres rutas ejercida el 21/09/2026 (machine inexistente → exit 1; sin `schedule` → exit 1; comparación de imágenes verificada aparte). Hoy sale en verde |
 
 **Playwright — la app en vivo, con login real**
 
@@ -71,6 +72,34 @@ python scripts/qa/analyze_matrix.py
 python scripts/qa/concurrencia.py
 python scripts/qa/verificar_sedes.py     # invariante de datos vivos; exit 1 si falla
 python scripts/qa/verificar_cadenas.py   # invariante de datos vivos; exit 1 si falla
+python scripts/qa/verificar_job_nocturno.py  # la Machine del job en Fly; exit 1 si falla, 2 si no pudo verificar
+
+### Los dos guardianes en automático
+
+`verificar_job_nocturno.py` ya corre solo: **`.github/workflows/guardianes.yml`**, todos los días a las
+13:00 UTC (8 a.m. en Bogotá, o sea *después* de la corrida del job, así que un problema se sabe al empezar
+el día y no al terminarlo). Necesita **un solo secret**, `FLY_API_TOKEN`, y hasta que exista **falla a
+propósito** con un mensaje que dice qué agregar — saltearse en silencio por falta de configuración sería el
+mismo modo de falla que vino a evitar. Si no se va a configurar ya, **comentar el `schedule`** en vez de
+dejarlo fallando cada noche: acá ya está aprendido que *una CI que siempre falla no dice nada*.
+
+**Tiene que correr desde AFUERA de Fly**, y eso no es un detalle de implementación: si la Machine se borra
+o pierde su `schedule`, un vigilante que viviera dentro de Fly sería justamente lo que no corre.
+
+🔴 **`verificar_cadenas.py` todavía NO corre solo, y se decidió NO ponerlo en GitHub Actions.** Necesitaría
+`DATABASE_URL` de la dev remota como secret de un tercero, y esa base tiene **datos personales reales de
+clientes** (cédulas y fotos de documento, Ley 1581): exportar esa credencial para leer tres invariantes
+amplía el radio de exposición mucho más de lo que aporta. Su lugar es **dentro del perímetro que ya tiene
+acceso a la base**. Dos opciones, ninguna implementada:
+
+1. **Dentro del job nocturno** (`app/jobs/nightly.py`), que ya corre a diario con la base a mano. Es la más
+   barata. Contra: si el job es el que está roto —que es el caso que originó todo esto—, el guardián no
+   corre. Mitigado en parte porque `verificar_job_nocturno.py` vigila al job desde afuera.
+2. **Una Machine programada aparte** en Fly, con su propio `schedule`. Independiente del job, pero agrega
+   una segunda Machine sin process group — o sea el mismo problema que ya costó dos incidentes.
+
+La opción 1 con el guardián de Fly encima cubre más por menos. Mientras no esté, **el script se corre a
+mano** y su resultado vale solo para el momento en que se corrió.
 
 node scripts/qa/ui_test.js             # gates de menú y ruta, por rol
 node scripts/qa/ui_sweep.js            # contraste, 12 pantallas × 2 temas

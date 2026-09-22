@@ -245,8 +245,34 @@ sí: como la remota ya estaba reparada, se fabricaron las tres roturas en la bas
 permite apuntarlo a otra base; por defecto va a la dev remota) y el script las cazó las tres con exit 1.
 Sembrado limpiado después; hoy sale en verde contra las dos bases.
 
-🔴 **Queda pendiente ponerlo en un cron.** Sin eso vigila solo cuando alguien se acuerda, que es el problema
-original con otra ropa.
+**Puesto en automático, en parte (21/09/2026).** Y la parte que NO se automatizó es una decisión, no un
+olvido:
+
+- ✅ **`scripts/qa/verificar_job_nocturno.py` + `.github/workflows/guardianes.yml`** — un guardián nuevo, que
+  vigila lo que era la causa y no el daño: que la Machine `nightly-job` **exista**, que conserve su
+  **`schedule`** y que **su imagen coincida con el release actual de la app**. Esa tercera es exactamente lo
+  que F21-10 rompió y lo que nadie estaba mirando. Corre todos los días a las 13:00 UTC (8 a.m. Bogotá,
+  después de la corrida del job). **Tiene que correr desde AFUERA de Fly:** si la Machine se borra o pierde
+  el `schedule`, un vigilante que viviera dentro sería justamente lo que no corre. Sale con **1** si algo
+  está roto y con **2** si no pudo verificar — *"no se pudo verificar" no es "está sano"*, y confundirlos
+  sería repetir el error que el script existe para evitar. Necesita el secret `FLY_API_TOKEN`; hasta que
+  exista falla a propósito con un mensaje que dice qué agregar.
+  Las tres rutas de detección se ejercieron el 21/09: Machine inexistente → exit 1, sin `schedule` → exit 1,
+  y la comparación de imágenes verificada aparte.
+- 🔴 **`verificar_cadenas.py` sigue corriéndose a mano, y NO se puso en GitHub Actions a propósito.**
+  Necesitaría `DATABASE_URL` de la dev remota como secret de un tercero, y esa base tiene **datos personales
+  reales de clientes** (Ley 1581). Exportar esa credencial para leer tres invariantes amplía el radio de
+  exposición mucho más de lo que aporta. Su lugar es dentro del perímetro que ya tiene la base: lo más
+  barato es meterlo en `app/jobs/nightly.py`. Las dos opciones, con sus contras, en
+  `scripts/qa/README.md`.
+
+**Sobre el process group, que sigue vacío a propósito.** La causa común del borrado del 27/08 y de F21-10 es
+que `nightly-job` no tiene process group, así que toda operación de `flyctl` que itere por grupo la saltea
+—`fly deploy` y también `fly secrets set`— y a ojo parece basura. **No se le puso uno porque el arreglo
+puede causar el problema:** ponerle `fly_process_group=nightly` sin declararlo en `fly.dev.toml` puede hacer
+que el próximo `fly deploy` la trate como huérfana de un grupo inexistente y la borre; y declararlo en el
+toml hace que `fly deploy` la gestione y pueda recrearla **sin** el `schedule`. Así que se vigila en vez de
+tocarse, y el guardián imprime el aviso para que nadie lo tome por un descuido.
 
 **Cuatro invariantes más, propuestas y no implementadas** (hoy las cuatro dan cero, medido):
 (1) la inversa — un `superseded` **sin** sucesor, que sería plata prestada desaparecida del sistema si el
