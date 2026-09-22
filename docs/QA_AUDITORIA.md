@@ -463,6 +463,72 @@ no la salida del comando. `flyctl machine list --app compraventa-backend-dev --j
 
 ---
 
+## Hallazgos del diseño de notificaciones — 21/09/2026 (seis, y una corrección al relato de F21-10)
+
+Salieron de escribir `docs/NOTIFICACIONES.md`. **Es la quinta vez que documentar algo resulta ser la forma
+más eficaz de auditarlo**, y la primera en que el hallazgo sale de diseñar algo que **todavía no existe**:
+para decidir a quién se le manda un correo hubo que mirar de dónde sale cada dirección, y ahí aparecieron.
+
+Los tres primeros los verifiqué yo contra el código, no según el informe.
+
+### F21-19 · MEDIA — El backend no valida el formato del correo del cliente
+
+`app/modules/customers/schemas.py:17` y `:32` declaran `email: str | None` **pelado**, mientras
+`app/modules/identity/schemas.py:17` sí usa `EmailStr`. La validación vive **solo en el frontend** (`zod`),
+así que cualquier otro consumidor de la API —o un script de importación— escribe basura sin resistencia.
+
+Hoy no molesta porque nadie le manda correo a un cliente. **El día que se manden, molesta**: una dirección
+inválida no rebota, se la traga el proveedor, y el aviso se da por entregado. Es el insumo directo del
+problema de "¿y si el correo está mal escrito y le llega a un tercero?".
+
+### F21-20 · BAJA — `company.settings.grace_days` es configuración muerta
+
+Default `30` desde `00002_platform.sql:22`, y **ningún código la lee**: el `grep` sobre `app/` solo devuelve
+un comentario en `company/service.py:72`. Verificado.
+
+Es peligrosa por su nombre: es tentadora para "los días de gracia" de cualquier cosa nueva —por ejemplo los
+días de aviso previo de una cuota— y reusarla ataría dos reglas sin relación. **Si se necesita un parámetro
+de días para avisos, va uno nuevo.**
+
+### F21-21 · MEDIA — El vencimiento de la suscripción no se avisa: el corte es en seco
+
+`expire_overdue_subscriptions` audita y escribe `subscription_event` (`platform/service.py:400-438`), pero
+**nadie le avisó antes al dueño**: la empresa se encuentra la app cerrada. Hay **2 suscripciones ya
+`expired`** en dev.
+
+Es el único evento del catálogo de notificaciones que hoy **se rompe en silencio del lado de la plataforma**,
+y es de los más baratos de arreglar porque el job que lo detecta ya existe y ya corre.
+
+### F21-22 · INFORMATIVA — Corrección al relato de F21-10: el job **sí** audita, pero la mitad que importa no
+
+En F21-10 quedó escrito que «el job nocturno no escribe en `audit_log`, así que no dejó rastro forense».
+**Es cierto a medias, y la mitad correcta importa:** el **segundo** paso del job
+(`expire_overdue_subscriptions`) **sí** audita, con `user_id = NULL`. El que **no** audita es el **primero**,
+`recompute_all_statuses` — que es exactamente el que causó el daño y por el que no se pudo saber qué vector
+escribió cada fila.
+
+O sea: el patrón de auditar desde un job **ya existe en este código**. Agregarlo a `recompute_all_statuses`
+no es inventar nada, es copiar lo de al lado.
+
+### F21-23 · BAJA — `company.contact_email` está casi vacío
+
+`00002_platform.sql:16`, nullable. Es el **único** lugar donde hoy vive un correo de contacto de la empresa,
+y de él dependería el `Reply-To` de cualquier correo que se le mande a un cliente. Hay que tratar el caso
+nulo **desde el primer envío**, no después.
+
+### F21-24 · ALTA SI SE OLVIDA — El diseño de notificaciones carga más peso sobre la Machine más frágil
+
+`NOTIFICACIONES.md` le agrega un **tercer paso** al job nocturno. No es un defecto nuevo: es el riesgo
+conocido de F21-10 **creciendo**. La Machine `nightly-job` sigue sin process group (a propósito, ver
+§F21-10), así que `fly deploy` y `fly secrets set` la saltean.
+
+**Al implementar notificaciones hay que actualizarla en el mismo despliegue y verificar que el `schedule`
+sobreviva.** Para eso está `scripts/qa/verificar_job_nocturno.py`, que ya cazó este caso en vivo el 21/09:
+el `fly deploy` de esa tarde dejó la Machine en la imagen anterior y el guardián lo reportó con el comando
+de arreglo armado.
+
+---
+
 ## Hallazgos de la parte 6 de la guía — 21/09/2026 (siete, uno de dinero)
 
 **Salieron todos de escribir la parte 6 («Reportes y cierre contable») y verificar cada afirmación contra el
