@@ -23,6 +23,22 @@ from app.common.money import quantize
 #: en lectura y el job nocturno lo devolverían a `in_arrears` en cuanto
 #: pasara un mes, y aparecería en la cola de cobro un documento que ya no
 #: existe como obligación.
+#: Tres consumidores más, agregados el 21/09/2026 al cerrar el hallazgo
+#: F21-11 (ver docs/QA_AUDITORIA.md): la puerta de los abonos
+#: (`service.create_payment`) y el cupo de ampliación (`service.quote_extension`)
+#: repetían estos estados a mano. La de abonos le faltaba `superseded`, así que
+#: un contrato ya reemplazado admitía un abono.
+#:
+#: **Se decidió NO abrir una constante aparte** ("cerrado para abonos") aunque
+#: el concepto no sea idéntico a "de acá no se sale". Con dos constantes de
+#: valor idéntico, un estado terminal nuevo nace ABIERTO para abonos —
+#: aceptar plata contra un documento que no debe moverse, que es exactamente
+#: el defecto que se está arreglando, y falla en silencio. Derivándola de acá,
+#: un estado terminal nuevo nace CERRADO: si algún día aparece uno que sí
+#: deba admitir abonos (una cartera castigada que todavía recibe
+#: recuperaciones sería el candidato), el rechazo se ve el primer día, lo
+#: reporta quien atiende y ahí se parte la constante con el caso real en la
+#: mano. Cerrado de más se nota; abierto de más no.
 TERMINAL_STATUSES = frozenset({"paid", "auctioned", "superseded"})
 
 

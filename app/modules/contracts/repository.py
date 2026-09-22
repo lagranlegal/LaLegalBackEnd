@@ -276,6 +276,32 @@ async def mark_items_transferred(db: AsyncSession, *, company_id: UUID, contract
     )
 
 
+async def find_successor_contract(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID
+) -> Row[Any] | None:
+    """El contrato que SUCEDE a este, o `None` si no fue ampliado.
+
+    La columna que enlaza sucesor → padre es `parent_contract_id`, NO
+    `root_contract_id` (que es la raíz de la cadena y en un sucesor apunta al
+    abuelo) — el mismo error que costó rehacer la consulta forense de F21-10.
+
+    Devuelve solo lo que hace falta para NOMBRAR al sucesor en un mensaje de
+    error: quien intenta abonar sobre un contrato reemplazado necesita saber
+    sobre cuál abonar. Se pide el más reciente por si la invariante de "un
+    solo hijo por padre" se rompiera (bifurcación de cadena, hoy en cero):
+    ante dos hijos, el último es el que carga la deuda viva.
+    """
+    result = await db.execute(
+        text(
+            "select id, number from public.contract "
+            "where company_id = :company_id and parent_contract_id = :parent_id "
+            "order by created_at desc limit 1"
+        ),
+        {"company_id": str(company_id), "parent_id": str(contract_id)},
+    )
+    return result.first()
+
+
 async def get_root_start_date(db: AsyncSession, *, company_id: UUID, contract_id: UUID) -> date:
     """`start_date` de la RAÍZ de la cadena — el ancla de la ventana de
     recargo. Para un contrato sin cadena es su propia fecha."""

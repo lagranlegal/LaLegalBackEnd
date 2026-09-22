@@ -328,6 +328,108 @@ para abonos"), así que colapsarlos contra `TERMINAL_STATUSES` cambia comportami
 
 ---
 
+### ✅ F21-11 — Un contrato ya reemplazado por una ampliación admitía un abono (21/09/2026 · cerrado)
+
+**Es "su propia tanda": la que el último párrafo de F21-10 dejó anotada y sin hacer.** Nace de ahí, pero es
+un defecto distinto y con daño propio, así que va como hallazgo aparte (§F21-10 queda como está).
+
+`service.py:643` filtraba los abonos con una lista escrita a mano:
+
+```python
+if m["status"] in ("paid", "auctioned"):   # le falta "superseded"
+```
+
+Al ampliar un préstamo el contrato viejo pasa a `superseded` y nace un sucesor que carga la deuda real
+(capital viejo + recargo). Con ese filtro, **el contrato viejo seguía admitiendo abonos**: la plata entraba a
+la caja con su recibo, el sucesor seguía debiendo todo, y quedaba registrado un abono que **no bajaba ninguna
+deuda viva**. Medido, no supuesto — con el código viejo el test de integración nuevo recibe `201`, recibo
+Nº 1, `new_capital_balance: 900000.00` **sobre el contrato `superseded`**.
+
+Es la forma exacta de F21-10 (una lista negra que se desincroniza de `rules.TERMINAL_STATUSES`) en otro
+punto del mismo módulo. La diferencia es que acá no hizo falta un job: bastaba con que alguien abonara sobre
+el número de contrato del papel que el cliente trae en la mano — que es el papel viejo.
+
+**La decisión de diseño: se reusó `rules.TERMINAL_STATUSES`, no se abrió una constante paralela.** Los dos
+conceptos no son idénticos ("de acá no se sale" vs. "cerrado para abonos") y hoy coinciden en los tres
+estados, así que la pregunta fue cuál de las dos opciones **falla mejor** el día que aparezca un estado
+terminal que sí admita abonos (el candidato plausible: una cartera castigada que todavía recibe
+recuperaciones):
+
+- Con **dos constantes de valor idéntico**, un estado terminal nuevo nace **abierto** para abonos. Se acepta
+  plata contra un documento que no debe moverse y **nadie se entera** — el defecto que se está arreglando.
+- Derivándola de `TERMINAL_STATUSES`, nace **cerrado**. El rechazo se ve el primer día, lo reporta quien
+  atiende, y ahí se parte la constante con el caso real en la mano.
+
+**Cerrado de más se nota; abierto de más no.** Y dos constantes con los mismos tres valores no divergen por
+decisión, divergen por omisión: ningún test puede distinguirlas.
+
+**`service.py:1004`** (el cupo de ampliación, `quote_extension`) repetía los tres estados a mano. **No era un
+defecto** —la lista estaba completa— pero era el tercer lugar con la lista escrita, así que entró en el mismo
+arreglo y por la misma razón. Su `blocked_reason` sigue siendo `CONTRACT_CLOSED` también para `superseded`:
+acá no hay un sucesor "sobre el que ampliar" (ampliar el sucesor es su propia decisión, con su cupo y su
+ventana), y `ExtendLoanPanel.tsx:62` ya oculta la tarjeta con ese motivo. Cambiarlo habría movido el `enum`
+de `blocked_reason` en el OpenAPI y el comportamiento de esa pantalla, sin ganar nada.
+
+**Código de error nuevo: `CONTRACT_SUPERSEDED` (409).** No se reusó `CONTRACT_CLOSED` (400), y la razón es
+la regla del proyecto —*«un error tiene que nombrar la acción que falta, no solo negar la que se intentó»*—:
+
+- `CONTRACT_CLOSED` dice *«el contrato ya está cerrado; no admite abonos»*. Sobre un `superseded` eso es
+  engañoso: **no hay nada terminado**, la deuda se mudó de documento. Manda a quien atiende a buscar un pago
+  que no existe.
+- `CONTRACT_SUPERSEDED` dice *«Este contrato fue reemplazado por una ampliación. El abono va sobre el
+  contrato Nº 41, que es el que carga la deuda.»* — y trae
+  `details: {successor_contract_id, successor_number}` para que la pantalla pueda enlazarlo.
+
+El sucesor se busca por **`parent_contract_id`** (no `root_contract_id`, que en un sucesor apunta al abuelo:
+el mismo error que hubo que corregir en la consulta forense de F21-10), con
+`repository.find_successor_contract`. Si no hay sucesor —un `superseded` huérfano, que no debería existir y
+que `verificar_cadenas.py` vigila— el abono **se rechaza igual y con el mismo código**, pero sin `details`:
+no se inventa un número de contrato que nadie va a encontrar.
+
+El código entró a los dos catálogos, que es la mitad que importa: `docs/API_GUIDE.md` §15 y
+`frontend-starter/src/lib/api/errors.ts`. Cae al banner genérico del front (el `message` del backend ya trae
+el texto accionable), igual que los otros códigos del recargo. **`tests/unit/test_error_catalog.py` lo cazó
+sin documentar en la primera corrida de la suite** — el test de regresión funcionando como debe.
+
+**Los tests: 7 nuevos, y los 3 que importan fallan con el código viejo.**
+
+`tests/unit/test_contract_payment_gate.py` (5, sin Postgres — el rechazo pasa antes de tocar la base, con el
+repositorio monkeypatcheado, así que corren también donde la integración se salta por falta de Docker):
+el rechazo de `superseded` **por código** y con el número del sucesor en el mensaje; el caso sin sucesor;
+`paid`/`auctioned` siguen dando `400 CONTRACT_CLOSED` (el contrato con el front no se rompe); y **el
+invariante**: un cuarto estado terminal inventado por `monkeypatch` tiene que quedar cerrado para abonos
+**sin tocar `service.py`**. Si el abono se cuela, el test falla con un mensaje que lo dice y nombra el
+estado, no con un `AttributeError` de plomería — el centinela es `get_company_today`, lo primero que el
+servicio consulta después de la puerta.
+
+`tests/integration/test_contracts.py` (2, de punta a punta contra Postgres): ampliar de verdad y abonar
+sobre el viejo → `409 CONTRACT_SUPERSEDED`, `details` con el sucesor, cero abonos registrados y la deuda del
+sucesor intacta; y la otra mitad, **que el sucesor sí acepta ese abono** — un rechazo que manda a un sitio
+que tampoco acepta sería peor que el bug.
+
+Verificado a la inversa:
+
+| Versión de la puerta | Resultado (unitarios) |
+|---|---|
+| La vieja, `in ("paid", "auctioned")` | **3 failed** — *«La puerta de los abonos dejó pasar un contrato en `superseded`»* |
+| Lista a mano pero hoy completa, `("paid", "auctioned", "superseded")` | **3 failed** — el `superseded` se rechaza con el código equivocado y el estado inventado se cuela |
+| La arreglada, derivada de la constante | 5 passed |
+
+El caso del medio es el que justifica las dos mitades del arreglo a la vez: con la lista completa el bug de
+plata ya no está, pero el mensaje sigue siendo un callejón sin salida **y** el invariante sigue roto.
+El de integración con el código viejo devuelve `201` y emite el recibo, que es la evidencia del daño.
+
+**Suite completa con Docker arriba: 432 tests** — 431 passed + el fallo de `test_error_catalog` antes de
+documentar el código; documentado, 432 passed (425 previos + 7). `ruff check` / `ruff format --check`
+limpios y `mypy app` sin hallazgos.
+
+**Sin migración, sin despliegue y sin tocar datos** más allá de la Postgres local de los tests. No hace falta
+reparar nada en la remota: F21-10 ya verificó que **no hubo un solo abono registrado sobre ninguno de los
+cuatro contratos padres** después de su recargo, así que este defecto nunca llegó a mover plata en la base
+real. Lo que cambia es que ahora tampoco puede.
+
+---
+
 ### Pendiente operativo que ningún agente puede cerrar
 
 ✅ **Resuelto el 21/09/2026.** Mateo se autenticó en Fly y el backend quedó desplegado. Verificado sobre lo

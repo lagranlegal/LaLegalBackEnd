@@ -640,7 +640,41 @@ async def create_payment(
     if contract_row is None:
         raise NotFoundError("El contrato no existe en esta empresa.")
     m = contract_row._mapping
-    if m["status"] in ("paid", "auctioned"):
+    # La puerta sale de `rules.TERMINAL_STATUSES`, NO de una lista escrita a
+    # mano: esa lista decía `("paid", "auctioned")` y le faltaba `superseded`,
+    # así que un contrato YA REEMPLAZADO por una ampliación admitía abonos —
+    # la plata entraba a la caja, el sucesor seguía debiendo todo y quedaba un
+    # abono que no bajaba ninguna deuda viva. Es el mismo defecto de forma que
+    # F21-10, que ya costó once días en el job nocturno.
+    if m["status"] in rules.TERMINAL_STATUSES:
+        if m["status"] == "superseded":
+            # Código y mensaje PROPIOS: acá no hay nada terminado, hay una
+            # deuda que se mudó de documento. "El contrato ya está cerrado"
+            # manda a quien atiende a buscar un pago que no existe, en vez de
+            # al contrato que sí admite el abono.
+            sucesor = await repository.find_successor_contract(
+                db, company_id=company_id, contract_id=contract_id
+            )
+            if sucesor is None:
+                # `superseded` sin sucesor no debería existir (lo vigila
+                # `scripts/qa/verificar_cadenas.py`). Si pasa, el abono se
+                # rechaza igual —este documento no es la deuda— pero sin
+                # inventar un número de contrato que nadie va a encontrar.
+                raise ConflictError(
+                    "Este contrato fue reemplazado por una ampliación; el abono va sobre "
+                    "el contrato que lo sucede.",
+                    code="CONTRACT_SUPERSEDED",
+                )
+            s = sucesor._mapping
+            raise ConflictError(
+                f"Este contrato fue reemplazado por una ampliación. El abono va sobre el "
+                f"contrato Nº {s['number']}, que es el que carga la deuda.",
+                code="CONTRACT_SUPERSEDED",
+                details={
+                    "successor_contract_id": str(s["id"]),
+                    "successor_number": s["number"],
+                },
+            )
         raise AppError("El contrato ya está cerrado; no admite abonos.", code="CONTRACT_CLOSED")
 
     today = await platform_integration.get_company_today(db, company_id=company_id)
@@ -1001,7 +1035,15 @@ async def quote_extension(
     # resolver PRIMERO. Decirle "no hay cupo" a quien además está en mora lo
     # manda a resolver lo que no lo desbloquea.
     razon: str | None = None
-    if m["status"] in ("paid", "auctioned", "superseded"):
+    # Misma fuente que la puerta de los abonos (`rules.TERMINAL_STATUSES`).
+    # Esta lista hoy está completa, así que no era un defecto — pero era el
+    # tercer lugar con los tres estados escritos a mano, y el precedente de
+    # F21-10 es que una lista así se desincroniza sola. El `blocked_reason`
+    # sigue siendo `CONTRACT_CLOSED` incluso para `superseded`: acá no hay un
+    # sucesor sobre el que ampliar (ampliar el sucesor es su propia decisión,
+    # con su propio cupo y su propia ventana), y el panel del front ya oculta
+    # la tarjeta con este motivo.
+    if m["status"] in rules.TERMINAL_STATUSES:
         razon = "CONTRACT_CLOSED"
     elif not ventana_abierta:
         razon = "EXTENSION_WINDOW_CLOSED"

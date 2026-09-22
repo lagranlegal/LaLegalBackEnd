@@ -1369,3 +1369,74 @@ async def test_un_contrato_ampliado_no_genera_paz_y_salvo(
         headers=_headers(contract_tenant["full_token"]),
     )
     assert paz.status_code == 404, paz.text
+
+
+async def test_un_contrato_reemplazado_no_admite_un_abono(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El defecto F21-11, de punta a punta: el contrato viejo queda en
+    `superseded` y el filtro de abonos no lo incluía.
+
+    Abonar ahí acreditaba plata contra un documento que ya no representa
+    ninguna obligación: entraba a la caja, el sucesor seguía debiendo todo, y
+    quedaba un abono que no bajaba ninguna deuda viva.
+
+    Se asertea el **código**, no el status: un código de error es un contrato
+    entre dos capas y nadie lo compila.
+    """
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    nuevo = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    )
+    assert nuevo.status_code == 201, nuevo.text
+    sucesor = nuevo.json()
+
+    # El abono llega sobre el contrato VIEJO — el caso real es quien atiende
+    # buscando al cliente por el número del papel que trae en la mano.
+    abono = client.post(
+        f"/api/v1/contracts/{viejo['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 0, "capital_amount": "100000.00", "payment_method": "cash"},
+    )
+    assert abono.status_code == 409, abono.text
+    cuerpo = abono.json()
+    assert cuerpo["code"] == "CONTRACT_SUPERSEDED"
+    # El mensaje nombra la acción que falta y sobre QUÉ contrato: "no puedes"
+    # sin decir "quién sí" es un callejón sin salida.
+    assert str(sucesor["number"]) in cuerpo["message"], cuerpo["message"]
+    assert cuerpo["details"]["successor_contract_id"] == sucesor["id"]
+    assert cuerpo["details"]["successor_number"] == sucesor["number"]
+
+    # Y no quedó rastro de plata: ni abono registrado ni saldo movido.
+    pagos = client.get(
+        f"/api/v1/contracts/{viejo['id']}/payments",
+        headers=_headers(contract_tenant["full_token"]),
+    ).json()
+    assert pagos["items"] == []
+    vigente = client.get(
+        f"/api/v1/contracts/{sucesor['id']}", headers=_headers(contract_tenant["full_token"])
+    ).json()
+    assert vigente["capital_balance"] == "1400000.00", "la deuda viva sigue entera"
+
+
+async def test_el_sucesor_si_admite_el_abono(client: TestClient, contract_tenant: dict) -> None:
+    """La otra mitad, y lo que vuelve útil al error anterior: el abono que se
+    rechazó sobre el viejo tiene que funcionar sobre el sucesor que el mensaje
+    nombra. Un rechazo que manda a un sitio que tampoco acepta sería peor que
+    el bug."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    sucesor = client.post(
+        f"/api/v1/contracts/{viejo['id']}/extend-loan",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"amount": "400000.00", "payment_method": "cash"},
+    ).json()
+
+    abono = client.post(
+        f"/api/v1/contracts/{sucesor['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 0, "capital_amount": "100000.00", "payment_method": "cash"},
+    )
+    assert abono.status_code == 201, abono.text
+    assert abono.json()["new_capital_balance"] == "1300000.00"
