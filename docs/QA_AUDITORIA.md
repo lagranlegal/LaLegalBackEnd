@@ -463,6 +463,110 @@ no la salida del comando. `flyctl machine list --app compraventa-backend-dev --j
 
 ---
 
+## Hallazgos de la parte 6 de la guía — 21/09/2026 (siete, uno de dinero)
+
+**Salieron todos de escribir la parte 6 («Reportes y cierre contable») y verificar cada afirmación contra el
+código.** Ninguno de leer código a secas. Es la cuarta vez que documentar el producto resulta ser la forma
+más eficaz de auditarlo: la guía obliga a decir **qué pasa exactamente**, y ahí se ve que dos capas no dicen
+lo mismo.
+
+Los cuatro primeros son de la **misma familia**: el Estado de resultados y los KPI del período **no saben
+que existen las devoluciones y las anulaciones**. Verificado: `grep` de `return|sale_return|devol` sobre
+`reports/repository.py` y `reports/service.py` no devuelve **nada**. No es que las traten mal — no las
+tratan.
+
+### 🔴 F21-12 · ALTO — Una devolución no baja el Estado de resultados, y el activo se cuenta dos veces
+
+`profit_summary` filtra `status = 'completed'` (`app/modules/reports/repository.py:203-206`) y **una
+devolución nunca cambia el `status`**: el único `update public.sale set status` de todo el código es a
+`'voided'` (`app/modules/sales/repository.py:200`). Verificado por mí, no según informe.
+
+Entonces, después de una devolución con reingreso:
+
+- el **ingreso sigue contado** en el Estado de resultados, porque la venta sigue `completed`;
+- su **costo sigue dentro de `cost_of_goods_sold`**;
+- y la mercancía **vuelve a `available`** (`app/modules/sales/service.py:598-600`), así que **vuelve a
+  sumar** en la valorización del inventario.
+
+**Efecto: ingresos y utilidad sobreestimados por todo lo devuelto, y el mismo activo contado dos veces** —
+una vez como costo de algo que se vendió y otra como inventario disponible. Es exactamente la familia de
+error que este proyecto ya corrigió cuatro veces (*"ingreso no es ganancia"*, *"el interés es ingreso; el
+capital recuperado no"*), reaparecida por el lado de las devoluciones.
+
+Queda **documentado como limitación conocida** en la parte 6 de la guía, que es lo honesto mientras no se
+arregle. **No se arregló**: toca la semántica de `sale.status` o exige que los reportes lean las
+devoluciones, y eso es una tanda propia con decisión de negocio (¿una devolución parcial deja la venta en
+`completed`? ¿aparece un `partially_returned`?).
+
+### F21-13 · MEDIO — Las devoluciones y anulaciones no restan de los KPI del período
+
+`REVENUE_CONCEPTS = {interest_payment, sale}` y el revenue exige `direction === 'in'`
+(`frontend-starter/src/features/reports/aggregate.ts:46-47, 151-152`). Una anulación emite
+`concept='sale'` con `direction='out'` (`app/modules/sales/service.py:407-419`) y una devolución emite
+`concept='sale_return'` (`:697-701`): **ninguna de las dos toca «Ventas» ni «Ingresos operativos»**, aunque
+sí entran al flujo de caja. Los KPI del período son **brutos** de devoluciones y anulaciones.
+
+### F21-14 · MEDIO — Los descuadres de caja no aparecen en ningún reporte
+
+El ajuste del arqueo se graba con `session_id = None` (`app/modules/cashbox/service.py:385-396`) y
+`closings_breakdown` hace **INNER JOIN** con `cash_session` (`app/modules/reports/repository.py:156`).
+Consecuencia: el desglose de Reportes **nunca cuadra** contra el saldo de la cuenta de efectivo cuando hubo
+descuadres, y los faltantes del mes **solo se ven en el Histórico**, uno por uno.
+
+El `session_id = None` está bien argumentado en el código (si el ajuste colgara de la sesión, el acta
+cuadraría sola y el descuadre se volvería invisible). **Lo que falta es el otro lado: nada suma los
+descuadres de un período.**
+
+### F21-15 · MEDIO — Un mes ya cerrado cambia hacia atrás
+
+Anular hoy una venta vieja la saca del Estado de resultados de **su** mes (mismo filtro `status='completed'`
+sobre `sold_at`). **No existe un reporte congelado** ni forma de reimprimir el resultado tal como se vio el
+día del cierre. Mitigado en la guía con «exportá y archivá el día del cierre», que es un parche de
+procedimiento, no una solución.
+
+### F21-16 · BAJO — El botón «Exportar a Excel» de Contratos desaparece al buscar
+
+Está dentro del bloque `{!isSearching && …}` junto con las pestañas
+(`frontend-starter/src/features/contracts/pages/ContractsListPage.tsx:126, 144`). Sin ningún aviso: parece
+que la función se fue. Misma familia que F21-01 (*"afirmar o mostrar algo que no coincide con la pantalla es
+peor que no decir nada"*).
+
+### F21-17 · BAJO — El Excel de Ventas no permite notar las devoluciones
+
+La columna `Estado` sale de `sale.status`, que sigue en `completed` tras una devolución
+(`frontend-starter/src/features/sales/pages/SalesListPage.tsx:43`), y no hay columna de devoluciones. Quien
+concilie con ese archivo **no tiene cómo verlas**. Es F21-12 asomando por la exportación.
+
+### F21-18 · BAJO — `inventory_purchased` ignora `paid_at`
+
+`app/modules/reports/repository.py:465-491`. Contablemente correcto (una compra es un activo, no un gasto),
+pero la línea «mercancía comprada» del pie del Estado de resultados **no es salida de caja** cuando la
+compra quedó por pagar. Puesto como salvedad explícita en la guía, donde se explica por qué la utilidad no
+coincide con la plata del cajón.
+
+### Dos cosas que no son defectos del código
+
+- **El texto del §8 de la guía —«las exportaciones tienen un tope de 2.500 filas»— es impreciso.** Vale para
+  Ventas, Contratos e Inventario (`limit` 50 × `maxPages` 50, `frontend-starter/src/lib/api/pagination.ts:48`),
+  pero la hoja *Rankings* de Reportes pide con `limit: 100` (`features/reports/api.ts:118-124`) → 5.000, y
+  Resumen/Desglose **no paginan**. No se tocó: es la sección 8 y merece su propia revisión.
+- **La pestaña «Contabilidad» de Reportes no está documentada en la parte 4.** `#reportes` describe solo
+  «Período». La parte 6 la cubre desde el ángulo del cierre, pero si se quiere paridad pantalla-por-pantalla,
+  ese párrafo falta.
+
+### Y un defecto del propio entregable
+
+**La guía desborda 166 px horizontalmente a 390 px de ancho**, en todas sus partes. Medido con Playwright
+sobre una copia **sin** la parte 6: idéntico, así que es preexistente. Causa: en
+`@media (max-width: 900px)` la `.shell` pasa a `flex-direction: column` pero conserva
+`align-items: flex-start`, así que `main` se dimensiona a *fit-content* y el `table { min-width: 520px }`
+estira la página entera; las tablas dejan de scrollear dentro de su `.scroller` y se sale el documento
+completo. **Arreglado el 21/09 con una línea** (`align-items: stretch` en esa regla): desborde 166 → **0**,
+`main` vuelve a 390 px y las tablas scrollean internamente. El escritorio no se toca, porque la regla es
+solo ≤900 px.
+
+---
+
 ## Hallazgos sueltos — 20/09/2026 (fuera de fase)
 
 Salieron mientras se preparaban los insumos de la guía de usuario leyendo el código pantalla por pantalla.
