@@ -7,6 +7,13 @@
 > **Principio de diseño:** un aviso es la **consecuencia** de un hecho que ya quedó registrado, nunca un hecho nuevo. De ahí sale todo lo demás: el aviso no puede hacer fallar la operación que lo originó, no puede perderse sin dejar rastro, y no puede depender de un canal que la mitad de los destinatarios no tiene.
 >
 > **Verificado contra el código y contra la base dev el 21/09/2026.** Lo que es suposición está marcado como tal.
+>
+> **Estado de las decisiones — 22/09/2026, contestadas por Mateo.** De las ocho preguntas de negocio que abría §12, **dos quedaron cerradas** y ya no son provisionales:
+>
+> 1. **No se le avisa al cliente que su prenda está lista para remate.** Textual: *"por el momento no, pero la app debe tener la escalabilidad por si se requiere más adelante"*. El evento nace igual en el catálogo, con destinatario cliente y **deshabilitado**, para que encenderlo sea un cambio de configuración y no una tanda de desarrollo (§2.2, §4.3, §12.0-a).
+> 2. **La base legal del correo se distingue por FINALIDAD, no por una casilla de consentimiento genérico.** Un aviso sobre el propio contrato que la persona firmó es servicio del contrato; cualquier otra cosa exige autorización expresa. La base se guarda por cliente y de forma explícita, para que la respuesta de un abogado sea un cambio de configuración y no un rediseño (§9.2, §11, §12.0-b). **Es una recomendación de producto e ingeniería, no asesoría legal** — la salvedad completa está en §9.2-h.
+>
+> Quedan **seis** preguntas abiertas en §12.
 
 ---
 
@@ -102,11 +109,35 @@ La fecha de la próxima cuota **no necesita cálculo nuevo**: es `rules.add_mont
 | R2 | **Cuota vencida** | `months_owed` pasó de 0 a ≥1 → el contrato entró en `in_arrears` | Cliente | diaria | `unroutable` | Monto |
 | R3 | **Entró en prórroga** | `compute_status` lo puso en `in_extension` | Cliente | diaria | `unroutable` | Monto |
 | R4 | **La prórroga vence pronto** | `extension_ends_at` cae en N días | Cliente | diaria | `unroutable` | Monto |
-| R5 | ~~**Listo para remate**~~ | `in_extension` **y** `extension_ends_at` ya pasó | **Empresa, no cliente** — ver §2.4 y §12.1 | diaria | — | — |
+| R5 | **Listo para remate** | `in_extension` **y** `extension_ends_at` ya pasó | **Empresa** (§2.4, E1). Al cliente: el evento existe en el catálogo y nace **deshabilitado** — ver abajo y §12.0-a | diaria | — | — |
 
 > **R3 es el aviso más valioso de todo el documento y el más fácil de pasar por alto.** `in_extension` es la última campana antes de que la prenda se pueda rematar, y **se dispara sola**, sin que nadie toque nada: `compute_status` lo pone cuando `months_owed` llega a `arrears_window_months` (4 en metales, 1 en tecnología). Hoy el cliente no se entera de que su contrato cambió de estado; se entera cuando viene a pagar y le dicen que su cadena ya no está.
 
 **«Listo para remate» no es un `status`.** Es `in_extension` con `extension_ends_at` ya pasado — exactamente el predicado de `GET /contracts/ready-for-auction`. Cualquier consulta de este documento que lo trate como un estado del enum está mal.
+
+#### R5 al cliente — decidido el 22/09/2026: no hoy, y por eso mismo el evento existe
+
+Mateo: *"por el momento no, pero la app debe tener la escalabilidad por si se requiere más adelante"*. Eso **confirma** lo que la tabla ya proponía —el aviso de remate va a la empresa (E1), no al cliente— y le quita lo provisional. Pero agrega un requisito de diseño que pesa más que la decisión misma: **encenderlo después tiene que ser un cambio de configuración, no una tanda de desarrollo.** Tres cosas que sí se cierran acá —(a), (b) y (c)— y una cuarta, (d), que queda abierta a propósito.
+
+**(a) El evento existe en el catálogo desde el día uno, con destinatario cliente, y nace deshabilitado.** `auction_ready_customer`, `audience='customer'`, `purpose='service'` (§9.2), `default_enabled = false`. **No es un evento que "se agregará": es uno que está y no se dispara.** La diferencia es concreta y verificable: el tipo está en el catálogo, tiene plantilla escrita, tiene `dedupe_key` (`auction_ready:<contract_id>:<extension_ends_at>` — anclada al ancla del contrato, como todas las de estado, §6.1) y tiene sus dos tests (§14). Lo único que falta el día que se encienda es el valor de un `settings`.
+
+**Por qué esto no es sobre-ingeniería, que es la objeción obvia.** El tercer paso del job ya recorre **exactamente** esa población para producir E1: el predicado de `ready-for-auction` se evalúa igual haya o no aviso al cliente. El evento al cliente no agrega una consulta, agrega un destinatario a una consulta que ya se hace. Dejarlo escrito y apagado cuesta una plantilla y un test; agregarlo después cuesta tocar catálogo, job, plantillas y tests con el sistema ya andando y con clientes reales del otro lado.
+
+**(b) El interruptor vive en `company.settings.notifications.events.auction_ready_customer` — una preferencia por empresa, no un permiso.** Es la excepción razonada al precedente de `RECARGOS.md` §8.1, y la justificación está en §4.3, donde vive el resto de la jerarquía de preferencias.
+
+**(c) Lo que queda escrito para el día que se encienda, porque quien lo encienda va a asumir algo sin saberlo.** El argumento que frenó la decisión no es de producto, es legal: **avisar que un bien se va a rematar tiene peso en Colombia**, y hacerlo por un correo cuya entrega no se puede probar deja a la compraventa diciendo *"le avisamos"* sin poder demostrarlo. Un `delivered` de Resend prueba que un servidor aceptó el mensaje; no prueba que el titular se enteró — y esa distinción es justo la que se discutiría. Se agrega un segundo problema, propio de este producto: con 14 de 16 clientes sin correo (§1), el aviso existiría para unos pocos y para la mayoría no, y esa desigualdad es difícil de sostener si alguien la mira de cerca.
+
+| Para que ese argumento deje de aplicar, haría falta | Por qué |
+|---|---|
+| **Registrar la entrega de forma probatoria** — un canal con acuse verificable y la constancia guardada, no solo el estado del envío | Es lo que convierte *"le avisamos"* en algo que se puede mostrar. El `provider_id` de `notification_delivery` (§4.1) es el gancho donde colgaría esa constancia, pero **por sí solo no es prueba de entrega al titular** |
+| **Que el aviso no sustituya a lo que el contrato firmado ya diga** | Si el papel fija una forma de avisar, el correo es un extra y no puede contradecirla. Eso se lee en el contrato del inquilino, no en este documento |
+| **Concepto de un abogado** sobre si un aviso mandado y no probado mejora o empeora la posición de la compraventa | Es la pregunta que este documento no puede contestar, y la razón por la que el evento nace apagado en vez de encendido |
+
+> **Quien encienda esta casilla está asumiendo que un correo sin prueba de entrega alcanza como aviso de remate.** Queda dicho acá y no en una conversación: el interruptor es fácil, la consecuencia no. La pantalla que lo enciende tiene que mostrar este texto, igual que la de §4.3 muestra cuántos correos van a salir.
+
+**(d) La misma pregunta para R3 (prórroga) — y esta NO se puede cerrar.** R3 sigue encendido y mandándose al cliente, porque **es criterio propio, no concepto**, que no es lo mismo: R3 informa un **cambio de estado del propio contrato** —*"entró en prórroga"*—, mientras R5 anuncia que **la prenda se va a disponer**. El primero es información que el cliente hoy no tiene y que le sirve para pagar; el segundo es el acto. Pero la frontera entre informar un estado y anunciar una consecuencia patrimonial **la pone un abogado, no este documento**, y por eso queda planteada aparte, en su propio recuadro al final de §12.0-a — **no** como una de las seis numeradas, porque no es una de las ocho originales: es el pedazo que la decisión de Mateo no alcanzó a cubrir.
+
+**Y si la respuesta fuera que R3 pesa igual, no hay rediseño:** R3 ya es una entrada del catálogo y el mismo interruptor de (b) lo apaga. Esa es la prueba de que el mecanismo generaliza — no se construyó para el remate, se construyó para cualquier evento cuya respuesta legal todavía no está.
 
 ### 2.3 · Agrupación: el recordatorio es **por cliente y por día**, no por contrato
 
@@ -267,23 +298,36 @@ create table public.notification_delivery (
 | Estado | Qué significa | ¿Falla ruidosa o silenciosa? |
 |---|---|---|
 | `unroutable` | El caso **normal** (§1) | **Ruidosa a propósito:** alimenta la lista de clientes sin correo |
-| `suppressed` | Sin autorización, con opt-out, o `email_invalid_at` puesta | Ruidosa en el agregado, invisible por fila |
+| `suppressed` | La base legal del cliente no alcanza para la finalidad de ese evento (§9.2), pidió la baja, o `email_invalid_at` puesta | Ruidosa en el agregado, invisible por fila. **Es el contador que hay que mirar el día que cambie el mapa de §9.2-d** |
 | `throttled` | Tope de §3 | Silenciosa; solo importa si sube |
 | `skipped_stale` | El job estuvo caído y el hecho ya no es noticia (§5) | **La alarma más importante del sistema.** Un `skipped_stale > 0` es la señal que nadie tuvo cuando la Machine desapareció 12 días |
 | `dead` | 3 intentos y no salió | **Ruidosa:** entra al resumen de la empresa |
 | `bounced` | Rebotó duro | Ruidosa una vez, y marca la dirección (§7) |
 
-### 4.3 · Preferencias: tres niveles, tres preguntas distintas
+### 4.3 · Preferencias: cuatro niveles, cuatro preguntas distintas
 
-No se colapsan porque **no son la misma pregunta**, y unificarlas es lo que produce la casilla que nadie sabe contestar — el mismo error que `RECARGOS.md` §8.1 ya descartó para el LTV.
+No se colapsan porque **no son la misma pregunta**, y unificarlas es lo que produce la casilla que nadie sabe contestar — el mismo error que `RECARGOS.md` §8.1 ya descartó para el LTV. El cuarto nivel lo agregó la decisión del 22/09 sobre el aviso de remate (§2.2).
 
 | Nivel | Pregunta que contesta | Dónde vive | Default |
 |---|---|---|---|
 | **Empresa** | ¿Este negocio le escribe a sus clientes? | `company.settings.notifications` (jsonb) | **Apagado** |
+| **Evento** | ¿Este aviso en particular está encendido para esta empresa? | `company.settings.notifications.events.<event_type>`, sobre el `default_enabled` del catálogo | El del catálogo. Hoy **solo `auction_ready_customer` nace en `false`**; el resto en `true` |
 | **Usuario** | ¿A qué empleados les llega el resumen de la empresa? | **un permiso**, no una columna | Solo Admin |
-| **Cliente** | ¿Este cliente autorizó que le escriban? | `customer.email_consent_at` | Nulo = no |
+| **Cliente** | ¿Con qué base legal se le escribe, y para qué finalidad? | `customer.email_basis` (+ `email_consent_at`, `email_opt_out_at`) cruzado con el `purpose` del evento (§9.2) | `contract` si tiene contrato vivo y correo; nulo = no sale nada |
 
 **Por qué apagado por defecto en la empresa.** Encenderlo para un inquilino existente dispara la tanda de arranque: LA GRAN LEGAL tiene 22 contratos vivos y 8 contratos ya listos para remate. El primer día mandaría avisos sobre hechos de hace semanas. Es el mismo problema de §5, y se resuelve con la misma regla, pero el interruptor apagado es la primera línea de defensa. **Encender es un acto explícito, con una pantalla que dice cuántos correos van a salir.**
+
+**Por qué el nivel evento es una preferencia por empresa y NO un permiso — la excepción razonada al precedente.** `RECARGOS.md` §8.1 descartó una casilla por empresa para el cupo de ampliación y usó un permiso, con tres argumentos. Hay que mirarlos uno por uno antes de copiar la conclusión, porque **dos de los tres no aplican acá**:
+
+| Argumento de `RECARGOS.md` §8.1 | ¿Aplica al aviso de remate? |
+|---|---|
+| *"Nadie sabe responder eso al dar de alta una empresa"* | **No aplica: acá no se pregunta.** La casilla no está en el alta. Nace en `false` porque la plataforma ya tomó la decisión por defecto, y quien la cambie lo hace después, con el negocio andando y un motivo. Una preferencia que nadie tiene que contestar para empezar a operar no es la casilla que ese argumento condena |
+| *"La misma regla se comportaría distinto en dos pantallas"* | **No aplica: hay una sola.** El LTV se evalúa al crear un contrato **y** al ampliarlo — dos superficies que podían divergir. Este evento lo produce **únicamente** el tercer paso del job nocturno (§5.2). Un solo punto de evaluación, como exige §14 para el tope por cliente |
+| *"Parte el producto en dos comportamientos que hay que documentar, soportar y testear"* | **Sí aplica, y es el costo que se paga.** Por eso §14 exige probar las dos ramas, encendida y apagada. Es barato porque la rama vive en un solo lugar: el evento se crea igual, lo que cambia es si la entrega nace `pending` o no se crea |
+
+**Y el argumento positivo, que es el que decide:** un permiso contesta *"¿qué empleado puede hacer X?"*. Acá **ningún empleado hace nada** — el correo lo manda el job, sin `user_id`, como ya pasa con `expire_subscription` (§7). Colgar un permiso de un actor que no existe es un error de categoría: habría que inventar a quién asignárselo. La pregunta real es *"¿esta compraventa le avisa a sus clientes que va a rematar?"*, y es **una decisión legal del negocio**, no un privilegio de un usuario: la contesta el dueño con su abogado, vale para toda la empresa y no cambia según quién esté en el mostrador. Cambiarla es un acto de configuración, ya auditado por `update_settings` (§7) y ya protegido por `company.configure`.
+
+**Por qué es un mapa por evento y no una columna `auction_notice_enabled`.** Porque el problema se va a repetir. La forma —catálogo con `default_enabled`, override por empresa— sirve para el próximo aviso cuya respuesta legal todavía no está, sin una migración por cada uno. Una columna dedicada resuelve el caso de hoy y obliga a otra el día que aparezca el segundo. Es un SaaS: la bifurcación se abstrae, no se hornea.
 
 **Por qué el nivel usuario es un permiso y no una preferencia.** Quién recibe el correo de *"descuadre de caja de $180.000"* es **la misma pregunta** que quién puede ver el reporte de caja, y este proyecto ya tiene una forma para eso: RBAC. Una columna `wants_digest` en `app_user` deja que un usuario de Bodega se suscriba a los números del negocio sin pasar por ningún rol — un permiso de lectura por la puerta de atrás. Dos permisos nuevos, porque no son la misma decisión:
 
@@ -404,7 +448,7 @@ La violación del `unique` sube hoy como `409 IDEMPOTENCY_IN_PROGRESS`, y eso es
 |---|---|
 | Encender o apagar los avisos de una empresa | Ya lo cubre `update_settings`. Es un cambio de política con consecuencias hacia afuera |
 | `resend_notification` | **Una persona decidió volver a escribirle a un cliente.** Hay un quién, hay un cuándo, y es el caso que alguien va a preguntar en seis meses |
-| Autorización o revocación de consentimiento de un cliente | Habeas Data (§9.2): la autorización tiene que quedar probada con quién la registró |
+| Autorización expresa, cambio de `email_basis` o baja (opt-out) de un cliente | Habeas Data (§9.2): la autorización tiene que quedar probada **con quién la registró y cuándo**. Dos matices: el `email_basis='contract'` que escribe `create_contract` no necesita fila propia —su prueba **es el contrato**—, y el opt-out que hace el propio cliente va con `user_id = NULL`, porque no lo hizo un empleado |
 
 **Y sobre el agujero de F21-10, con honestidad:** el job nocturno **no escribe en `audit_log`** (`app/jobs/nightly.py`), y por eso no dejó rastro forense — *"no se puede saber cuál de los dos vectores causó cada fila"*. Este diseño **no cierra eso**: `recompute_all_statuses` sigue sin auditar. Lo que sí hace es que el tercer paso del job deje un rastro **más útil que una fila de auditoría**, porque registra lo que **decidió** (`sent` / `unroutable` / `skipped_stale` / `suppressed`) y no solo que corrió. Auditar `recompute_all_statuses` sigue pendiente y es un trabajo aparte.
 
@@ -458,24 +502,55 @@ La base tiene clientes reales con **cédula y fotos del documento** (`customer.d
 
 **Y por eso `notification_event.payload` guarda lo mínimo para redactar**, no una foto del documento. Es una decisión de retención: esa tabla va a tener miles de filas y ser la más fácil de exportar por error.
 
-### 9.2 · Consentimiento: la columna nula es la que manda
+> **La decisión del 22/09 sobre la base legal (§9.2) no toca nada de esta tabla, y conviene decirlo.** Que un correo se apoye en la relación contractual habilita **mandarlo**, no **contar más**. La finalidad `service` es justamente lo que obliga a que el cuerpo hable del contrato de esa persona y de nada más; un correo que se apoya en el contrato y encima trae la cédula o la prenda se sale de su propia base. Si algo, la base contractual hace esta sección **más** estricta, no menos.
 
-**Decidido: sin `customer.email_consent_at`, no se manda nada. Tener correo y tener autorización son dos cosas.**
+### 9.2 · Base legal: se distingue por FINALIDAD, no por una casilla de consentimiento genérico
+
+**Decidido el 22/09/2026.** Mateo pidió una recomendación y esta es, con su salvedad escrita en (h) y no en una nota al pie.
+
+> **Un recordatorio sobre el propio contrato que la persona firmó es servicio del contrato, no mercadeo**, y se apoya en la relación contractual. **Cualquier cosa que no sea eso** —promociones, *"vuelva a visitarnos"*, avisos de otra empresa— **exige autorización expresa.**
+
+Esto reemplaza el diseño anterior (*"sin `email_consent_at` no sale nada"*), que era el estricto por defecto. El cambio de fondo no es volverse laxo: es que **"¿tengo permiso?" estaba mal planteada como un booleano.** Bien planteada son dos datos que hoy no existen: **para qué es este correo** y **bajo qué base tengo la dirección de esta persona**.
+
+**(a) La base se guarda por cliente, explícita, y no como un booleano.**
 
 ```sql
 alter table public.customer
-  add column email_consent_at     timestamptz,   -- null = NO autorizado
-  add column email_consent_source text,          -- 'counter' | 'import' | ...
-  add column email_opt_out_at     timestamptz,   -- revocación (art. 8, Ley 1581)
-  add column email_invalid_at     timestamptz;   -- rebotó duro; no volver a intentar
+  add column email_basis          text,          -- 'contract' | 'consent' | null = ninguna
+  add column email_consent_at     timestamptz,   -- cuándo autorizó expresamente (solo con 'consent')
+  add column email_consent_source text,          -- 'counter' | 'contract_form' | 'import' | ...
+  add column email_opt_out_at     timestamptz,   -- pidió la baja; manda sobre todo lo demás
+  add column email_invalid_at     timestamptz;   -- rebotó duro; no volver a intentar (§6.3)
 ```
 
-| Por qué así | |
-|---|---|
-| **La ley pide la autorización, no el dato** | Tener el correo de alguien no autoriza a escribirle. La fecha y el origen son la prueba, y `resend_notification` en `audit_log` completa el quién (§7) |
-| **Hace imposible el encendido masivo accidental** | Un inquilino que activa los avisos no le escribe a 200 clientes que nunca dijeron sí: les escribe a los que autorizaron. Los demás quedan `suppressed`, contados y visibles |
-| **Los 2 correos que existen hoy no tienen autorización** | Se capturaron antes de que esto existiera. **Nacen `suppressed`** y hay que volver a pedirla. Es un costo real y se paga: dos clientes |
-| **El opt-out es obligatorio y hace doble trabajo** | Todo correo al cliente lleva *"no me escriban más"*, que escribe `email_opt_out_at`. Es la revocación que exige el art. 8 **y** el mecanismo que evita que un molesto se convierta en una queja de spam que ensucia el dominio de todos |
+**Cómo se escribe `contract`, y por qué se escribe en vez de deducirse.** La migración lo pone en los clientes que hoy tienen correo y al menos un contrato no terminal; de ahí en adelante lo pone `create_contract` cuando el cliente tiene correo y todavía no tiene base. **No se deriva en cada envío con un `join` contra los contratos vivos**, y el motivo es el mismo del SNAPSHOT legal del contrato (`CLAUDE.md`): la base legal que importa es **la que había el día que se mandó el correo**, y eso hay que poder mostrarlo seis meses después. Un cálculo al vuelo contesta qué pasa hoy, no qué pasaba entonces.
+
+**(b) Cada evento del catálogo lleva su finalidad.** `purpose`: `service` | `marketing`. **Hoy todos los eventos de §2 son `service`** — no hay ni uno de mercadeo en el catálogo, y esa es justamente la razón por la que la recomendación es sostenible. El catálogo **no admite un evento sin `purpose`**: no hay valor por defecto, porque el defecto sería el cómodo y el día que alguien agregue *"promoción de fin de año"* nadie se va a acordar de esta sección.
+
+**(c) La decisión de enviar es una función de las dos, y se evalúa en un solo lugar.**
+
+| Finalidad del evento | Base `contract` | Base `consent` | Sin base (`null`) |
+|---|---|---|---|
+| **`service`** — el propio contrato, abono, venta o paz y salvo de esa persona | **sale** | **sale** | `suppressed` |
+| **`marketing`** — promoción, reactivación, cualquier cosa de otra empresa | `suppressed` | **sale** | `suppressed` |
+
+Y por encima de la tabla, tres cortes que ganan siempre y en este orden: **no hay dirección** (`unroutable`, §1), **`email_opt_out_at` puesta**, **`email_invalid_at` puesta**. Ninguna base legal sobrevive a que el titular haya pedido la baja — esa es la diferencia entre tener derecho a escribir y tener razón.
+
+**El interruptor por empresa sigue apagado por defecto (§4.3), y eso no cambia.** Ninguna de estas bases enciende nada sola: primero alguien de la compraventa decide que su negocio le escribe a sus clientes, con la pantalla que dice cuántos correos van a salir.
+
+**(d) El punto de todo esto: la decisión difícil se vuelve un dato, no un rediseño.** El mapa *finalidad → bases aceptadas* es **configuración de la plataforma**, no del inquilino (la ley es la misma para los treinta). Hoy: `service: ['contract','consent']`, `marketing: ['consent']`. Si mañana un abogado dice **"estricto"**, se cambia una línea —`service: ['consent']`— y pasa exactamente esto: los clientes que solo tenían base contractual dejan de recibir, sus entregas quedan `suppressed`, el contador sube y se ve en el agregado (§4.2). **Cero migraciones, cero backfill, cero plantillas tocadas, ninguna fila borrada.** Y al revés también: si el concepto dice que la base contractual alcanza y hasta cubre reactivar clientes viejos, es la misma línea en la otra dirección.
+
+**Es el mismo criterio con el que se resolvió el aviso de remate** (§2.2): cuando la decisión no se puede tomar bien hoy, lo que se construye es el interruptor, no la decisión. Ahí fue un `settings` por empresa porque la pregunta era del negocio; acá es configuración de plataforma porque la pregunta es de la ley. **La forma es la misma; el dueño de la respuesta, no.**
+
+**(e) Todo correo lleva salida (opt-out), incluidos los de servicio del contrato.** No porque la ley lo exija en cada correo transaccional —eso es parte de lo que hay que confirmar—, sino porque **es barato y es lo que convierte una queja en una baja**. Quien se cansa de recibir avisos y no encuentra cómo salir marca spam, y esa marca no la paga el inquilino que la provocó: la paga la reputación de `prendo.com.co` para todos los demás (§8). El enlace escribe `email_opt_out_at` y gana sobre cualquier base, como dice (c).
+
+**(f) Capturar la autorización expresa en el mostrador, de ahora en adelante.** Preguntarla cuesta cero y quita la duda para siempre; no preguntarla deja al producto colgado de una interpretación. Va donde ya va la captura del correo (§1c), al crear el contrato, junto al *"¿quiere recibir avisos de su cuota por correo?"*: una casilla aparte, con su texto. Quien dice que sí queda `email_basis='consent'` + `email_consent_at` + `email_consent_source='contract_form'`, y ese cliente **ya no depende de cómo se resuelva la pregunta legal**. Quien no contesta se queda en `contract` y sigue recibiendo lo de su contrato.
+
+**Lo que NO se hace: volver obligatorio el correo.** Obligarlo trabaría el mostrador y además no funcionaría —quien no tiene correo escribe `a@a.com` (§1c)—. **"No tiene correo" es el caso normal** (§1), y ninguna decisión legal cambia ese dato: lo que se gana acá es a quién se le puede escribir, no cuántos hay.
+
+**(g) Los 2 correos que ya existen: qué pasa con ellos ahora.** Con el diseño anterior nacían `suppressed` y había que volver a pedirles autorización. Con este, si tienen contrato vivo nacen `email_basis='contract'` y **son destinatarios desde el primer día**. Lo que **no** se hace es marcarlos `consent`: nadie los autorizó expresamente, y escribir una fecha de autorización que no ocurrió sería fabricar la prueba. **`email_consent_at` solo se escribe cuando alguien dijo que sí**, y por eso sigue sirviendo como prueba cuando se la pidan.
+
+**(h) La salvedad, sin adornos.** **Esto es una recomendación de producto e ingeniería, no asesoría legal.** La **Ley 1581 de 2012** exige autorización previa, expresa e informada del titular **como regla general**, y contempla excepciones. **Si un aviso sobre el contrato que la propia persona firmó cae en una de ellas —o si la relación contractual basta como base— lo tiene que confirmar un abogado.** No cito artículos, decretos ni jurisprudencia a propósito: no los verifiqué, y un número inventado en un documento de diseño termina copiado en un correo a un cliente. Lo que el diseño garantiza no es tener la razón: es que **la respuesta del abogado sea un cambio de configuración y no un rediseño**.
 
 ### 9.3 · Si el correo está mal escrito y le llega a un tercero
 
@@ -490,7 +565,7 @@ Es el caso que no tiene vuelta atrás, y hay que separar dos cosas:
 2. **Validar el formato en el backend** — hoy no se hace (§1, §13). No atrapa el dedazo verosímil, pero saca la basura.
 3. **Confirmar la dirección la primera vez.** El primer correo a un cliente es un *"confirme que este correo es suyo"* que exige una acción; hasta que la haga, los demás quedan `pending`. **Y esa acción va por `POST`, nunca por un `GET` de un solo uso** — el proyecto ya reprodujo ese bug el 03/09/2026: los generadores de vista previa de WhatsApp y los escáneres de Gmail/Outlook **queman el enlace antes que el destinatario** (`auth_admin.py::_app_link`). Un enlace de confirmación auto-consumido por un escáner confirmaría direcciones solo. **Es la misma razón por la que P2, el enlace de acceso, se queda pasándose a mano por WhatsApp.**
 
-> **Suposición marcada:** no sé si la Ley 1581 exige un aviso de privacidad con formato específico en cada comunicación comercial, ni si un recordatorio de cobro cuenta como comunicación comercial. **Esto lo tiene que revisar un abogado, no un documento de diseño** (§12, pregunta 1).
+> **Suposición marcada, y sobrevive a la decisión del 22/09:** no sé si la Ley 1581 exige un aviso de privacidad con formato específico en cada comunicación, ni si un recordatorio de cobro cuenta como comunicación comercial. La decisión de §9.2 elige una **base** legal; **no** resuelve qué texto tiene que llevar el pie del correo. **Esto lo tiene que revisar un abogado, no un documento de diseño** — y cuando lo diga, es texto de plantilla, que vive en el repositorio (§4.4) y se cambia en un despliegue.
 
 ---
 
@@ -536,33 +611,52 @@ Proyectado a un inquilino del tamaño de LA GRAN LEGAL, si todos sus clientes tu
 
 De lo más valioso a lo menos, y cada fase entrega valor sola.
 
+> **Qué movió el 22/09/2026 (§12.0).** El orden no cambió; **el contenido de la fase 3 y su bloqueo sí.** Antes era *"capturar consentimientos"*: trabajo de mostrador que nadie controla y que no termina nunca, con la fase 4 esperando a un número que no dependía del equipo. Con la base contractual (§9.2), la fase 3 es **código** —columnas, mapa de finalidades, enlace de baja, `EmailStr`— y **los clientes con contrato vivo ya son destinatarios el día que se despliega**. Lo que sigue igual, y hay que decirlo para no vender humo: **el cuello de botella nunca fue legal, es que 14 de 16 clientes no tienen correo** (§1).
+
 | # | Qué | Por qué en este orden |
 |---|---|---|
 | **1** | **El resumen diario a la empresa (§2.4), empezando por E1 "listos para remate"** | **El primer envío que hay que construir.** Cuatro razones: (a) **100 % entregable hoy** — `app_user.email` es `NOT NULL`, 27 de 27; (b) **cero riesgo de Habeas Data** — el dato se queda dentro de la empresa, va a sus propios usuarios; (c) **cero ambigüedad de marca** — el destinatario es un usuario de Prendo; (d) **ejercita todo el andamio** (Resend, las dos tablas, estados, reintentos, idempotencia, el tercer paso del job) sobre una población donde un bug no cuesta nada. Y el valor es real y medible: **8 contratos listos para rematar en dev ahora mismo**, sin que nadie los mire |
 | **2** | **Migrar la invitación (P1) de Supabase Auth a Resend** | Es lo único que está **roto hoy**: `INVITE_RATE_LIMITED` con el SMTP compartido. Reusa todo lo de la fase 1 y no toca al cliente final. **No toca «Generar enlace»**, que es lo que hace que el alta de usuarios funcione sin correo y que no se rompe por esto |
-| **3** | **Consentimiento y captura (§1c, §9.2) + validar el correo en el backend** | **Va antes de cualquier correo al cliente, no después.** Sin las columnas de consentimiento, todo envío al cliente es un incumplimiento; sin captura, hay 2 destinatarios. Esta fase no manda ni un correo y es la que habilita las tres siguientes |
-| **4** | **Paz y salvo (C3) + abono (C2)** | El primer correo al cliente. Se empieza por el que el cliente **quiere**: el comprobante de que no debe nada. La consecuencia de un fallo es un correo de menos, no una sorpresa. Sirve de prueba real del consentimiento de la fase 3 |
+| **3** | **Base legal, salida y captura (§1c, §9.2) + validar el correo en el backend** | **Va antes de cualquier correo al cliente, pero ya no bloquea como antes.** Entrega: `email_basis` con su backfill a `contract`, el `purpose` en el catálogo, el mapa de §9.2-d, el enlace de baja (§9.2-e), la casilla de autorización expresa en el mostrador (§9.2-f) y el `EmailStr` que falta (§13-1). Sin esto, todo envío al cliente se apoya en una base que no quedó escrita en ningún lado. **Lo que dejó de ser:** una campaña previa de recolección de firmas. Sigue sin mandar ni un correo y sigue habilitando las tres siguientes |
+| **4** | **Paz y salvo (C3) + abono (C2)** | El primer correo al cliente. Se empieza por el que el cliente **quiere**: el comprobante de que no debe nada. La consecuencia de un fallo es un correo de menos, no una sorpresa. Sirve de prueba real de la base legal de la fase 3. **Lo que cambió el 22/09:** antes esta fase esperaba a que existieran consentimientos capturados uno por uno; ahora espera solo a que la fase 3 esté desplegada |
 | **5** | **Recordatorios de cuota y prórroga (R1–R4), agrupados por cliente** | El de más valor de negocio y el de más riesgo: llega sin que nadie lo pida, lleva plata y fechas, y es el que estampida si el job falla (§5.3). Exige la ventana de rezago y el tope de §3 **funcionando y probados**, no planeados |
 | **6** | **Contrato creado (C1), ampliación (C4), nota crédito (C5), venta (C6/C7)** | Valor real pero menor: el cliente estaba presente cuando pasó y se fue con el papel |
 | **7** | **Alertas inmediatas a la empresa (§2.5)** | Deliberadamente al final: su valor depende de que el resumen diario ya tenga la confianza de quien lo recibe |
 | **8** | **WhatsApp** | Fuera de alcance. Entra como `channel` nuevo sobre eventos que ya existen (§4.1), y el día que llegue será el canal principal del cliente. **Diseñar para que quepa es parte del trabajo de hoy; construirlo no** |
 
-**Lo que hay que tener listo antes de la fase 1:** el dominio verificado en Resend (ya está), el tope diario confirmado (§10), `notifications.receive_digest` en el seed de permisos, el interruptor por empresa **apagado**, y el tercer paso del job **después** de `recompute_all_statuses` (§5.2). Y **recrear la Fly Machine `nightly-job`** contra la imagen nueva en el mismo despliegue: `fly deploy` **no la actualiza** y esa es, literalmente, la causa de F21-10.
+**Lo que hay que tener listo antes de la fase 1:** el dominio verificado en Resend (ya está), el tope diario confirmado (§10), `notifications.receive_digest` en el seed de permisos, el interruptor por empresa **apagado**, el **catálogo de eventos con `purpose` y `default_enabled`** —con `auction_ready_customer` presente y en `false` (§2.2)—, y el tercer paso del job **después** de `recompute_all_statuses` (§5.2). El catálogo va desde la fase 1 aunque su primer evento apagado sea para el cliente: si nace sin esas dos columnas, agregarlas después obliga a tocar todos los tipos que ya existan. Y **recrear la Fly Machine `nightly-job`** contra la imagen nueva en el mismo despliegue: `fly deploy` **no la actualiza** y esa es, literalmente, la causa de F21-10.
 
 ---
 
 ## 12. Preguntas de negocio pendientes
 
-Ninguna se puede contestar desde el código. Van en orden de cuánto bloquean.
+**Eran ocho. Mateo cerró dos el 22/09/2026, y quedan siete:** las seis que no tocó, más una que **abrió la
+propia decisión** (el peso legal del aviso de prórroga). Se numera, aunque no sea una de las ocho
+originales, por la razón que el propio documento da más abajo: *una pregunta abierta escondida dentro de
+una decisión que dice «cerrada» es una pregunta que nadie vuelve a hacer.* Y esta va **al mismo abogado y
+en la misma consulta** que la del remate, así que tiene que viajar con la lista, no debajo de ella.** Las dos cerradas están resueltas en el cuerpo del documento y se resumen en §12.0, para que quien lea solo esta sección no las reabra como si siguieran en discusión. Ninguna de las seis que quedan se puede contestar desde el código. Van en orden de cuánto bloquean.
 
-1. **¿Le avisamos al cliente que su prenda está lista para remate?** La decidí como **no** (§2.2, R5: el aviso de remate va a la empresa) y quiero que quede claro que es **provisional**. El argumento para no hacerlo: avisar que un bien se va a rematar tiene peso legal en Colombia, y hacerlo por un correo cuya entrega no se puede probar es peor que no prometerlo — deja a la compraventa diciendo "le avisamos" sin poder demostrarlo. El argumento para hacerlo: es el aviso que más le importa al cliente y el que más rescata contratos. **Esto lo contesta un abogado, no un diseño.** Y con él: ¿el aviso de prórroga (R3) tiene el mismo peso?
-2. **¿Hace falta autorización explícita de Habeas Data para un recordatorio de cobro, o la cubre la relación contractual?** Diseñé por lo estricto: sin `email_consent_at` no sale nada (§9.2). Si la relación contractual ya lo cubre, se puede backfillear el consentimiento de los clientes con contrato vivo y el producto arranca con muchos más destinatarios. Si no, la fase 3 es obligatoria antes de la 4. Es la pregunta que más cambia el calendario.
-3. **¿Cuántos días antes se avisa la cuota, y cuántas veces?** Puse 3 días como parámetro sin decidir el valor. Y la de fondo: ¿se avisa **también** cuando ya venció (R2)? Un recordatorio es un favor; un cobro repetido es otra cosa, y la frontera la pone el negocio, no el sistema. **No reusar `grace_days`** (§4.3).
-4. **¿El resumen diario le llega también al dueño cuando no hay nada que reportar?** Un correo que dice "todo en orden" prueba que el sistema vive y entrena a abrirlo; treinta seguidos entrenan a archivarlo. Mi recomendación: **sí los primeros 30 días, después solo cuando haya algo** — pero es una decisión de producto.
-5. **¿Puede un inquilino redactar sus propios correos?** Lo decidí como **no** (§4.4), con el argumento de que la entregabilidad es un recurso compartido. Si comercialmente hace falta ofrecerlo, no es una fila en `document_template`: es un producto con revisión previa a la activación.
-6. **¿Cuál es el umbral de "descuento grande" y de "descuadre grande" para las alertas inmediatas (§2.5)?** Un monto fijo se desactualiza y un porcentaje no dice nada sobre un contrato chico. Hoy no hay con qué medirlo: hay 11 abonos y 13 ventas en septiembre en toda la base. Recomendación: nacer con el umbral en 0 —avisar **todos** los descuentos, que son pocos— y subirlo cuando moleste. **Cerrado de más se nota; abierto de más no** (es el mismo criterio con que se resolvió `TERMINAL_STATUSES` en `rules.py`).
-7. **¿`stale_after_days` en cuánto?** Cuántos días de atraso hacen que un recordatorio deje de mandarse (§5.3). Puse el mecanismo, no el número. Mi recomendación: **2 días** — un aviso de "vence en 3 días" mandado el día del vencimiento todavía sirve; mandado una semana después, no.
-8. **¿El correo del cliente es de la empresa o de la plataforma?** Un cliente de LA GRAN LEGAL que también es cliente de otra compraventa en Prendo hoy son **dos filas de `customer`**, una por inquilino, cada una con su autorización. Es coherente con todo el modelo (RLS por `company_id`) y creo que es correcto: autorizó a **una** compraventa. Pero significa que un opt-out en una no vale en la otra, y que puede recibir dos correos de dos inquilinos el mismo día. Vale decirlo antes de que alguien lo reporte como un bug.
+### 12.0 · Lo que se cerró el 22/09/2026 (Mateo)
+
+**(a) ¿Le avisamos al cliente que su prenda está lista para remate? — NO por ahora, y el evento existe igual.**
+Respuesta textual: *"por el momento no, pero la app debe tener la escalabilidad por si se requiere más adelante"*. **Confirma** lo que la spec proponía (§2.2, R5: el aviso va a la empresa, como E1) y le quita lo provisional. Lo que **agrega** es el requisito que importa: `auction_ready_customer` existe en el catálogo **desde el día uno**, con `audience='customer'` y `default_enabled = false`. No es un evento que se agregará: **está y no se dispara.** Encenderlo es poner `company.settings.notifications.events.auction_ready_customer = true` — una **preferencia por empresa y no un permiso**, con la comparación contra el precedente de `RECARGOS.md` §8.1 hecha renglón por renglón en §4.3 (resumida: *"nadie sabe responder eso al dar de alta"* no aplica porque acá no se pregunta al dar de alta, y *"la misma regla en dos pantallas"* no aplica porque hay una sola — el job). El argumento legal que lo frenó y **qué haría falta para que deje de aplicar** —registrar la entrega de forma probatoria, que el contrato firmado no diga otra cosa, y el concepto de un abogado— quedan escritos en §2.2-c, para que quien lo encienda sepa qué está asumiendo.
+
+> **Lo único que quedó abierto de esta decisión: ¿el aviso de prórroga (R3) tiene el mismo peso legal? Quedó numerada como la §12.1-7**, aunque no sea una de las ocho originales — precisamente por lo que se dice al final de este recuadro. R3 hoy **se manda** al cliente, con este criterio —**y es criterio propio, no concepto**—: informar que el contrato cambió de estado no es lo mismo que anunciar que la prenda se va a disponer. Va al mismo abogado y en la misma consulta que (a), porque es la misma pregunta con otro sujeto. Si la respuesta es que pesa igual, **no hay rediseño**: R3 ya es una entrada del catálogo y el mismo interruptor lo apaga (§2.2-d, §4.3). Se anota acá en un recuadro propio justamente porque **una pregunta abierta escondida dentro de una decisión que dice "cerrada" es una pregunta que nadie vuelve a hacer**.
+
+**(b) ¿Hace falta autorización expresa de Habeas Data para un recordatorio de cobro? — Se distingue por FINALIDAD, no por consentimiento genérico.**
+Un recordatorio sobre **el propio contrato que la persona firmó** es *servicio del contrato* y se apoya en la relación contractual; promociones, reactivaciones o avisos de otra empresa exigen **autorización expresa**. Se implementa como dos datos y un mapa: `customer.email_basis` (`contract` | `consent`), el `purpose` de cada evento del catálogo, y la tabla de §9.2-c que los cruza. **El punto no es la respuesta, es que la respuesta sea configuración:** si mañana un abogado dice "estricto", se cambia `service: ['consent']` y los clientes con base solo contractual quedan `suppressed` —contados y visibles— sin migración, sin backfill y sin rediseño. Es el mismo criterio de (a): la decisión difícil se vuelve un dato. Además: **todo correo lleva salida**, incluidos los de servicio del contrato (§9.2-e), y **la autorización expresa se captura en el mostrador de ahora en adelante sin volver obligatorio el correo** (§9.2-f). **Lo que cambia en el calendario:** los clientes con contrato vivo **ya son destinatarios**, y la fase 3 deja de ser una campaña de recolección para ser código (§11).
+**Salvedad, en el mismo renglón que la decisión y no en una nota al pie: esto es una recomendación de producto e ingeniería, no asesoría legal.** La **Ley 1581 de 2012** exige autorización previa, expresa e informada **como regla general**, y las excepciones las confirma un abogado (§9.2-h).
+
+### 12.1 · Las siete que siguen abiertas
+
+1. **¿Cuántos días antes se avisa la cuota, y cuántas veces?** Puse 3 días como parámetro sin decidir el valor. Y la de fondo: ¿se avisa **también** cuando ya venció (R2)? Un recordatorio es un favor; un cobro repetido es otra cosa, y la frontera la pone el negocio, no el sistema. **No reusar `grace_days`** (§4.3).
+2. **¿El resumen diario le llega también al dueño cuando no hay nada que reportar?** Un correo que dice "todo en orden" prueba que el sistema vive y entrena a abrirlo; treinta seguidos entrenan a archivarlo. Mi recomendación: **sí los primeros 30 días, después solo cuando haya algo** — pero es una decisión de producto.
+3. **¿Puede un inquilino redactar sus propios correos?** Lo decidí como **no** (§4.4), con el argumento de que la entregabilidad es un recurso compartido. Si comercialmente hace falta ofrecerlo, no es una fila en `document_template`: es un producto con revisión previa a la activación.
+4. **¿Cuál es el umbral de "descuento grande" y de "descuadre grande" para las alertas inmediatas (§2.5)?** Un monto fijo se desactualiza y un porcentaje no dice nada sobre un contrato chico. Hoy no hay con qué medirlo: hay 11 abonos y 13 ventas en septiembre en toda la base. Recomendación: nacer con el umbral en 0 —avisar **todos** los descuentos, que son pocos— y subirlo cuando moleste. **Cerrado de más se nota; abierto de más no** (es el mismo criterio con que se resolvió `TERMINAL_STATUSES` en `rules.py`).
+5. **¿`stale_after_days` en cuánto?** Cuántos días de atraso hacen que un recordatorio deje de mandarse (§5.3). Puse el mecanismo, no el número. Mi recomendación: **2 días** — un aviso de "vence en 3 días" mandado el día del vencimiento todavía sirve; mandado una semana después, no.
+6. **¿El correo del cliente es de la empresa o de la plataforma?** Un cliente de LA GRAN LEGAL que también es cliente de otra compraventa en Prendo hoy son **dos filas de `customer`**, una por inquilino, cada una con su autorización. Es coherente con todo el modelo (RLS por `company_id`) y creo que es correcto: autorizó a **una** compraventa. Pero significa que un opt-out en una no vale en la otra, y que puede recibir dos correos de dos inquilinos el mismo día. Vale decirlo antes de que alguien lo reporte como un bug.
+
+7. **¿El aviso de prórroga (R3) tiene el mismo peso legal que el de remate?** Es el residuo de la decisión (a) de §12.0: Mateo cerró el aviso de remate, y al cerrarlo quedó en pie la pregunta con otro sujeto. **R3 hoy SE MANDA** al cliente, con este criterio —**y es criterio propio, no concepto**—: informar que el contrato **cambió de estado** («entró en prórroga») no es lo mismo que anunciar que **la prenda se va a disponer**. El primero es información que el cliente hoy no tiene y que le sirve para pagar a tiempo; el segundo es el acto. Pero **la frontera entre informar un estado y anunciar una consecuencia patrimonial la pone un abogado, no este documento.** Va en la misma consulta que (a). Si la respuesta es que pesa igual, **no hay rediseño**: R3 ya es una entrada del catálogo y lo apaga el mismo interruptor (§2.2-d, §4.3) — que es, de paso, la prueba de que el mecanismo generaliza.
 
 ---
 
@@ -588,7 +682,8 @@ Ninguno bloquea el diseño; todos lo tocan.
 - **Idempotencia probada en las dos familias:** correr el job dos veces la misma noche ⇒ un solo correo; correrlo el mes siguiente ⇒ otro correo. Y el `on conflict do nothing` verificado como camino normal, no como excepción (§6.2).
 - **La ventana de rezago probada con el escenario real:** job apagado N días, encendido después ⇒ `skipped_stale`, cero envíos, y el conteo visible. **Hay que verlo fallar sin el fix** — la regla dura del proyecto.
 - **Un cliente sin correo produce una fila `unroutable`**, nunca una ausencia. Test explícito: es el caso normal (§1).
-- **Un cliente sin `email_consent_at` produce `suppressed`**, aunque tenga correo.
+- **La matriz de §9.2-c probada en sus cuatro casillas:** `service` + base `contract` sale; `marketing` + base `contract` queda `suppressed`; sin base no sale nada aunque haya correo; y `email_opt_out_at` gana sobre cualquier base. **Y el caso que prueba el diseño y no la regla:** cambiar el mapa a `service: ['consent']` ⇒ esos mismos clientes quedan `suppressed`, **sin tocar una migración ni una plantilla**.
+- **El evento apagado se prueba apagado y encendido.** Con `auction_ready_customer` en `false`, la noche produce E1 a la empresa y **ninguna** entrega al cliente; con el interruptor en `true`, produce las dos. Un evento que nace apagado y que nadie probó encendido es un evento que no existe — y toda la decisión de §2.2 se apoya en que encenderlo sea configuración.
 - **Ni la cédula ni la descripción de la prenda aparecen en ningún cuerpo renderizado.** Test sobre el render, no sobre la plantilla — un test que mira la plantilla no cubre el `payload`.
 - **El tope por cliente y día se hace cumplir en un solo lugar**, no en cada productor de eventos. Un punto de verdad, como el alcance de sede en `SUCURSALES.md` §8.4.
 - **Códigos de error nuevos en `API_GUIDE.md` §15**, con `tests/unit/test_error_catalog.py` en verde **en las dos direcciones** — un código sin documentar rompe la suite. Previsibles: `NOTIFICATIONS_DISABLED`, `CUSTOMER_NOT_NOTIFIABLE`, `NOTIFICATION_ALREADY_SENT`.
