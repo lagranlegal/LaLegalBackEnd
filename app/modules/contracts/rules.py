@@ -10,12 +10,20 @@ from decimal import Decimal
 
 from app.common.money import quantize
 
+#: Estados de los que un contrato NO vuelve a salir. Es PÚBLICA a propósito:
+#: `repository.list_active_contracts_for_recompute` la usa como filtro de la
+#: consulta que alimenta el job nocturno, en vez de repetir la lista escrita a
+#: mano (F21-10 — la lista quedó desincronizada once días y el job recalculó
+#: contratos ya reemplazados). Agregar un estado terminal nuevo ACÁ alcanza:
+#: la guarda de `compute_status` y el filtro de la consulta salen de esta
+#: misma constante, no hay un segundo lugar que tocar.
+#:
 #: `superseded` (00051) entra acá por la misma razón que los otros dos: un
 #: contrato que ya fue ampliado no vuelve a moverse. Sin esto, el recálculo
 #: en lectura y el job nocturno lo devolverían a `in_arrears` en cuanto
 #: pasara un mes, y aparecería en la cola de cobro un documento que ya no
 #: existe como obligación.
-_TERMINAL_STATUSES = {"paid", "auctioned", "superseded"}
+TERMINAL_STATUSES = frozenset({"paid", "auctioned", "superseded"})
 
 
 def add_months(d: date, n: int) -> date:
@@ -114,7 +122,7 @@ def compute_status(
     `in_extension` se dispara UNA vez; no se vuelve a calcular `extension_ends_at`
     mientras siga en ese estado (aunque sigan pasando meses sin pagar).
     """
-    if current_status in _TERMINAL_STATUSES:
+    if current_status in TERMINAL_STATUSES:
         return current_status, extension_ends_at
 
     owed = months_between(interest_paid_until, today)

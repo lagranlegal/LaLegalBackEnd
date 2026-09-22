@@ -4,11 +4,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.search import MIN_SEARCH_CHARS, name_clauses
+from app.modules.contracts import rules
 
 _CONTRACT_COLUMNS = (
     "id, number, legacy_code, customer_id, principal, capital_balance, appraisal_value, "
@@ -569,13 +570,18 @@ async def list_active_contracts_for_recompute(db: AsyncSession) -> list[Row[Any]
     """Todos los contratos no terminales de TODAS las empresas — para el job
     nocturno (`recompute_all_statuses`). Corre con la sesión de bypass
     (`get_db`), no una tenant-scoped: necesita ver todas las empresas.
+
+    El filtro sale de `rules.TERMINAL_STATUSES`, NO de una lista escrita a
+    mano acá: esa lista se desincronizó de la constante cuando `superseded`
+    entró en 00051 y el job estuvo once días recalculando contratos ya
+    reemplazados (QA_AUDITORIA §F21-10). Se lee en cada llamada —no se copia
+    al importar— para que agregar un estado terminal a la constante alcance.
     """
-    result = await db.execute(
-        text(
-            f"""
-            select company_id, {_CONTRACT_COLUMNS} from public.contract
-            where status not in ('paid', 'auctioned')
-            """
-        )
-    )
+    stmt = text(
+        f"""
+        select company_id, {_CONTRACT_COLUMNS} from public.contract
+        where status not in :terminal_statuses
+        """
+    ).bindparams(bindparam("terminal_statuses", expanding=True))
+    result = await db.execute(stmt, {"terminal_statuses": sorted(rules.TERMINAL_STATUSES)})
     return list(result.all())
