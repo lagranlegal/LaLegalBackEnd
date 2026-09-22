@@ -222,7 +222,29 @@ async def _correr() -> int:
 
 
 def main() -> int:
-    return asyncio.run(_correr())
+    """Traduce el resultado a un código de salida, distinguiendo tres cosas.
+
+    `0` sano · `1` una invariante ROTA · `2` **no se pudo verificar**.
+
+    El 2 no es un lujo: sin él, un parpadeo de red o el pooler rechazando la
+    conexión salen con el código 1 de Python y el cron reporta «las cadenas de
+    contratos están rotas» cuando nadie las tocó. Un guardián que da falsas
+    alarmas se empieza a ignorar, y el día que avise de verdad nadie lo va a
+    mirar — es la misma lección que «una CI que siempre falla no dice nada».
+
+    Y al revés vale igual: **"no se pudo verificar" tampoco es "está sano"**.
+    Por eso no se devuelve 0. Mismo criterio que `verificar_job_nocturno.py`.
+    """
+    try:
+        return asyncio.run(_correr())
+    except KeyboardInterrupt:
+        print("\n  Interrumpido.")
+        return 2
+    except Exception as e:  # noqa: BLE001 — cualquier fallo de conexión o de SQL
+        print(f"\n  NO SE PUDO VERIFICAR: {type(e).__name__}: {str(e)[:300]}")
+        print("  Esto NO dice que las cadenas estén rotas — dice que no se pudo mirar.")
+        print("  Revisar `DATABASE_URL` en `.env` y la conectividad con la base.\n")
+        return 2
 
 
 if __name__ == "__main__":
