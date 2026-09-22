@@ -35,6 +35,13 @@ from app.modules.reports.schemas import (
 )
 
 
+def _dec(value: Any) -> Decimal:
+    """`sum(...) filter (...)` devuelve NULL cuando ningún registro cae en el
+    tramo, y un tramo vacío es CERO, no "sin dato" — en un reporte de dinero un
+    hueco se lee como error del sistema."""
+    return Decimal(str(value)) if value is not None else Decimal("0.00")
+
+
 def _row_to_closing(row: Row[Any]) -> ClosingHistoryOut:
     m = row._mapping
     return ClosingHistoryOut(
@@ -162,8 +169,16 @@ async def get_profit_summary(
 
     gross_revenue: Decimal = m["gross_revenue"]
     discounts: Decimal = m["discounts"]
-    cogs: Decimal = m["cost_of_goods_sold"]
-    net_revenue = gross_revenue - discounts
+    # F21-12: la devolución es CONTRA-INGRESO del período en que se devolvió,
+    # no una borradura de la venta. `returns` ya viene neto del descuento
+    # prorrateado de su venta original (ver `repository.profit_summary`), así
+    # que restarlo acá no vuelve a quitar ese descuento.
+    returns = _dec(m["returns_gross"]) - _dec(m["returns_discounts"])
+    returns_cost = _dec(m["returns_cost"])
+    # El costo se devuelve NETO: la mercancía volvió al inventario, y dejar su
+    # costo dentro del costo de ventas era la otra mitad del doble conteo.
+    cogs = _dec(m["cost_of_goods_sold"]) - returns_cost
+    net_revenue = gross_revenue - discounts - returns
     gross_profit = net_revenue - cogs
 
     # `None` y no 0 cuando no hubo ingresos: un margen de 0% dice "vendí sin
@@ -179,8 +194,11 @@ async def get_profit_summary(
         units_sold=m["units_sold"],
         gross_revenue=gross_revenue,
         discounts=discounts,
+        sales_returns=returns,
+        return_count=m["return_count"] or 0,
         net_revenue=net_revenue,
         cost_of_goods_sold=cogs,
+        returns_cost=returns_cost,
         gross_profit=gross_profit,
         margin_pct=margin_pct,
     )
@@ -224,13 +242,6 @@ async def get_pawn_performance(
         open_contracts=m["open_contracts"],
         yield_on_current_portfolio_pct=yield_pct,
     )
-
-
-def _dec(value: Any) -> Decimal:
-    """`sum(...) filter (...)` devuelve NULL cuando ningún registro cae en el
-    tramo, y un tramo vacío es CERO, no "sin dato" — en un reporte de dinero un
-    hueco se lee como error del sistema."""
-    return Decimal(str(value)) if value is not None else Decimal("0.00")
 
 
 async def get_payables(db: AsyncSession, *, company_id: UUID) -> PayablesOut:
@@ -374,8 +385,18 @@ async def get_income_statement(
     # `/reports/series` arrastraba el mismo sesgo por usar esta definición.
     ventas = _dec(t["gross_revenue"]) - _dec(t["discounts"])
     intereses = _dec(e["interest_collected"]) - _dec(e["interest_discounts"])
-    ingresos = ventas + intereses
-    costo_ventas = _dec(t["cost_of_goods_sold"])
+    # F21-12: las devoluciones son CONTRA-INGRESO con LÍNEA PROPIA, no un
+    # descuento silencioso de «Ventas». Restarlas adentro dejaría a «Ventas»
+    # bajando sin explicación, que es exactamente lo que hace que nadie
+    # confíe en un reporte; y una devolución es un hecho del negocio que el
+    # dueño quiere ver. Caen en el período de la devolución, así que un mes
+    # ya cerrado no cambia hacia atrás.
+    devoluciones = _dec(t["returns_gross"]) - _dec(t["returns_discounts"])
+    ingresos = ventas - devoluciones + intereses
+    # Neto del costo de lo devuelto: volvió al inventario, así que ya no es
+    # costo de nada vendido. Con eso se cierra el doble conteo — el artículo
+    # cuenta como inventario disponible y NO como costo de ventas.
+    costo_ventas = _dec(t["cost_of_goods_sold"]) - _dec(t["returns_cost"])
     utilidad_bruta = ingresos - costo_ventas
     gastos_operativos = _dec(g["total"])
     utilidad = utilidad_bruta - gastos_operativos
@@ -384,6 +405,7 @@ async def get_income_statement(
         from_date=from_date,
         to_date=to_date,
         sales_revenue=ventas,
+        sales_returns=devoluciones,
         interest_revenue=intereses,
         total_revenue=ingresos,
         cost_of_goods_sold=costo_ventas,
@@ -423,6 +445,7 @@ async def monthly_series(db: AsyncSession, *, company_id: UUID, months: int) -> 
                 month=row._mapping["month"],
                 interest_revenue=quantize(row._mapping["interest_revenue"]),
                 sales_revenue=quantize(row._mapping["sales_revenue"]),
+                sales_returns=quantize(row._mapping["sales_returns"]),
                 expenses=quantize(row._mapping["expenses"]),
             )
             for row in rows

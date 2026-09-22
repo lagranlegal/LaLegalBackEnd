@@ -5,7 +5,7 @@ APIs de contracts/inventory/sales/cashbox ya probadas en pasos anteriores.
 Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -72,7 +72,17 @@ async def reports_tenant(
         # reportes tiene que poder crearlos.
         "cashbox.expense",
         "inventory.create",
+        "inventory.view",
         "sales.create",
+        "sales.view",
+        # F21-12: el estado de resultados resta las devoluciones del período,
+        # así que este tenant tiene que poder registrarlas — y otorgar el
+        # descuento de venta cuyo prorrateo se prueba.
+        "sales.return",
+        # 45 días después de la venta la devolución queda fuera del plazo por
+        # defecto (30 días): el camino real de negocio es el override.
+        "sales.return_override_time_limit",
+        "sales.apply_discount",
         "reports.view",
         "audit.view",
     )
@@ -180,6 +190,8 @@ async def reports_tenant(
         except Exception:
             pass
 
+    await _try_delete("delete from public.sale_return_line where company_id = :cid")
+    await _try_delete("delete from public.sale_return where company_id = :cid")
     await _try_delete("delete from public.sale_line where company_id = :cid")
     await _try_delete("delete from public.sale where company_id = :cid")
     await _try_delete("delete from public.inventory_entry_line where company_id = :cid")
@@ -890,3 +902,363 @@ async def test_interest_discount_lowers_revenue_like_a_sale_discount(
     punto = serie.json()["points"][-1]
     # La serie usa la MISMA definición que el estado de resultados, no una tercera.
     assert Decimal(punto["interest_revenue"]) == Decimal("40000.00")
+
+
+# =========================================================================
+# F21-12 · La devolución es CONTRA-INGRESO del período en que se devolvió.
+#
+# Antes de esto, `profit_summary` filtraba `status = 'completed'` y una
+# devolución NUNCA cambia el status (el único `update sale set status` del
+# código es a `'voided'`). Resultado: el ingreso devuelto seguía contado, su
+# costo seguía dentro del costo de ventas, y la mercancía reingresada volvía
+# a sumar en la valorización — el mismo activo contado DOS VECES.
+#
+# La decisión: una devolución es un DOCUMENTO (`sale_return`), igual que
+# `sale`, `contract_payment` y `expense`, y el estado de resultados sale de
+# los documentos. Se lee, no se borra la venta. Tres razones:
+#   1. Es la doctrina que el módulo ya aplica.
+#   2. Cambiar `sale.status` sacaría la venta ENTERA del resultado por una
+#      devolución PARCIAL, y reescribiría un mes ya cerrado (F21-15).
+#   3. `sale_return.return_date` existe: el contra-ingreso cae en su propio
+#      período y el mes de la venta no se mueve.
+# =========================================================================
+
+
+def _return_sale(
+    client: TestClient, token: str, sale_id: str, lines: list[dict], *, restock: bool = True
+) -> dict:
+    r = client.post(
+        f"/api/v1/sales/{sale_id}/returns",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "reason": "defect",
+            "settlement_method": "cash",
+            "lines": [{**line, "restock": restock} for line in lines],
+        },
+    )
+    assert r.status_code == 201, r.text
+    return dict(r.json())
+
+
+def _ingresar_uno(client: TestClient, tenant: dict, *, unit_cost: str, unit_price: str) -> str:
+    """Ingresa UN artículo con precio y devuelve su `item_id`."""
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "purchase",
+            "supplier_id": str(tenant["supplier_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "name": f"Pieza {unit_cost}",
+                    "cat1_id": str(tenant["cat1_id"]),
+                    "cat2_id": str(tenant["cat2_id"]),
+                    "cat3_id": str(tenant["cat3_id"]),
+                    "unit_cost": unit_cost,
+                    "photos": ["http://example.com/x.jpg"],
+                    "sale_price": unit_price,
+                }
+            ],
+        },
+    ).json()
+    return str(entry["items"][0]["id"])
+
+
+def _vender_uno(
+    client: TestClient,
+    tenant: dict,
+    item_id: str,
+    *,
+    unit_price: str,
+    discount: str | None = None,
+) -> dict:
+    payload: dict = {
+        "payment_method": "cash",
+        "lines": [{"item_id": item_id, "quantity": "1", "unit_price": unit_price}],
+    }
+    if discount is not None:
+        payload["discount_amount"] = discount
+        payload["discount_reason"] = "Prueba de prorrateo"
+    sale = client.post(
+        "/api/v1/sales",
+        headers=_headers(tenant["token"], idempotency_key=str(uuid4())),
+        json=payload,
+    )
+    assert sale.status_code == 201, sale.text
+    return dict(sale.json())
+
+
+def _sell_one(client: TestClient, tenant: dict, *, unit_cost: str, unit_price: str) -> dict:
+    item_id = _ingresar_uno(client, tenant, unit_cost=unit_cost, unit_price=unit_price)
+    return _vender_uno(client, tenant, item_id, unit_price=unit_price)
+
+
+def test_devolucion_total_saca_el_ingreso_y_su_costo_sin_tocar_el_inventario(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Devolución TOTAL el mismo día: el ingreso vuelve a cero, el costo
+    también, y —lo importante— la valorización del inventario queda EXACTAMENTE
+    donde estaba antes de vender.
+
+    Ese último assert es el que prueba que el doble conteo se cerró por el
+    lado del COSTO y no por el del activo. El artículo devuelto está otra vez
+    en `available` y vuelve a valorizarse: eso es correcto, volvió a ser
+    inventario de verdad. Lo que estaba mal era que su costo siguiera dentro
+    de `cost_of_goods_sold` al mismo tiempo. Quien "arregle" también la
+    valorización estaría restando dos veces.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
+    )
+    today = date.today().isoformat()
+
+    item_id = _ingresar_uno(client, reports_tenant, unit_cost="300000.00", unit_price="500000.00")
+    # Foto del activo CON el artículo adentro y todavía sin vender: es contra
+    # este número que la valorización tiene que volver después de la devolución.
+    valorizacion_inicial = client.get("/api/v1/reports/inventory-valuation", headers=headers).json()
+    assert Decimal(valorizacion_inicial["cost_value"]) == Decimal("300000.00")
+
+    sale = _vender_uno(client, reports_tenant, item_id, unit_price="500000.00")
+
+    vendido = _profit(client, reports_tenant["token"], today, today)
+    assert Decimal(vendido["gross_revenue"]) == Decimal("500000.00")
+    assert Decimal(vendido["cost_of_goods_sold"]) == Decimal("300000.00")
+    assert Decimal(vendido["sales_returns"]) == Decimal("0.00")
+
+    _return_sale(
+        client,
+        reports_tenant["token"],
+        sale["id"],
+        [{"sale_line_id": sale["lines"][0]["id"], "quantity": "1"}],
+    )
+
+    devuelto = _profit(client, reports_tenant["token"], today, today)
+
+    # La venta SIGUE siendo una venta del período: no se borra ni se anula.
+    assert devuelto["sale_count"] == 1
+    assert Decimal(devuelto["gross_revenue"]) == Decimal("500000.00")
+    # Y la devolución la contrapesa, con su propio número visible.
+    assert devuelto["return_count"] == 1
+    assert Decimal(devuelto["sales_returns"]) == Decimal("500000.00")
+    assert Decimal(devuelto["net_revenue"]) == Decimal("0.00")
+    # El costo sale del costo de ventas: la mercancía volvió.
+    assert Decimal(devuelto["returns_cost"]) == Decimal("300000.00")
+    assert Decimal(devuelto["cost_of_goods_sold"]) == Decimal("0.00")
+    assert Decimal(devuelto["gross_profit"]) == Decimal("0.00")
+
+    # El activo NO se cuenta dos veces: la valorización vuelve a lo que era
+    # antes de vender, ni más ni menos.
+    valorizacion_final = client.get("/api/v1/reports/inventory-valuation", headers=headers).json()
+    assert Decimal(valorizacion_final["cost_value"]) == Decimal(valorizacion_inicial["cost_value"])
+
+
+def test_devolucion_parcial_prorratea_el_descuento_de_la_cabecera(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """El descuento vive en la CABECERA de la venta, así que una devolución
+    parcial solo puede llevarse su parte proporcional.
+
+    La venta: cadena de 900.000 (costo 100.000) + anillo de 100.000 (costo
+    20.000) = 1.000.000 bruto, con 100.000 de descuento. Se devuelve SOLO el
+    anillo.
+
+    El prorrateo es por PARTICIPACIÓN EN EL BRUTO, no por unidades: el anillo
+    es el 10% del bruto, así que se lleva 10.000 de descuento y el
+    contra-ingreso es 100.000 − 10.000 = **90.000**. Prorrateado por unidades
+    serían 50.000 (mitad de los artículos) y se restaría MÁS ingreso del que
+    entró por ese anillo.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
+    )
+    today = date.today().isoformat()
+
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "purchase",
+            "supplier_id": str(reports_tenant["supplier_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "name": "Cadena cara",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit_cost": "100000.00",
+                    "photos": ["http://example.com/c.jpg"],
+                    "sale_price": "900000.00",
+                },
+                {
+                    "name": "Anillo barato",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit_cost": "20000.00",
+                    "photos": ["http://example.com/d.jpg"],
+                    "sale_price": "100000.00",
+                },
+            ],
+        },
+    ).json()
+    items = {i["cost"]: i for i in entry["items"]}
+    cadena, anillo = items["100000.00"], items["20000.00"]
+
+    sale = client.post(
+        "/api/v1/sales",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "discount_amount": "100000.00",
+            "discount_reason": "Cliente frecuente",
+            "lines": [
+                {"item_id": cadena["id"], "quantity": "1", "unit_price": "900000.00"},
+                {"item_id": anillo["id"], "quantity": "1", "unit_price": "100000.00"},
+            ],
+        },
+    )
+    assert sale.status_code == 201, sale.text
+    sale_body = sale.json()
+    linea_anillo = next(line for line in sale_body["lines"] if line["item_id"] == anillo["id"])
+
+    _return_sale(
+        client,
+        reports_tenant["token"],
+        sale_body["id"],
+        [{"sale_line_id": linea_anillo["id"], "quantity": "1"}],
+    )
+
+    body = _profit(client, reports_tenant["token"], today, today)
+
+    assert Decimal(body["gross_revenue"]) == Decimal("1000000.00")
+    assert Decimal(body["discounts"]) == Decimal("100000.00")
+    # 100.000 de bruto devuelto − 10.000 de descuento prorrateado (10% del
+    # bruto de la venta). NO 100.000 (sin prorratear) ni 50.000 (por unidades).
+    assert Decimal(body["sales_returns"]) == Decimal("90000.00")
+    # 1.000.000 − 100.000 − 90.000
+    assert Decimal(body["net_revenue"]) == Decimal("810000.00")
+    # 120.000 de costo − 20.000 del anillo devuelto
+    assert Decimal(body["returns_cost"]) == Decimal("20000.00")
+    assert Decimal(body["cost_of_goods_sold"]) == Decimal("100000.00")
+    assert Decimal(body["gross_profit"]) == Decimal("710000.00")
+
+    # La venta sigue ENTERA en el período: una devolución parcial no la saca.
+    # (Si esto se hubiera resuelto cambiando `sale.status`, `sale_count` sería
+    # 0 y los 900.000 de la cadena habrían desaparecido del resultado.)
+    assert body["sale_count"] == 1
+    assert body["units_sold"] == 2
+
+
+async def test_devolucion_de_otro_mes_no_reescribe_el_mes_de_la_venta(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """El punto de `return_date`: el contra-ingreso cae en el período de la
+    DEVOLUCIÓN, no en el de la venta.
+
+    La venta se antedata 45 días (mes anterior) y la devolución se registra
+    hoy. El mes de la venta tiene que quedar EXACTAMENTE igual —es un mes ya
+    cerrado, y un reporte que cambia hacia atrás es el defecto F21-15— y el
+    mes de hoy es el que se lleva la devolución.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
+    )
+    hoy = date.today()
+    entonces = hoy - timedelta(days=45)
+
+    sale = _sell_one(client, reports_tenant, unit_cost="300000.00", unit_price="500000.00")
+
+    # Antedatar la venta. `sale` no es inmutable (la anulación la actualiza),
+    # y es la única forma de tener una venta de otro mes sin esperar un mes.
+    # La devolución NO se puede mover: `sale_return` sí es inmutable
+    # (`forbid_change`), que es justamente por qué su fecha es confiable.
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.sale set sold_at = :cuando where id = :sid"),
+            {"cuando": entonces, "sid": sale["id"]},
+        )
+
+    _return_sale(
+        client,
+        reports_tenant["token"],
+        sale["id"],
+        [{"sale_line_id": sale["lines"][0]["id"], "quantity": "1"}],
+    )
+
+    # --- El mes de la VENTA: intacto -------------------------------------
+    viejo = _profit(client, reports_tenant["token"], entonces.isoformat(), entonces.isoformat())
+    assert viejo["sale_count"] == 1
+    assert Decimal(viejo["gross_revenue"]) == Decimal("500000.00")
+    assert Decimal(viejo["cost_of_goods_sold"]) == Decimal("300000.00")
+    assert Decimal(viejo["gross_profit"]) == Decimal("200000.00")
+    # La devolución de HOY no toca ese día.
+    assert viejo["return_count"] == 0
+    assert Decimal(viejo["sales_returns"]) == Decimal("0.00")
+
+    # --- El mes de la DEVOLUCIÓN: se lleva el contra-ingreso --------------
+    nuevo = _profit(client, reports_tenant["token"], hoy.isoformat(), hoy.isoformat())
+    assert nuevo["sale_count"] == 0
+    assert Decimal(nuevo["gross_revenue"]) == Decimal("0.00")
+    assert nuevo["return_count"] == 1
+    assert Decimal(nuevo["sales_returns"]) == Decimal("500000.00")
+    assert Decimal(nuevo["net_revenue"]) == Decimal("-500000.00")
+    # El costo del período queda NEGATIVO, y eso es correcto: la mercancía
+    # entró al inventario este mes sin haberse vendido este mes.
+    assert Decimal(nuevo["cost_of_goods_sold"]) == Decimal("-300000.00")
+    assert Decimal(nuevo["gross_profit"]) == Decimal("-200000.00")
+
+
+def test_estado_de_resultados_muestra_las_devoluciones_en_linea_propia(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """«Devoluciones» tiene LÍNEA PROPIA, no se resta en silencio de «Ventas».
+
+    Un número que baja sin explicación es lo que hace que nadie confíe en un
+    reporte: si «Ventas» pasara de 500.000 a 0 sin decir por qué, el dueño
+    creería que el sistema perdió la venta. Con la línea aparte se ve el hecho
+    del negocio —hubo una venta Y hubo una devolución— y el total cuadra.
+
+    `/reports/series` usa la MISMA definición y la expone con el mismo nombre
+    (`sales_returns`), para no crear una tercera semántica de ingreso.
+    """
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
+    )
+    today = date.today().isoformat()
+
+    sale = _sell_one(client, reports_tenant, unit_cost="300000.00", unit_price="500000.00")
+    _return_sale(
+        client,
+        reports_tenant["token"],
+        sale["id"],
+        [{"sale_line_id": sale["lines"][0]["id"], "quantity": "1"}],
+    )
+
+    r = client.get(
+        "/api/v1/reports/income-statement",
+        headers=headers,
+        params={"from_date": today, "to_date": today},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    # «Ventas» se queda como estaba: la venta ocurrió.
+    assert Decimal(body["sales_revenue"]) == Decimal("500000.00")
+    # Y la devolución baja por su propia línea.
+    assert Decimal(body["sales_returns"]) == Decimal("500000.00")
+    # `sales_revenue − sales_returns + interest_revenue`
+    assert Decimal(body["total_revenue"]) == Decimal(body["interest_revenue"])
+    # El costo de ventas ya viene neto: cierra el doble conteo.
+    assert Decimal(body["cost_of_goods_sold"]) == Decimal("0.00")
+
+    # La serie mensual expone lo mismo con el mismo nombre.
+    serie = client.get("/api/v1/reports/series", headers=headers, params={"months": 3}).json()
+    mes_actual = serie["points"][-1]
+    assert Decimal(mes_actual["sales_revenue"]) == Decimal("500000.00")
+    assert Decimal(mes_actual["sales_returns"]) == Decimal("500000.00")

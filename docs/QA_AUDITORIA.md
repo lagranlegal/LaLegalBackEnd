@@ -463,6 +463,58 @@ no la salida del comando. `flyctl machine list --app compraventa-backend-dev --j
 
 ---
 
+## Hallazgos al corregir la guía para publicarla — 22/09/2026 (cinco)
+
+Salieron de verificar **contra el código** dos afirmaciones que la guía ya hacía, antes de republicarla.
+**Las dos estaban mal**, y una de ellas era una corrección mía del día anterior — o sea que el error
+sobrevivió a una ronda de revisión. Es exactamente el patrón que este documento ya registra: *el contenido
+heredado no se salva por estar escrito*.
+
+### 🔴 F21-25 · MEDIA — «Costo detenido» subestima, y subestimar es la dirección peligrosa
+
+`features/reports/api.ts:224` pide `/reports/stale-inventory` con **`limit: 20`**, y el servicio calcula
+`product_count = len(items)` y `total_cost_value` sumando **solo lo que devolvió esa página**
+(`app/modules/reports/service.py:332-337`). Verificado por mí.
+
+Con más de 20 productos sobre el umbral, la tarjeta dice *«N productos con $X en costo detenido»* y **las dos
+cifras son falsas por debajo**. El dueño mira el número para decidir si liquida mercancía parada: un total
+que se queda corto dice «no es tanto» justo cuando sí lo es.
+
+**No falla, no avisa y no se nota**: con pocos productos el número es correcto, así que el error aparece solo
+cuando la empresa crece — que es cuando más importa. El arreglo es devolver los totales del universo
+completo, no los de la página. Queda como advertencia en la guía mientras tanto.
+
+### F21-26 · BAJA — Un comentario que dice lo contrario del código
+
+El docstring de `PayablesCard` (`frontend-starter/src/features/reports/components/ContablesSection.tsx:17-25`)
+afirma: *«El proveedor con la deuda más vieja aparece primero en la lectura, no el que más debe»*. El SQL
+ordena `order by sum(e.total_cost) desc` (`app/modules/reports/repository.py:346`): es **exactamente al
+revés**.
+
+Otra vez *«un comentario del código puede estar mintiendo»*, que en este proyecto ya costó un `catch` vacío.
+La guía quedó escrita con lo que hace el SQL.
+
+### F21-27 · BAJA — Docstring desactualizado en los rankings
+
+`features/reports/rankings.ts:21-26` dice que el ranking va *«sobre TODO el histórico»* porque *«`GET /sales`
+no tiene filtro de fecha»*. Desde el **02/09/2026** sí lo tiene, y `useItemSales` manda `from_date`/`to_date`
+(`features/reports/api.ts:120`). La UI y la guía dicen «del rango», que es lo correcto; el comentario es el
+que quedó atrás.
+
+### F21-28 · BAJA — El Excel de Ventas puede dejar la columna «Cliente» vacía, sin avisar
+
+Resuelve los nombres con `fetchAllCustomers()` (`features/customers/api.ts:26`), **también topado en 2.500**
+(`app/modules/customers/router.py:23`). Con más de 2.500 clientes, algunas filas salen sin nombre y **nada lo
+dice**. Caso remoto hoy; no se puso en la guía para no cargar un aviso ya denso.
+
+### F21-29 · COSMÉTICA — «más de N días» cuando el filtro es `>=`
+
+`StaleCard` rotula *«Sin venderse hace más de N días»* pero el `having` es `>=`
+(`app/modules/reports/repository.py:414`). Un producto con exactamente N días aparece bajo un rótulo que dice
+que no debería.
+
+---
+
 ## Hallazgos del diseño de notificaciones — 21/09/2026 (seis, y una corrección al relato de F21-10)
 
 Salieron de escribir `docs/NOTIFICACIONES.md`. **Es la quinta vez que documentar algo resulta ser la forma
@@ -541,7 +593,7 @@ que existen las devoluciones y las anulaciones**. Verificado: `grep` de `return|
 `reports/repository.py` y `reports/service.py` no devuelve **nada**. No es que las traten mal — no las
 tratan.
 
-### 🔴 F21-12 · ALTO — Una devolución no baja el Estado de resultados, y el activo se cuenta dos veces
+### ✅ F21-12 · ALTO — Una devolución no baja el Estado de resultados, y el activo se cuenta dos veces · **RESUELTO 22/09/2026**
 
 `profit_summary` filtra `status = 'completed'` (`app/modules/reports/repository.py:203-206`) y **una
 devolución nunca cambia el `status`**: el único `update public.sale set status` de todo el código es a
@@ -559,10 +611,82 @@ una vez como costo de algo que se vendió y otra como inventario disponible. Es 
 error que este proyecto ya corrigió cuatro veces (*"ingreso no es ganancia"*, *"el interés es ingreso; el
 capital recuperado no"*), reaparecida por el lado de las devoluciones.
 
-Queda **documentado como limitación conocida** en la parte 6 de la guía, que es lo honesto mientras no se
-arregle. **No se arregló**: toca la semántica de `sale.status` o exige que los reportes lean las
-devoluciones, y eso es una tanda propia con decisión de negocio (¿una devolución parcial deja la venta en
-`completed`? ¿aparece un `partially_returned`?).
+**Arreglado el 22/09/2026: los reportes LEEN las devoluciones.** La pregunta abierta ("¿una devolución
+parcial deja la venta en `completed`?") se resolvió por el lado contrario al que sugería: **sí la deja**, y
+la devolución entra como **contra-ingreso** (*devoluciones en ventas*), registrado en el período de la
+**DEVOLUCIÓN**. No se toca `sale.status` y no existe `partially_returned`.
+
+**Por qué esa decisión y no borrar la venta:**
+
+1. **Es lo que este proyecto ya hace.** Su doctrina es *"el estado de resultados sale de los DOCUMENTOS,
+   no de los movimientos de caja"*. Una devolución **es un documento** (`sale_return`, 00042), igual que
+   `sale`, `contract_payment` y `expense`. Leerla es aplicar la regla que ya existe, no inventar una.
+2. **Cambiar `sale.status` sería peor.** Una devolución **parcial** sacaría la venta ENTERA del resultado
+   — en el test de prorrateo, los 900.000 de la cadena habrían desaparecido por devolver un anillo de
+   100.000. Y reescribiría un mes ya cerrado, que es exactamente el defecto F21-15.
+3. **`sale_return.return_date` existe** (y `sale_return` es inmutable por `forbid_change`, así que esa
+   fecha es confiable), así que el contra-ingreso cae en su propio período y un mes cerrado no cambia
+   hacia atrás.
+
+**El doble conteo se cerró por el lado del COSTO, y eso es deliberado.** Una vez que el costo devuelto sale
+de `cost_of_goods_sold`, que el artículo esté de nuevo en `available` y vuelva a valorizarse es
+**correcto**: volvió a ser inventario de verdad. **El doble conteo era el síntoma de no registrar la
+devolución, no un defecto aparte.** Queda escrito acá porque es lo que evita que alguien "arregle" también
+la valorización del inventario y termine restando dos veces. El test
+`test_devolucion_total_saca_el_ingreso_y_su_costo_sin_tocar_el_inventario` fija justamente eso: la
+valorización tiene que volver **exactamente** al número que tenía antes de vender.
+
+**El prorrateo del descuento.** `discount_amount` vive en la CABECERA de la venta, así que una devolución
+parcial solo puede llevarse su parte. Se prorratea por **participación en el bruto** de la venta
+(`quantity × unit_price` sobre el bruto total), **no por unidades**: un descuento de 100.000 sobre una
+venta de una cadena de 900.000 y un anillo de 100.000 no se reparte 50/50 — al anillo le tocan 10.000, no
+50.000. Sin el prorrateo se restaría el bruto devuelto entero y saldría del resultado más plata de la que
+entró. Se redondea por línea a 2 decimales (igual que `subtotal` al vender); devolver una venta completa en
+varias devoluciones puede dejar un residuo de centavos contra `discount_amount`, y repartirlo exigiría
+saber cuál devolución es "la última", dato que no existe al consultar.
+
+**Dónde se ve: línea propia.** «Devoluciones» aparece como su **propia fila** en el estado de resultados
+(pantalla y exportación a Excel), no restada en silencio de «Ventas». Un número que baja sin explicación es
+lo que hace que nadie confíe en un reporte: si «Ventas» cayera sola, el dueño creería que el sistema perdió
+la venta. En la gráfica de tendencia la serie sí se pinta neta, pero se llama **«Ventas netas»** — el
+número más bajo tiene nombre, y el desglose está arriba.
+
+**Dónde se aplicó (los TRES lugares que calculan ingreso, para no crear una cuarta definición):**
+
+| Lugar | Qué cambió |
+|---|---|
+| `reports/repository.py::profit_summary` | CTE `devoluciones` por `return_date`; devuelve `return_count`, `returns_gross`, `returns_discounts`, `returns_cost`. Alimenta `/reports/profit` **y** `/reports/income-statement`. |
+| `reports/repository.py::monthly_series` | CTE `devoluciones` por mes de `return_date`; nueva columna `sales_returns` en cada punto de `/reports/series`. |
+| `reports/service.py` | `net_revenue = gross − discounts − sales_returns`; `cost_of_goods_sold` neto de `returns_cost`; `total_revenue = sales_revenue − sales_returns + interest_revenue`. |
+
+`sales_revenue` significa lo mismo en los tres (**bruto de devoluciones, neto de descuento**) y
+`sales_returns` es el hermano nuevo en todos: el netear ocurre en `net_revenue`/`total_revenue`, nunca
+escondido dentro de un campo que ya tenía otro significado.
+
+**Solo devoluciones de ventas `completed`**, igual que el ingreso: si la venta se anula después, su ingreso
+desaparece entero de su propio período (F21-15) y restar además la devolución lo descontaría dos veces.
+
+**`sales_kpis` (el dashboard) NO se tocó, a propósito.** `today_total`/`month_total` son actividad de venta
+del día ("¿cuánto vendí hoy?"), no el estado de resultados; restarles devoluciones de ventas de otros días
+haría que el KPI de hoy dependiera de ventas viejas. Eso es F21-13 (KPI del front brutos de devoluciones y
+anulaciones), que sigue abierto y es del front.
+
+**Dos cosas que se vieron al arreglar esto y NO se tocaron** (van como recomendación, no como parte del
+arreglo):
+
+- `sales.void_sale` **no verifica si la venta ya tiene devoluciones**. Anular una venta parcialmente
+  devuelta repone el stock COMPLETO otra vez (`service.py::void_sale` recorre `sale_line` sin descontar lo
+  ya devuelto) y emite un contra-movimiento por el `total` entero. Es un defecto real, pero es del carril
+  de las ANULACIONES, no del de las devoluciones.
+- Anulación y devolución **siguen siendo cosas distintas**, y así deben quedar: una anulación dice "esta
+  venta nunca ocurrió" y sale del resultado retroactivamente (F21-15). Tratarlas igual era tentador al leer
+  el código y sería un error: borra la distinción entre corregir un error de digitación y registrar un
+  hecho del negocio.
+
+**Tests** (`tests/integration/test_reports.py`, los cuatro **verificados fallando** contra el código
+anterior): devolución total (+ la valorización del inventario intacta), devolución parcial con prorrateo del
+descuento, devolución en un mes distinto al de la venta (el mes viejo queda idéntico), y la línea propia en
+`/income-statement` + la columna en `/series`.
 
 ### F21-13 · MEDIO — Las devoluciones y anulaciones no restan de los KPI del período
 
@@ -601,7 +725,11 @@ peor que no decir nada"*).
 
 La columna `Estado` sale de `sale.status`, que sigue en `completed` tras una devolución
 (`frontend-starter/src/features/sales/pages/SalesListPage.tsx:43`), y no hay columna de devoluciones. Quien
-concilie con ese archivo **no tiene cómo verlas**. Es F21-12 asomando por la exportación.
+concilie con ese archivo **no tiene cómo verlas**. Es F21-12 asomando por la exportación. **Sigue abierto
+tras el arreglo de F21-12 (22/09/2026)**, y a propósito: el Estado de resultados ya las resta y las muestra
+en línea propia, pero la lista de Ventas es otra pantalla — `sale.status` sigue en `completed` después de
+una devolución, que es precisamente la decisión que se tomó. Lo que falta ahí es una columna, no un
+cambio de estado.
 
 ### F21-18 · BAJO — `inventory_purchased` ignora `paid_at`
 
@@ -612,13 +740,19 @@ coincide con la plata del cajón.
 
 ### Dos cosas que no son defectos del código
 
-- **El texto del §8 de la guía —«las exportaciones tienen un tope de 2.500 filas»— es impreciso.** Vale para
-  Ventas, Contratos e Inventario (`limit` 50 × `maxPages` 50, `frontend-starter/src/lib/api/pagination.ts:48`),
-  pero la hoja *Rankings* de Reportes pide con `limit: 100` (`features/reports/api.ts:118-124`) → 5.000, y
-  Resumen/Desglose **no paginan**. No se tocó: es la sección 8 y merece su propia revisión.
-- **La pestaña «Contabilidad» de Reportes no está documentada en la parte 4.** `#reportes` describe solo
-  «Período». La parte 6 la cubre desde el ángulo del cierre, pero si se quiere paridad pantalla-por-pantalla,
-  ese párrafo falta.
+- **El texto del §8 de la guía —«las exportaciones tienen un tope de 2.500 filas»— era impreciso, y al
+  corregirlo el 22/09 resultó que mi propia corrección también lo era.** Lo medido, camino por camino:
+  **Ventas, Contratos e Inventario** sí se cortan en **2.500** (`limit` 50 por defecto del router × `maxPages`
+  50, `frontend-starter/src/lib/api/pagination.ts:48`). **Reportes NO se corta**: *Resumen* son 7 filas fijas
+  de una consulta agregada, *Desglose* sale de `/reports/closings-breakdown`, que **no tiene parámetro
+  `limit`**, y *Rankings* está topada en **16 filas** por `.slice(0, 10)` y `.slice(0, 6)`
+  (`features/reports/rankings.ts:53, 68`). El `limit: 100` × 50 páginas que yo había anotado como "5.000" es
+  el tope de lo que se **lee** para calcular los rankings, **no de lo que se exporta**. Corregido en la guía
+  con una tabla por exportación.
+  **Y un hallazgo que cambió el texto:** las tres listas paginan con `order by id` sobre un `uuid` aleatorio,
+  así que **un archivo cortado no conserva «las 2.500 más recientes»** — lo que falta queda repartido por
+  todo el histórico. El aviso viejo dejaba entender lo contrario. Es el principio que este documento ya tiene
+  escrito (*«un listado ordenado por un id aleatorio no está ordenado»*) asomando por la exportación.
 
 ### Y un defecto del propio entregable
 

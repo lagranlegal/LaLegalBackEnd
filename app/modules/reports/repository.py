@@ -175,7 +175,8 @@ async def closings_breakdown(
 async def profit_summary(
     db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
 ) -> Row[Any]:
-    """Utilidad BRUTA del período: ingreso por ventas menos su costo de ventas.
+    """Utilidad BRUTA del período: ingreso por ventas menos su costo de ventas,
+    **neto de las devoluciones del período**.
 
     El costo sale de `sale_line.unit_cost` —congelado al vender (00019)— y no
     de `inventory_item.cost`: un reporte de un período cerrado no debe cambiar
@@ -193,6 +194,44 @@ async def profit_summary(
     Las fechas se comparan en la zona horaria de la EMPRESA (§10
     ARCHITECTURE.md), no en UTC: `sold_at` es timestamptz y el "hoy" del
     negocio termina a medianoche de Bogotá, no de Londres.
+
+    --- DEVOLUCIONES (F21-12) ------------------------------------------------
+
+    Una devolución es **contra-ingreso** (*devoluciones en ventas*), NO una
+    borradura de la venta original, y cae en el período de la DEVOLUCIÓN.
+
+    Tres motivos, y los tres ya estaban en el proyecto:
+
+      1. Es la doctrina que este módulo ya aplica: *"el estado de resultados
+         sale de los DOCUMENTOS, no de los movimientos de caja"*. Una
+         devolución **es un documento** (`sale_return`, 00042), igual que
+         `sale`, `contract_payment` y `expense`. Leerla acá es aplicar la
+         regla que ya existe, no inventar una.
+      2. Cambiar `sale.status` sería PEOR: una devolución parcial sacaría la
+         venta ENTERA del resultado, y reescribiría hacia atrás un mes ya
+         cerrado (que es justo el defecto F21-15).
+      3. `sale_return.return_date` existe, así que el contra-ingreso cae en su
+         propio período y un mes cerrado no cambia retroactivamente.
+
+    `return_date` es un `date` puro, no un `timestamptz`: se compara directo
+    contra el rango, sin `at time zone`. La fecha de una devolución ya es la
+    fecha del negocio (la fija el servicio con `get_company_today`), así que
+    convertirla otra vez la correría un día.
+
+    El costo devuelto sale de `sale_return_line.unit_cost` —heredado de la
+    línea de venta, identificación específica— y **NO se recalcula**: es el
+    mismo hecho histórico congelado al vender.
+
+    **Y con eso el doble conteo se cierra solo.** Que el artículo devuelto
+    vuelva a `available` (`sales/service.py`) y sume otra vez en la
+    valorización del inventario es CORRECTO: volvió a ser inventario de
+    verdad. El doble conteo era el síntoma de no restar su costo del costo de
+    ventas, no un defecto aparte — quien "arregle" también la valorización
+    estaría restando dos veces.
+
+    Solo se cuentan devoluciones de ventas `completed`, igual que el ingreso:
+    si la venta se anula después, su ingreso desaparece entero de su propio
+    período y restar además la devolución lo descontaría dos veces.
     """
     result = await db.execute(
         text(
@@ -212,14 +251,76 @@ async def profit_summary(
                 from public.sale_line sl
                 join ventas v on v.id = sl.sale_id
                 where sl.company_id = :company_id
+            ),
+            -- Bruto de CADA venta que tiene devoluciones en el rango: es el
+            -- denominador del prorrateo del descuento. Se calcula aparte (y
+            -- no con un join a las líneas) por el mismo motivo de siempre:
+            -- un join plano repetiría el descuento una vez por línea.
+            devueltas as (
+                select distinct r.sale_id
+                from public.sale_return r
+                where r.company_id = :company_id
+                  and r.return_date between :from_date and :to_date
+            ),
+            bruto_por_venta as (
+                select sl.sale_id, coalesce(sum(sl.subtotal), 0) as bruto_venta
+                from public.sale_line sl
+                join devueltas d on d.sale_id = sl.sale_id
+                where sl.company_id = :company_id
+                group by sl.sale_id
+            ),
+            -- PRORRATEO DEL DESCUENTO: el descuento vive en la CABECERA de la
+            -- venta, así que una devolución parcial solo puede llevarse la
+            -- parte proporcional. Se prorratea por PARTICIPACIÓN EN EL BRUTO
+            -- de la venta —`quantity * unit_price` sobre el bruto total— y no
+            -- por unidades: un descuento de 10.000 sobre una venta de una
+            -- cadena de 900.000 y un anillo de 100.000 no se reparte 50/50.
+            -- Sin el prorrateo se restaría el ingreso BRUTO de lo devuelto y
+            -- saldría más plata del resultado de la que entró.
+            --
+            -- Se redondea POR LÍNEA a 2 decimales, igual que `subtotal` al
+            -- vender. Devolver una venta completa en varias devoluciones
+            -- puede dejar un residuo de centavos contra `discount_amount`;
+            -- repartirlo exigiría saber cuál devolución es "la última", que
+            -- es un dato que no existe al consultar.
+            devoluciones as (
+                select
+                  count(distinct r.id)                                      as return_count,
+                  coalesce(sum(round(srl.quantity * sl.unit_price, 2)), 0)  as bruto,
+                  coalesce(sum(round(srl.quantity * srl.unit_cost, 2)), 0)  as costo,
+                  coalesce(
+                    sum(
+                      round(
+                        s.discount_amount * (srl.quantity * sl.unit_price)
+                        / nullif(bv.bruto_venta, 0),
+                        2
+                      )
+                    ),
+                    0
+                  )                                                         as descuento
+                from public.sale_return r
+                join public.sale_return_line srl
+                  on srl.return_id = r.id and srl.company_id = r.company_id
+                join public.sale_line sl
+                  on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
+                join public.sale s
+                  on s.id = r.sale_id and s.company_id = r.company_id
+                join bruto_por_venta bv on bv.sale_id = r.sale_id
+                where r.company_id = :company_id
+                  and s.status = 'completed'
+                  and r.return_date between :from_date and :to_date
             )
             select
               (select count(*) from ventas)                                as sale_count,
               (select coalesce(sum(discount_amount), 0) from ventas)       as discounts,
               lineas.bruto                                                 as gross_revenue,
               lineas.costo                                                 as cost_of_goods_sold,
-              lineas.unidades                                              as units_sold
-            from lineas
+              lineas.unidades                                              as units_sold,
+              devoluciones.return_count                                    as return_count,
+              devoluciones.bruto                                           as returns_gross,
+              devoluciones.descuento                                       as returns_discounts,
+              devoluciones.costo                                           as returns_cost
+            from lineas, devoluciones
             """
         ),
         {
@@ -502,6 +603,12 @@ async def monthly_series(
     `completed`. El capital abonado NO entra — recuperar capital reduce la
     cartera, no es ingreso — ni las compras de mercancía, que son un activo.
 
+    `sales_returns` viene como columna APARTE y no restado de `sales_revenue`:
+    así `sales_revenue` significa lo mismo acá que en
+    `/reports/income-statement`, y quien pinte la serie decide si muestra la
+    devolución o solo la venta neta. Restarlo en silencio acá y no allá habría
+    creado dos «Ventas» distintas con el mismo nombre.
+
     `generate_series` arma los meses ANTES de agregar: un mes sin ventas ni
     abonos tiene que aparecer en cero, no faltar. Si faltara, la gráfica
     uniría dos meses no consecutivos con una línea recta y mostraría una
@@ -560,6 +667,47 @@ async def monthly_series(
                 from ventas
                 group by month
             ),
+            -- DEVOLUCIONES (F21-12): contra-ingreso del mes de la DEVOLUCIÓN,
+            -- exactamente la misma definición que usa `profit_summary` — no
+            -- una tercera. Se agrupa por `return_date`, que es un `date` puro
+            -- (sin `at time zone`: ya es la fecha del negocio), así que una
+            -- devolución de enero baja enero y nunca reescribe el mes de la
+            -- venta original.
+            bruto_por_venta as (
+                select sl.sale_id, coalesce(sum(sl.subtotal), 0) as bruto_venta
+                from public.sale_line sl
+                where sl.company_id = :company_id
+                  and sl.sale_id in (
+                      select sale_id from public.sale_return
+                      where company_id = :company_id
+                  )
+                group by sl.sale_id
+            ),
+            devoluciones as (
+                select
+                  date_trunc('month', r.return_date)::date as month,
+                  coalesce(sum(round(srl.quantity * sl.unit_price, 2)), 0)
+                  - coalesce(
+                      sum(
+                        round(
+                          s.discount_amount * (srl.quantity * sl.unit_price)
+                          / nullif(bv.bruto_venta, 0),
+                          2
+                        )
+                      ),
+                      0
+                    )                                      as total
+                from public.sale_return r
+                join public.sale_return_line srl
+                  on srl.return_id = r.id and srl.company_id = r.company_id
+                join public.sale_line sl
+                  on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
+                join public.sale s
+                  on s.id = r.sale_id and s.company_id = r.company_id
+                join bruto_por_venta bv on bv.sale_id = r.sale_id
+                where r.company_id = :company_id and s.status = 'completed'
+                group by 1
+            ),
             gastos as (
                 select
                   date_trunc('month', (created_at at time zone :tz)::date)::date as month,
@@ -572,11 +720,13 @@ async def monthly_series(
               m.month,
               coalesce(i.total, 0)                                as interest_revenue,
               coalesce(vb.bruto, 0) - coalesce(vd.descuento, 0)   as sales_revenue,
+              coalesce(dv.total, 0)                               as sales_returns,
               coalesce(g.total, 0)                                as expenses
             from meses m
             left join intereses i          on i.month  = m.month
             left join ventas_bruto vb      on vb.month = m.month
             left join ventas_descuento vd  on vd.month = m.month
+            left join devoluciones dv      on dv.month = m.month
             left join gastos g             on g.month  = m.month
             order by m.month
             """

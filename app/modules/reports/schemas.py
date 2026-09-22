@@ -80,15 +80,32 @@ class ProfitSummaryOut(BaseModel):
     from_date: date
     to_date: date
     sale_count: int
+    #: Unidades VENDIDAS en el rango, brutas de devoluciones: es actividad de
+    #: venta, no dinero. Lo devuelto ya está descontado del dinero
+    #: (`sales_returns`) y del costo (`returns_cost`).
     units_sold: int
     #: Suma de los subtotales de las líneas, antes de descuentos.
     gross_revenue: Decimal
     #: Descuentos aplicados a nivel de venta — menor ingreso, no un gasto.
     discounts: Decimal
-    #: `gross_revenue - discounts`: lo que realmente entró por ventas.
+    #: CONTRA-INGRESO por devoluciones (*devoluciones en ventas*), ya neto del
+    #: descuento prorrateado de su venta original. Cae en el período de la
+    #: DEVOLUCIÓN (`sale_return.return_date`), no en el de la venta: así un mes
+    #: ya cerrado no se reescribe hacia atrás.
+    sales_returns: Decimal
+    #: Cuántas devoluciones cayeron en el rango.
+    return_count: int
+    #: `gross_revenue - discounts - sales_returns`: lo que realmente entró por
+    #: ventas y se quedó adentro.
     net_revenue: Decimal
-    #: Costo congelado de lo vendido (`sale_line.unit_cost * quantity`).
+    #: Costo congelado de lo vendido (`sale_line.unit_cost * quantity`), NETO
+    #: de `returns_cost`. Neto y no bruto a propósito: lo devuelto volvió al
+    #: inventario, así que dejar su costo acá lo contaría dos veces — una como
+    #: costo de algo vendido y otra como mercancía disponible.
     cost_of_goods_sold: Decimal
+    #: Costo de lo devuelto, ya descontado de `cost_of_goods_sold`. Se expone
+    #: para poder auditar el neto, no para volver a restarlo.
+    returns_cost: Decimal
     #: `net_revenue - cost_of_goods_sold`.
     gross_profit: Decimal
     #: Margen sobre el ingreso neto, en %. `null` si no hubo ventas (evita
@@ -246,15 +263,26 @@ class IncomeStatementOut(BaseModel):
     to_date: date
 
     #: --- Ingresos ---
-    #: Ventas netas de descuento (tienda).
+    #: Ventas netas de descuento (tienda), BRUTAS de devoluciones: las
+    #: devoluciones bajan en su propia línea, `sales_returns`.
     sales_revenue: Decimal
+    #: Devoluciones en ventas del período — CONTRA-INGRESO, con su propia
+    #: línea en el estado de resultados y no restado en silencio de «Ventas».
+    #: Un número que baja sin explicación es lo que hace que nadie confíe en
+    #: el reporte; y una devolución es un hecho del negocio que merece verse.
+    #: Cae en el período de la DEVOLUCIÓN (`sale_return.return_date`).
+    sales_returns: Decimal
     #: Intereses efectivamente cobrados (empeño). El empeño no tiene costo de
     #: ventas: su rentabilidad son los intereses sobre el capital prestado.
     interest_revenue: Decimal
+    #: `sales_revenue − sales_returns + interest_revenue`.
     total_revenue: Decimal
 
     #: --- Costo de ventas ---
-    #: Costo congelado de la mercancía vendida. Solo tienda.
+    #: Costo congelado de la mercancía vendida, NETO del costo de lo devuelto.
+    #: Solo tienda. Que lo devuelto vuelva a contar como inventario disponible
+    #: es correcto una vez que su costo sale de acá: era el mismo activo
+    #: contado dos veces, y se cierra por este lado (F21-12).
     cost_of_goods_sold: Decimal
     #: `total_revenue − cost_of_goods_sold`.
     gross_profit: Decimal
@@ -294,7 +322,13 @@ class MonthlySeriesPointOut(BaseModel):
     #: Intereses cobrados (`contract_payment`) — el ingreso del empeño.
     interest_revenue: Decimal
     #: Ventas netas de descuento, solo `completed` — el ingreso de la tienda.
+    #: BRUTAS de devoluciones, igual que en `/reports/income-statement`: el
+    #: mismo nombre significa lo mismo en los dos endpoints.
     sales_revenue: Decimal
+    #: Devoluciones del mes (contra-ingreso, neto de descuento prorrateado).
+    #: Van por su cuenta para que la serie pueda pintarse neta sin que el
+    #: significado de `sales_revenue` cambie entre endpoints.
+    sales_returns: Decimal
     #: Gastos operativos (`expense`). NO incluye compras de mercancía ni
     #: capital desembolsado: ninguno de los dos es gasto.
     expenses: Decimal
