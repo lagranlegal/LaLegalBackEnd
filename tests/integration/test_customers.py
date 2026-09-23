@@ -307,3 +307,66 @@ def test_a_customer_without_photos_is_valid(client: TestClient, tenant: dict) ->
     assert creado.status_code == 201, creado.text
     assert creado.json()["doc_photos"] == []
     assert creado.json()["doc_photo_url"] is None
+
+
+# --------------------------------------------------------------------------
+# El formato del correo se valida en el BACKEND (F21-19)
+# --------------------------------------------------------------------------
+def test_an_invalid_email_is_rejected_on_create(client: TestClient, tenant: dict) -> None:
+    """Hasta el 23/09/2026 la única validación vivía en el `zod` del front.
+
+    O sea que la regla se cumplía solo si el que escribía era esa pantalla:
+    un script de importación, un integrador o un `curl` metían basura sin
+    resistencia. Y una dirección mal escrita no rebota — el proveedor se la
+    traga y el aviso se da por ENTREGADO, que es peor que no mandarlo.
+
+    Se asserta el CÓDIGO y no solo el status: `VALIDATION_ERROR` es el
+    contrato que el front lee para pintar el error campo por campo.
+    """
+    response = client.post(
+        "/api/v1/customers",
+        headers=_headers(tenant["token"]),
+        json=_payload(email="juanperez.com"),
+    )
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert any("email" in error["loc"] for error in body["details"]["errors"]), body["details"]
+
+
+def test_an_invalid_email_is_rejected_on_update(client: TestClient, tenant: dict) -> None:
+    """La misma regla al EDITAR: si solo cubriera el alta, bastaría con crear
+    el cliente sin correo y agregárselo después para saltarse la validación."""
+    creado = client.post(
+        "/api/v1/customers", headers=_headers(tenant["token"]), json=_payload()
+    ).json()
+
+    response = client.patch(
+        f"/api/v1/customers/{creado['id']}",
+        headers=_headers(tenant["token"]),
+        json={"email": "arroba@sin@dominio"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_a_valid_email_and_no_email_at_all_keep_working(client: TestClient, tenant: dict) -> None:
+    """La validación no puede cobrarse los casos buenos.
+
+    El correo es OPCIONAL —la mayoría de los clientes de una compraventa no
+    dan uno— y el front manda `null`, no cadena vacía, cuando el campo queda
+    en blanco.
+    """
+    con_correo = client.post(
+        "/api/v1/customers",
+        headers=_headers(tenant["token"]),
+        json=_payload(email="juan.perez@ejemplo.com"),
+    )
+    assert con_correo.status_code == 201, con_correo.text
+    assert con_correo.json()["email"] == "juan.perez@ejemplo.com"
+
+    sin_correo = client.post(
+        "/api/v1/customers", headers=_headers(tenant["token"]), json=_payload(email=None)
+    )
+    assert sin_correo.status_code == 201, sin_correo.text
+    assert sin_correo.json()["email"] is None

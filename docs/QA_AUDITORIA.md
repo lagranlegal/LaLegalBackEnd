@@ -602,7 +602,7 @@ Salieron de verificar **contra el código** dos afirmaciones que la guía ya hac
 sobrevivió a una ronda de revisión. Es exactamente el patrón que este documento ya registra: *el contenido
 heredado no se salva por estar escrito*.
 
-### 🔴 F21-25 · MEDIA — «Costo detenido» subestima, y subestimar es la dirección peligrosa
+### ✅ F21-25 · MEDIA — «Costo detenido» subestima, y subestimar es la dirección peligrosa · **RESUELTO 23/09/2026**
 
 `features/reports/api.ts:224` pide `/reports/stale-inventory` con **`limit: 20`**, y el servicio calcula
 `product_count = len(items)` y `total_cost_value` sumando **solo lo que devolvió esa página**
@@ -613,8 +613,30 @@ cifras son falsas por debajo**. El dueño mira el número para decidir si liquid
 que se queda corto dice «no es tanto» justo cuando sí lo es.
 
 **No falla, no avisa y no se nota**: con pocos productos el número es correcto, así que el error aparece solo
-cuando la empresa crece — que es cuando más importa. El arreglo es devolver los totales del universo
-completo, no los de la página. Queda como advertencia en la guía mientras tanto.
+cuando la empresa crece — que es cuando más importa.
+
+**Arreglado el 23/09/2026: los totales salen del universo completo.** `stale_inventory` pasó a calcular la
+lista en un CTE y a traer `count(*) over ()` y `sum(cost_value) over ()` sobre ese mismo CTE; el servicio
+los lee de la primera fila (`0` si no hay ninguna) en vez de sumar `items`.
+
+**Por qué una ventana y no una segunda consulta:** en Postgres la ventana se evalúa DESPUÉS del `having` y
+ANTES del `limit`, así que cuenta todos los productos sobre el umbral aunque la lista devuelva 20 — y sobre
+todo, **la definición de "dormido" se escribe UNA sola vez**. Dos consultas separadas pueden quedar con
+umbrales distintos sin que nada avise, que es la misma clase de silencio que produjo este hallazgo.
+
+**La lista sigue topada a propósito:** es un ranking de los más dormidos, no el inventario entero. Lo que
+tenía que ser total era el total.
+
+**La respuesta NO cambió de forma** (`product_count` y `total_cost_value` ya existían y siguen con el mismo
+tipo): el front no necesita `npm run gen:api` ni ningún ajuste para seguir funcionando. Lo que cambia es el
+NÚMERO — ahora es el verdadero, y con más de 20 productos dormidos será más alto que el de ayer. Queda una
+mejora COSMÉTICA para el front, reportada aparte: la tarjeta lista 20 pero cuenta todos, así que conviene
+que diga "mostrando los N más antiguos".
+
+**Tests** (`tests/integration/test_inventory.py`,
+`test_stale_inventory_totals_cover_everything_not_just_the_page`): 3 productos dormidos, `limit=2` → la
+lista trae 2, `product_count` dice 3 y `total_cost_value` suma los tres. **Verificado a la inversa:** con el
+cálculo viejo falla con `assert 2 == 3`.
 
 ### F21-26 · BAJA — Un comentario que dice lo contrario del código
 
@@ -639,11 +661,25 @@ Resuelve los nombres con `fetchAllCustomers()` (`features/customers/api.ts:26`),
 (`app/modules/customers/router.py:23`). Con más de 2.500 clientes, algunas filas salen sin nombre y **nada lo
 dice**. Caso remoto hoy; no se puso en la guía para no cargar un aviso ya denso.
 
-### F21-29 · COSMÉTICA — «más de N días» cuando el filtro es `>=`
+### ✅ F21-29 · COSMÉTICA — «más de N días» cuando el filtro es `>=` · **CERRADO 23/09/2026 (decisión acá, rótulo en el front)**
 
 `StaleCard` rotula *«Sin venderse hace más de N días»* pero el `having` es `>=`
-(`app/modules/reports/repository.py:414`). Un producto con exactamente N días aparece bajo un rótulo que dice
-que no debería.
+(`app/modules/reports/repository.py`, en la consulta de `stale_inventory`). Un producto con exactamente N
+días aparece bajo un rótulo que dice que no debería.
+
+**Decisión: el `>=` se queda; el que miente es el RÓTULO.** De los dos lados, el filtro es el que tiene
+razón: el producto que ACABA de cumplir los 90 días es justamente el que se quiere ver el primer día y no el
+segundo — avisar tarde de mercancía parada es el único error que cuesta plata acá. Cambiar el filtro a `>`
+ahorraría una palabra en la UI y escondería un día entero de inventario dormido en cada producto.
+
+**Del lado del backend queda cerrado:** el `>=` está ahora documentado como intencional en el docstring de
+`repository.stale_inventory`, en `StaleInventoryOut.threshold_days` y en `API_GUIDE.md`, y **clavado por un
+test** (`test_stale_inventory_includes_the_product_that_just_crossed_the_threshold`), que falla si alguien lo
+cambia a `>` — se verificó parcheándolo.
+
+**El rótulo lo arregló el front el mismo día** (ver `frontend-starter/docs/IMPLEMENTATION.md`, tanda del
+23/09/2026): `StaleCard` ahora dice *«Sin venderse hace … días o más»*, y el estado vacío acompaña. Las dos
+puntas llegaron a la misma conclusión por separado — el filtro no se tocó.
 
 ---
 
@@ -655,7 +691,7 @@ para decidir a quién se le manda un correo hubo que mirar de dónde sale cada d
 
 Los tres primeros los verifiqué yo contra el código, no según el informe.
 
-### F21-19 · MEDIA — El backend no valida el formato del correo del cliente
+### ✅ F21-19 · MEDIA — El backend no valida el formato del correo del cliente · **RESUELTO 23/09/2026**
 
 `app/modules/customers/schemas.py:17` y `:32` declaran `email: str | None` **pelado**, mientras
 `app/modules/identity/schemas.py:17` sí usa `EmailStr`. La validación vive **solo en el frontend** (`zod`),
@@ -664,6 +700,34 @@ así que cualquier otro consumidor de la API —o un script de importación— e
 Hoy no molesta porque nadie le manda correo a un cliente. **El día que se manden, molesta**: una dirección
 inválida no rebota, se la traga el proveedor, y el aviso se da por entregado. Es el insumo directo del
 problema de "¿y si el correo está mal escrito y le llega a un tercero?".
+
+**Arreglado el 23/09/2026: `EmailStr` en `CustomerCreateIn` y `CustomerUpdateIn`.** `email-validator` ya
+estaba instalado (`pydantic[email]>=2.9` en `pyproject.toml`), así que no hubo que agregar nada.
+
+**Se midió primero, porque agregar validación puede rechazar datos que hoy se aceptan.** Consulta de SOLO
+LECTURA sobre la base dev remota, validando cada valor con el mismo `TypeAdapter(EmailStr)` que usaría la
+API (sin imprimir ninguna dirección — Ley 1581): **16 clientes, 2 con correo, 0 inválidos, 0 vacíos**. Nada
+que romper, así que se aplicó.
+
+**Solo en la ENTRADA: `CustomerOut.email` sigue siendo `str | None` a propósito.** Validar la salida
+convertiría una fila vieja mal escrita en un **500 al LEER la ficha del cliente** — castigar la lectura por
+un dato que ya está guardado es el peor resultado posible, y en prod puede haber correos que en dev no hay.
+Es la misma regla que ya rige para las letras reservadas de proveedor: *se valida al escribir, no hacia
+atrás*.
+
+**El `PATCH` se valida igual que el `POST`:** si solo se cubriera el alta, bastaría con crear el cliente sin
+correo y agregárselo después para saltarse la regla.
+
+**No rompe al front:** el formulario manda `null` cuando el campo queda vacío (`values.email || null` en
+`CustomerFormDialog.tsx`), no cadena vacía, y su `zod` ya rechazaba lo mismo. En el `openapi.json` el único
+cambio es `"format": "email"` en el campo de entrada, que `openapi-typescript` sigue mapeando a `string`:
+**`npm run gen:api` no hace falta** (regenerar no molesta, pero no cambia ningún tipo).
+
+**Tests** (`tests/integration/test_customers.py`, tres nuevos): correo inválido al crear y al editar →
+`422` **con `code == "VALIDATION_ERROR"`** y `email` en `details.errors[].loc`; y uno que protege los casos
+buenos (correo válido y sin correo siguen dando `201`). **Verificados a la inversa:** con `str | None` los
+dos primeros fallan — la API devolvía `201` guardando `"juanperez.com"` y `200` guardando
+`"arroba@sin@dominio"`.
 
 ### F21-20 · BAJA — `company.settings.grace_days` es configuración muerta
 

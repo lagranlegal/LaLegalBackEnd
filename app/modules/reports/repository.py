@@ -490,30 +490,54 @@ async def inventory_valuation(db: AsyncSession, *, company_id: UUID) -> list[Row
 async def stale_inventory(
     db: AsyncSession, *, company_id: UUID, as_of: date, threshold_days: int, limit: int
 ) -> list[Row[Any]]:
-    """Productos disponibles cuyo lote más antiguo lleva más de N días.
+    """Productos disponibles cuyo lote más antiguo lleva N días o más.
 
     Se mide sobre el lote MÁS ANTIGUO todavía disponible y no sobre el más
     reciente: si algo entró hace un año y se repuso ayer, lo que está
     congelado es la pieza vieja, y usar la fecha nueva la escondería justo
     cuando más importa verla.
+
+    El umbral es `>=` a propósito: el producto que ACABA de cruzar los N días
+    es justamente el que se quiere ver el primer día, no el segundo.
+
+    Cada fila trae además `total_product_count` y `total_cost_value`, que son
+    del UNIVERSO COMPLETO y no de la página (F21-25). Van como ventana sobre
+    el mismo CTE —y no como una segunda consulta— porque así la definición de
+    "dormido" se escribe UNA vez: dos consultas separadas pueden quedar con
+    umbrales distintos sin que nada avise, y el total es exactamente el número
+    con el que el dueño decide si remata mercancía. En Postgres la ventana se
+    evalúa DESPUÉS del `having` y ANTES del `limit`, así que cuenta todos los
+    productos sobre el umbral aunque la lista devuelva solo los primeros.
     """
     result = await db.execute(
         text(
             """
+            with dormidos as (
+                select
+                  p.id                       as product_id,
+                  p.code                     as product_code,
+                  p.name                     as product_name,
+                  sum(i.quantity)            as units,
+                  sum(i.cost * i.quantity)   as cost_value,
+                  (:as_of - min(i.entry_date)) as days_in_stock
+                from public.inventory_item i
+                join public.product p
+                  on p.id = i.product_id and p.company_id = i.company_id
+                where i.company_id = :cid and i.status = 'available'
+                group by p.id, p.code, p.name
+                having (:as_of - min(i.entry_date)) >= :threshold
+            )
             select
-              p.id                       as product_id,
-              p.code                     as product_code,
-              p.name                     as product_name,
-              sum(i.quantity)            as units,
-              sum(i.cost * i.quantity)   as cost_value,
-              (:as_of - min(i.entry_date)) as days_in_stock
-            from public.inventory_item i
-            join public.product p
-              on p.id = i.product_id and p.company_id = i.company_id
-            where i.company_id = :cid and i.status = 'available'
-            group by p.id, p.code, p.name
-            having (:as_of - min(i.entry_date)) >= :threshold
-            order by (:as_of - min(i.entry_date)) desc
+              d.product_id,
+              d.product_code,
+              d.product_name,
+              d.units,
+              d.cost_value,
+              d.days_in_stock,
+              count(*)             over () as total_product_count,
+              sum(d.cost_value)    over () as total_cost_value
+            from dormidos d
+            order by d.days_in_stock desc
             limit :limit
             """
         ),

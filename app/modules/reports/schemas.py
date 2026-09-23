@@ -231,9 +231,18 @@ class StaleInventoryOut(BaseModel):
     """
 
     as_of: date
+    #: El umbral se aplica con `>=`: un producto con EXACTAMENTE
+    #: `threshold_days` días ya aparece — es el que acaba de cruzar la raya y
+    #: el que más sirve ver a tiempo. El rótulo de la UI debe decir "N días o
+    #: más", no "más de N días" (F21-29).
     threshold_days: int
+    #: Del UNIVERSO COMPLETO, no de `items`: cuántos productos superan el
+    #: umbral en toda la empresa, aunque `limit` recorte la lista (F21-25).
     product_count: int
+    #: Ídem: el costo detenido TOTAL, no el de la página.
     total_cost_value: Decimal
+    #: Ranking de los más dormidos primero, topado por `limit`. NO es el
+    #: inventario completo: para eso están los dos totales de arriba.
     items: list[StaleItemOut]
 
 

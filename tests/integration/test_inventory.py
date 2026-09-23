@@ -1653,6 +1653,80 @@ def test_stale_inventory_uses_the_oldest_lot(client: TestClient, inventory_tenan
     assert dormidos["Cadena dormida"]["days_in_stock"] >= 200
 
 
+def test_stale_inventory_totals_cover_everything_not_just_the_page(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Los totales son del UNIVERSO, no de la página (F21-25).
+
+    El front pide esta tarjeta con `limit=20` y rotula "N productos con $X en
+    costo detenido". Cuando el total se sumaba sobre los `items` devueltos,
+    las dos cifras quedaban CORTAS apenas había más productos dormidos que el
+    tope — y corto es la dirección peligrosa: el dueño mira ese número para
+    decidir si remata mercancía parada, y un total que se queda corto dice
+    "no es tanto" justo cuando sí lo es. No fallaba ni avisaba: con pocos
+    productos daba bien, así que el error salía solo al crecer la empresa.
+
+    La LISTA sí sigue topada a propósito — es un ranking de los más dormidos,
+    no el inventario entero.
+    """
+    token = inventory_tenant["token"]
+    dormidos = [("Dormido viejo", 300, "100000.00"), ("Dormido medio", 200, "200000.00")]
+    dormidos += [("Dormido nuevo", 100, "400000.00")]
+    for nombre, dias, costo in dormidos:
+        payload = _entry_with(inventory_tenant, nombre, unit_cost=costo, sale_price="900000.00")
+        payload["entry_date"] = str(date.today() - timedelta(days=dias))
+        del payload["payment_method"]
+        r = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
+        assert r.status_code == 201, r.text
+
+    r = client.get(
+        "/api/v1/reports/stale-inventory",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"threshold_days": 90, "limit": 2},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert len(body["items"]) == 2, "la lista es un ranking y sí respeta el limit"
+    assert body["product_count"] == 3, "los 3 dormidos, no los 2 que cupieron en la página"
+    assert Decimal(body["total_cost_value"]) == Decimal("700000.00"), (
+        "el costo detenido de TODO lo dormido, no el de la página"
+    )
+
+
+def test_stale_inventory_includes_the_product_that_just_crossed_the_threshold(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """El umbral es `>=`, no `>` (F21-29).
+
+    Un producto con EXACTAMENTE `threshold_days` días de quieto ya cuenta: es
+    el que acaba de cruzar la raya, y verlo el primer día es el único momento
+    en que avisar sirve para algo. El rótulo de la UI es el que tiene que
+    decir "N días o más".
+    """
+    token = inventory_tenant["token"]
+    payload = _entry_with(
+        inventory_tenant, "Dormido justo en la raya", unit_cost="300000.00", sale_price="900000.00"
+    )
+    payload["entry_date"] = str(date.today() - timedelta(days=90))
+    del payload["payment_method"]
+    assert (
+        client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).status_code
+        == 201
+    )
+
+    r = client.get(
+        "/api/v1/reports/stale-inventory",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"threshold_days": 90},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    nombres = {i["product_name"] for i in body["items"]}
+    assert "Dormido justo en la raya" in nombres, "con exactamente N días ya está dormido"
+    assert body["product_count"] == 1
+
+
 def test_product_purchase_history_compares_suppliers_and_costs(
     client: TestClient, inventory_tenant: dict
 ) -> None:

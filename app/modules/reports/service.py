@@ -329,11 +329,20 @@ async def get_stale_inventory(
         )
         for r in rows
     ]
+    # Los totales son del UNIVERSO, no de la página (F21-25). Antes salían de
+    # `items`, que el front pide con `limit=20`: con más de 20 productos sobre
+    # el umbral la tarjeta decía "N productos con $X detenidos" y las dos
+    # cifras quedaban CORTAS. Subestimar es la dirección peligrosa —el dueño
+    # mira ese número para decidir si remata— y no fallaba ni avisaba: con
+    # pocos productos daba bien, así que el error aparecía solo al crecer.
+    # La lista sí sigue topada: es un ranking de los más dormidos, no el
+    # inventario entero.
+    totals = rows[0]._mapping if rows else None
     return StaleInventoryOut(
         as_of=as_of,
         threshold_days=threshold_days,
-        product_count=len(items),
-        total_cost_value=sum((i.cost_value for i in items), start=Decimal("0.00")),
+        product_count=totals["total_product_count"] if totals else 0,
+        total_cost_value=_dec(totals["total_cost_value"]) if totals else Decimal("0.00"),
         items=items,
     )
 
