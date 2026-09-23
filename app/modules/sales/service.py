@@ -381,10 +381,67 @@ async def void_sale(
     if row._mapping["status"] != "completed":
         raise ConflictError("La venta ya está anulada.")
 
+    # --- Una venta con devoluciones NO se anula (F21-31) ----------------
+    # Anular significa «esta venta nunca debió existir»: un error de
+    # digitación, un cobro doble. Una DEVOLUCIÓN es lo contrario — un hecho
+    # que ya ocurrió y que YA se liquidó con el cliente, en efectivo o con
+    # una nota crédito que puede estar redimida en otra venta. No se puede
+    # des-hacer un hecho que ya tuvo contraprestación.
+    #
+    # Hasta acá, anular una venta parcialmente devuelta **duplicaba stock y
+    # plata**: el bucle de abajo repone TODAS las líneas (incluida la parte
+    # ya reingresada por la devolución) y el contra-movimiento sale por el
+    # `total` entero (incluida la parte ya pagada al cliente).
+    #
+    # Se rechaza en vez de anular solo el remanente, por tres razones:
+    #
+    # 1. **El remanente en plata no tiene un número bien definido acá.** El
+    #    monto de una devolución se deriva del BRUTO (`quantity ×
+    #    unit_price`, ver `repository.sum_sale_return_amount`), mientras que
+    #    `sale.total` es NETO del `discount_amount` de la cabecera. Restar
+    #    uno del otro sobre una venta con descuento da un número equivocado,
+    #    y hacerlo bien exigiría prorratear el descuento — una CUARTA
+    #    definición del mismo cálculo que F21-12 dejó escrito en tres
+    #    lugares a propósito para no multiplicar.
+    # 2. **La nota crédito no es reversible.** Si la devolución se liquidó
+    #    con una nota crédito ya redimida en otra venta, no hay forma de
+    #    deshacerla sin arrastrar una tercera venta.
+    # 3. **«Cerrado de más se nota; abierto de más no»** (el criterio que ya
+    #    resolvió `TERMINAL_STATUSES`). Rechazar se descubre el primer día
+    #    que alguien lo intente; permitir mal duplica plata en silencio.
+    #
+    # La salida legítima existe y el mensaje la nombra: el carril de las
+    # devoluciones es PARCIAL, así que revertir lo que queda se registra
+    # como una devolución más, no como una anulación.
+    returns = await repository.list_returns_for_sale(db, company_id=company_id, sale_id=sale_id)
+    if returns:
+        numbers = [r._mapping["number"] for r in returns]
+        etiquetas = ", ".join(f"Nº {n}" for n in numbers)
+        cuantas = (
+            f"la devolución {etiquetas}"
+            if len(numbers) == 1
+            else f"{len(numbers)} devoluciones ({etiquetas})"
+        )
+        raise ConflictError(
+            f"Esta venta ya tiene {cuantas} y por eso no se puede anular: lo devuelto ya "
+            "se liquidó con el cliente (en efectivo o con nota crédito) y anular lo "
+            "pagaría dos veces. Para revertir lo que falta, registra una devolución por "
+            "las líneas que todavía no se devolvieron.",
+            code="SALE_HAS_RETURNS",
+            details={
+                "return_count": len(numbers),
+                "return_numbers": numbers,
+                "return_ids": [str(r._mapping["id"]) for r in returns],
+            },
+        )
+
     session = await cashbox_integration.get_open_session(db, company_id=company_id)
     if session is None:
         raise CashSessionNotOpenError("No hay una sesión de caja abierta para anular la venta.")
 
+    # Repone la cantidad COMPLETA de cada línea, y eso es correcto porque la
+    # guarda de arriba ya garantizó que nada de esta venta se devolvió: si
+    # hubiera devoluciones, la parte reingresada se sumaría dos veces.
     lines = await repository.list_sale_lines(db, company_id=company_id, sale_id=sale_id)
     for line in lines:
         m = line._mapping

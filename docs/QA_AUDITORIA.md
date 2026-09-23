@@ -463,6 +463,102 @@ no la salida del comando. `flyctl machine list --app compraventa-backend-dev --j
 
 ---
 
+## ✅ F21-31 — Anular una venta ya devuelta duplicaba stock y plata (23/09/2026 · cerrado)
+
+**Nace del cierre de F21-12, que lo dejó anotado y sin hacer**, y va como hallazgo propio porque es de otro
+carril: F21-12 era de REPORTES (la devolución no bajaba el estado de resultados); este es de
+ANULACIONES, y el daño no es un número mal mostrado sino **stock inventado y plata pagada dos veces**.
+
+**Qué hacía.** `sales.void_sale` no miraba si la venta tenía devoluciones:
+
+- recorría **todas** las `sale_line` reponiendo la cantidad entera de cada una, sin descontar lo que la
+  devolución ya había reingresado;
+- emitía el contra-movimiento de caja por `sale.total` **entero**, sin descontar lo que ya se le había
+  liquidado al cliente en efectivo o con nota crédito.
+
+**Medido, no deducido** (contra el código anterior, con el test temporal que está reproducido en
+`tests/integration/test_sale_returns.py`): lote de **5** unidades, venta de 2, devolución de 1 con
+reingreso → stock **4** y caja `in 1.000.000` / `out 500.000`. Al anular esa venta el backend respondía
+**200** y dejaba:
+
+| | Antes de anular | Después de anular | Debería |
+|---|---|---|---|
+| Stock del lote | 4 | **6** | 5 (imposible: solo había 5) |
+| Plata salida por esa venta | 500.000 | **1.500.000** | ≤ 1.000.000 |
+
+Una unidad **inventada** sobre un stock inicial de 5, y **500.000 de sobrepago** sobre una venta de
+1.000.000.
+
+### La decisión: se RECHAZA la anulación, no se anula "solo el remanente"
+
+Las dos salidas eran plausibles y la segunda es mejor producto si sale simple. No sale simple, y las tres
+razones están escritas también en el código (`service.py::void_sale`):
+
+1. **El remanente en plata no tiene un número bien definido en este módulo.** El monto de una devolución se
+   deriva del **bruto** (`quantity × unit_price`, `repository.sum_sale_return_amount`); `sale.total` es
+   **neto** del `discount_amount` de la cabecera. Restar uno del otro sobre una venta con descuento da un
+   número equivocado, y hacerlo bien exige prorratear el descuento — una **cuarta** definición del mismo
+   cálculo que F21-12 dejó deliberadamente en tres lugares «para no crear una cuarta definición».
+2. **La nota crédito no es reversible.** Si la devolución se liquidó con una nota crédito ya redimida en
+   otra venta, deshacerla arrastra una tercera venta. No hay anulación parcial correcta ahí.
+3. **El criterio que ya resolvió `TERMINAL_STATUSES`: «cerrado de más se nota; abierto de más no».**
+   Rechazar se descubre el primer día que alguien lo intente; permitir mal duplica plata en silencio y no
+   deja huella de que algo estuvo mal.
+
+Y por encima de las tres, la razón conceptual, que es la que ya venía escrita en §F21-12 y en el §6 de
+`API_GUIDE`: **anular significa «esta venta nunca debió existir»** —un error de digitación, un cobro
+doble—, mientras que **una devolución es un hecho que ya ocurrió y que ya tuvo contraprestación**. No se
+des-hace un hecho que ya se liquidó. Tratarlas igual borra la distinción entre corregir un error de
+digitación y registrar un hecho del negocio.
+
+**La salida legítima existe y el mensaje la nombra**, que es la otra regla de la casa (*«un error tiene que
+nombrar la acción que falta»*): el carril de las devoluciones **sí es parcial**, así que revertir lo que
+queda se registra como **otra devolución** por las líneas no devueltas.
+
+### El código de error: `SALE_HAS_RETURNS` (409), nuevo
+
+Hoy `void_sale` devolvía `CONFLICT` genérico para «la venta ya está anulada». El caso nuevo **merece código
+propio**, por la misma razón por la que `CONTRACT_SUPERSEDED` está separado de `CONTRACT_CLOSED`: acá no
+hay nada cerrado ni terminado —la venta sigue `completed` y viva— y el mensaje útil es **otro**, porque
+tiene que mandar a hacer algo distinto. Reusar `CONFLICT` habría dicho «no puedes» sin decir «quién sí».
+
+`details` trae `{return_count, return_numbers, return_ids}` para que la UI pueda decir *«esta venta tiene la
+devolución Nº 4»* y llevar a ella, en vez de repetir el párrafo del backend.
+
+**Documentado en los dos catálogos, que es donde el contrato se vuelve real:** `docs/API_GUIDE.md` §15 (+
+la fila del endpoint en §7) y `frontend-starter/src/lib/api/errors.ts`. El test
+`tests/unit/test_error_catalog.py` falló en rojo al agregar el código y antes de documentarlo — el guardián
+funcionando, verificado en vivo.
+
+### Tests (`tests/integration/test_sale_returns.py`), verificados a la inversa
+
+Los tres asertan el **código**, no el status. Con el código anterior:
+
+| Test | Con el código viejo |
+|---|---|
+| `test_void_sin_devoluciones_sigue_reponiendo_todo` | **pasa** — es el camino normal y no se podía romper; está para eso |
+| `test_void_bloqueado_si_la_venta_tiene_una_devolucion_parcial` | **falla**: `assert 200 == 409` |
+| `test_void_bloqueado_si_la_venta_esta_totalmente_devuelta` | **falla**: `assert 200 == 409` |
+
+Los dos de rechazo verifican además que **nada se movió**: la venta sigue `completed`, el stock queda en su
+número y no hay contra-movimiento de caja. Un rechazo que igual deja rastro sería peor que el defecto.
+
+Suite completa con Docker arriba y `supabase start` corriendo: **439 passed** (436 + 3), 0 saltados.
+`ruff check` / `ruff format --check` / `mypy app` limpios.
+
+### De paso, dos cosas del front (arregladas, una línea cada una)
+
+- **El toast de anular se comía el mensaje del backend**: `catch { toast.error('No se pudo anular la venta.
+  Intenta de nuevo.') }` (`SaleReceiptDialog.tsx`). «Intenta de nuevo» sobre un rechazo que **nunca** va a
+  cambiar es el callejón sin salida que este proyecto ya tiene escrito como regla — y habría hecho invisible
+  todo el trabajo de que el código de error nombre la acción que falta. Ahora muestra `error.message` si es
+  un `ApiError`.
+- **Un comentario que decía lo contrario del código** (la familia de F21-26): el docstring de `useVoidSale`
+  (`lib/sales/void.ts`) afirmaba que *«anular no mueve caja de nuevo; solo cambia el estado»*. Anular sí
+  mueve caja —contra-movimiento `out` por el total— y por eso exige caja abierta. Corregido.
+
+---
+
 ## 🔴 F21-30 — El guardián diario nunca habría corrido (22/09/2026)
 
 **El más irónico de todos, y lo encontró Mateo mirando la pantalla, no un test.** Se construyó
@@ -707,13 +803,13 @@ del día ("¿cuánto vendí hoy?"), no el estado de resultados; restarles devolu
 haría que el KPI de hoy dependiera de ventas viejas. Eso es F21-13 (KPI del front brutos de devoluciones y
 anulaciones), que sigue abierto y es del front.
 
-**Dos cosas que se vieron al arreglar esto y NO se tocaron** (van como recomendación, no como parte del
-arreglo):
+**Dos cosas que se vieron al arreglar esto y no se tocaron ENTONCES** (fueron como recomendación, no como
+parte del arreglo; la primera se cerró un día después):
 
-- `sales.void_sale` **no verifica si la venta ya tiene devoluciones**. Anular una venta parcialmente
-  devuelta repone el stock COMPLETO otra vez (`service.py::void_sale` recorre `sale_line` sin descontar lo
-  ya devuelto) y emite un contra-movimiento por el `total` entero. Es un defecto real, pero es del carril
-  de las ANULACIONES, no del de las devoluciones.
+- `sales.void_sale` **no verificaba si la venta ya tenía devoluciones** — duplicaba el stock de lo
+  devuelto y la plata ya liquidada al cliente. Se anotó acá como recomendación por ser de otro carril (el
+  de las ANULACIONES). **Es ahora su propio hallazgo, §F21-31 (más arriba en este
+  documento), cerrado el 23/09/2026** — la anulación se rechaza con `SALE_HAS_RETURNS`.
 - Anulación y devolución **siguen siendo cosas distintas**, y así deben quedar: una anulación dice "esta
   venta nunca ocurrió" y sale del resultado retroactivamente (F21-15). Tratarlas igual era tentador al leer
   el código y sería un error: borra la distinción entre corregir un error de digitación y registrar un

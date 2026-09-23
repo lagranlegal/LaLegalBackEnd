@@ -691,3 +691,154 @@ async def test_cash_return_blocked_when_settlement_account_not_settled(
         },
     )
     assert allowed.status_code == 201, allowed.text
+
+
+# =========================================================================
+# F21-31 — Anular una venta que ya tiene devoluciones.
+#
+# El defecto: `void_sale` reponía TODAS las líneas y emitía el
+# contra-movimiento por el `total` entero, sin mirar si parte de la venta ya
+# se había devuelto y liquidado. Anular una venta parcialmente devuelta
+# duplicaba el stock de lo devuelto y le devolvía la plata al cliente dos
+# veces.
+#
+# La decisión es RECHAZAR, no anular el remanente (ver el comentario largo
+# en `service.void_sale`). Estos tests fijan las dos mitades: que el camino
+# normal —anular una venta sin devoluciones— siga intacto, y que con
+# devoluciones se rechace con su propio código.
+# =========================================================================
+
+
+async def _sale_snapshot(company_id, sale_id) -> tuple[str, int, int]:
+    """Estado de la venta, cantidad del lote y cuántos contra-movimientos de
+    anulación existen. Lo que el defecto tocaba."""
+    async with AsyncSessionLocal() as session, session.begin():
+        status = (
+            await session.execute(
+                text("select status from public.sale where id = :id"), {"id": str(sale_id)}
+            )
+        ).scalar_one()
+        quantity = (
+            await session.execute(
+                text(
+                    "select quantity from public.inventory_item "
+                    "where company_id = :cid order by created_at limit 1"
+                ),
+                {"cid": str(company_id)},
+            )
+        ).scalar_one()
+        voids = (
+            await session.execute(
+                text(
+                    "select count(*) from public.cash_movement where company_id = :cid "
+                    "and reference_type = 'sale' and direction = 'out'"
+                ),
+                {"cid": str(company_id)},
+            )
+        ).scalar_one()
+    return status, quantity, voids
+
+
+async def test_void_sin_devoluciones_sigue_reponiendo_todo(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """El camino normal no se puede romper: sin devoluciones, anular repone
+    el stock completo y emite su contra-movimiento."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    sale = _make_sale(client, returns_tenant, quantity="2")
+
+    response = client.post(
+        f"/api/v1/sales/{sale['id']}/void",
+        headers=_headers(returns_tenant["full_token"]),
+        json={"reason": "error de digitación"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "voided"
+
+    status, quantity, voids = await _sale_snapshot(returns_tenant["company_id"], sale["id"])
+    assert status == "voided"
+    assert quantity == 5  # 5 − 2 vendidas + 2 repuestas
+    assert voids == 1
+
+
+async def test_void_bloqueado_si_la_venta_tiene_una_devolucion_parcial(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """El caso del defecto: 2 vendidas, 1 devuelta y reingresada.
+
+    Con el código anterior la anulación pasaba (200), reponía las 2 líneas
+    —dejando el lote en 6 sobre un stock inicial de 5— y sacaba de caja los
+    1.000.000 enteros habiéndole pagado ya 500.000 al cliente.
+    """
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    sale = _make_sale(client, returns_tenant, quantity="2")
+    devolucion = client.post(
+        f"/api/v1/sales/{sale['id']}/returns",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [{"sale_line_id": sale["lines"][0]["id"], "quantity": "1"}],
+            "reason": "defect",
+            "settlement_method": "cash",
+        },
+    )
+    assert devolucion.status_code == 201, devolucion.text
+
+    response = client.post(
+        f"/api/v1/sales/{sale['id']}/void",
+        headers=_headers(returns_tenant["full_token"]),
+        json={"reason": "el dueño quiere borrarla"},
+    )
+    assert response.status_code == 409, response.text
+    body = response.json()
+    # El CÓDIGO, no el status: es lo que el front escucha para decir qué hacer.
+    assert body["code"] == "SALE_HAS_RETURNS"
+    assert body["details"]["return_count"] == 1
+    assert body["details"]["return_numbers"] == [devolucion.json()["number"]]
+    assert body["details"]["return_ids"] == [devolucion.json()["id"]]
+    # El mensaje nombra la acción que falta, no solo niega la intentada.
+    assert "devolución" in body["message"]
+
+    # Y nada se movió: ni el estado, ni el stock, ni la caja.
+    status, quantity, voids = await _sale_snapshot(returns_tenant["company_id"], sale["id"])
+    assert status == "completed"
+    assert quantity == 4  # 5 − 2 vendidas + 1 devuelta
+    assert voids == 0
+
+
+async def test_void_bloqueado_si_la_venta_esta_totalmente_devuelta(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """Devuelta al 100 % tampoco se anula: la nota crédito ya se emitió y
+    puede estar redimida en otra venta."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    sale = _make_sale(client, returns_tenant, quantity="1")
+    devolucion = client.post(
+        f"/api/v1/sales/{sale['id']}/returns",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [{"sale_line_id": sale["lines"][0]["id"], "quantity": "1"}],
+            "reason": "change_of_mind",
+            "settlement_method": "credit_note",
+        },
+    )
+    assert devolucion.status_code == 201, devolucion.text
+
+    response = client.post(
+        f"/api/v1/sales/{sale['id']}/void",
+        headers=_headers(returns_tenant["full_token"]),
+        json={"reason": "igual la quiero anular"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "SALE_HAS_RETURNS"
+    assert response.json()["details"]["return_count"] == 1
+
+    status, quantity, voids = await _sale_snapshot(returns_tenant["company_id"], sale["id"])
+    assert status == "completed"
+    assert quantity == 5  # 5 − 1 vendida + 1 devuelta
+    assert voids == 0

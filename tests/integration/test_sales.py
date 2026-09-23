@@ -571,7 +571,14 @@ async def test_void_sale_restores_stock_and_blocks_double_void(
     second_void = client.post(
         f"/api/v1/sales/{sale['id']}/void", headers=void_headers, json={"reason": "otra vez"}
     )
+    # Se asserta el CÓDIGO, no solo el status: un 409 lo devuelven varias cosas
+    # distintas de este endpoint (`SALE_HAS_RETURNS` entre ellas, F21-31), así
+    # que mirar solo el número dejaría pasar un rechazo por el motivo
+    # equivocado. Es el patrón exacto que costó once días con
+    # `CASH_SESSION_NOT_OPEN` vs `NOT_FOUND`: un código de error es un contrato
+    # entre dos capas y nadie lo compila.
     assert second_void.status_code == 409
+    assert second_void.json()["code"] == "CONFLICT"
 
 
 @pytest.mark.asyncio
