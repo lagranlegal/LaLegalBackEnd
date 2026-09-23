@@ -76,7 +76,12 @@ python scripts/qa/verificar_job_nocturno.py  # la Machine del job en Fly; exit 1
 
 ### Los dos guardianes en automático
 
-`verificar_job_nocturno.py` ya corre solo: **`.github/workflows/guardianes.yml`**, todos los días a las
+🔴 **Ojo con dónde vive el workflow.** `schedule` y `workflow_dispatch` de GitHub Actions **solo funcionan
+desde la RAMA POR DEFECTO**. El 22/09 este workflow se commiteó en `dev` con `main` como rama por defecto,
+así que **no iba a correr nunca y ni siquiera aparecía en Actions** (F21-30). Se arregló poniendo `dev`
+como rama por defecto. Si alguien la cambia, el guardián deja de correr **y nada lo avisa**.
+
+`verificar_job_nocturno.py` corre solo: **`.github/workflows/guardianes.yml`**, todos los días a las
 13:00 UTC (8 a.m. en Bogotá, o sea *después* de la corrida del job, así que un problema se sabe al empezar
 el día y no al terminarlo). Necesita **un solo secret**, `FLY_API_TOKEN`, y hasta que exista **falla a
 propósito** con un mensaje que dice qué agregar — saltearse en silencio por falta de configuración sería el

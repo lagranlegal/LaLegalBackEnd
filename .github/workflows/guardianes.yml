@@ -19,6 +19,28 @@
 # del perímetro que ya tiene acceso a la base — ver la nota en
 # `scripts/qa/README.md`.
 #
+# 🔴 DÓNDE TIENE QUE VIVIR ESTE ARCHIVO (esto ya falló una vez)
+# -------------------------------------------------------------
+# En GitHub Actions, **`schedule` y `workflow_dispatch` solo funcionan desde la
+# RAMA POR DEFECTO del repositorio.** No desde la rama donde se commiteó.
+#
+# El 22/09/2026 este workflow se commiteó en `dev` mientras la rama por defecto
+# era `main` —que tenía solo el commit inicial del 15/08 y ningún workflow— así
+# que **no iba a correr nunca, y sin decirlo**: no aparecía siquiera en la
+# pestaña Actions. Lo encontró Mateo mirando la pantalla. Es F21-30, y es el
+# guardián contra fallas silenciosas fallando en silencio.
+#
+# Lo que lo vuelve invisible es que `ci.yml` SÍ funciona, porque se dispara por
+# `push` y esos corren desde la rama que se empuja. O sea: hay workflows vivos
+# en el repo y nada parece roto.
+#
+# Se arregló cambiando la rama por defecto a `dev`. **Si alguien la vuelve a
+# cambiar, este archivo deja de correr y nada lo va a avisar.**
+#
+# Regla para cualquier workflow programado que se agregue: que esté en la rama
+# por defecto, y **correrlo una vez a mano con «Run workflow» antes de confiar
+# en su horario.** Uno que nunca se vio correr no está programado: está escrito.
+#
 # QUÉ HACE FALTA PARA QUE FUNCIONE
 # --------------------------------
 # Un solo secret en el repo: `FLY_API_TOKEN` (Settings → Secrets and variables →

@@ -463,6 +463,42 @@ no la salida del comando. `flyctl machine list --app compraventa-backend-dev --j
 
 ---
 
+## 🔴 F21-30 — El guardián diario nunca habría corrido (22/09/2026)
+
+**El más irónico de todos, y lo encontró Mateo mirando la pantalla, no un test.** Se construyó
+`.github/workflows/guardianes.yml` para que una ausencia silenciosa dejara de serlo, y **el guardián mismo
+habría fallado en silencio.**
+
+Mateo fue a Actions y **el workflow no aparecía**. La causa:
+
+- La rama por defecto del repo es **`main`**, que tiene **solo el commit inicial del 15/08/2026** y está
+  **141 commits atrás** de `dev`. No tiene **ningún** workflow.
+- En GitHub Actions, **`schedule` y `workflow_dispatch` solo funcionan desde la rama por defecto.**
+- El workflow se commiteó en `dev`. **Por lo tanto no iba a correr nunca. Ni una vez.**
+
+Sin error, sin correo, sin nada: exactamente la clase de ausencia que el guardián venía a combatir.
+`ci.yml` sí funciona, pero por una razón distinta —se dispara por `push`, y esos sí corren desde la rama que
+se empuja—, y esa asimetría es justo lo que lo vuelve invisible: *hay* workflows funcionando en el repo, así
+que nada parece roto.
+
+**La lección, que es la misma de F21-10 con otra ropa:** una pieza cuya única señal de vida es que haga su
+trabajo necesita que alguien verifique **que se ejecuta**, no solo que está escrita. Aquí ni siquiera hacía
+falta esperar a la medianoche: bastaba con abrir Actions y mirar. **No se miró.**
+
+**Arreglado:** la rama por defecto pasó a **`dev`** (decisión de Mateo, 22/09). Se descartó duplicar el
+workflow y el script en `main` por el argumento que este mismo día quedó escrito en `rules.py`: *dos copias
+del mismo archivo no divergen por decisión, divergen por omisión*. Y se descartó mergear `dev` a `main`
+porque `main` está declarada como rama de producción y producción todavía no existe.
+
+**De paso cierra otra trampa que nadie había mirado:** con `main` como rama por defecto y 141 commits atrás,
+**quien clonara el repo se llevaba el código del 15/08** sin que nada se lo dijera.
+
+**Qué verificar cuando se agregue cualquier workflow programado:** que exista en la **rama por defecto**, y
+correrlo una vez a mano con **Run workflow** antes de confiar en su horario. Un workflow que nunca se vio
+correr no está programado: está escrito.
+
+---
+
 ## Hallazgos al corregir la guía para publicarla — 22/09/2026 (cinco)
 
 Salieron de verificar **contra el código** dos afirmaciones que la guía ya hacía, antes de republicarla.
