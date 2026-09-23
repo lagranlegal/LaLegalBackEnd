@@ -51,6 +51,26 @@ fi
 
 echo
 echo "  Enlace: ${LINK%%\?*}?…"
+# Antes de gastar el token: ¿la plantilla está usando la forma correcta?
+# `/auth/v1/verify` es el enlace de GoTrue, o sea `{{ .ConfirmationURL }}` —
+# el que los crawlers queman. El nuestro apunta a la app con `token_hash`.
+case "$LINK" in
+  */auth/v1/verify\?*)
+    echo
+    echo "  🔴 EL ENLACE ES EL DE GoTrue, NO EL DE LA APP."
+    echo "     Empieza con /auth/v1/verify, o sea que la plantilla está usando"
+    echo "     {{ .ConfirmationURL }} — el enlace que los crawlers queman."
+    echo "     El nuestro se ve así:"
+    echo "       <dominio>/auth/callback?token_hash=…&type=recovery"
+    echo
+    echo "     Causa casi segura: la plantilla no se guardó, se editó la"
+    echo "     equivocada (Reset Password ≠ Magic Link), o el plan del proyecto"
+    echo "     no permite editarlas (medido el 04/09/2026 — paso 1 del runbook)."
+    echo
+    echo "     Se sigue igual para dejar la evidencia, pero el diagnóstico ya está."
+    ;;
+esac
+
 echo "  ── Los cuatro crawlers que queman enlaces ──"
 
 FALLAS=0
@@ -60,7 +80,17 @@ while IFS='|' read -r NOMBRE UA; do
   if [ "$CODIGO" = "200" ] && [ -z "$REDIR" ]; then
     printf '  [OK  ] %-24s 200, sin redirect\n' "$NOMBRE"
   else
-    printf '  [ROTA] %-24s %s  redirect=[%s]\n' "$NOMBRE" "$CODIGO" "$REDIR"
+    # El destino NO se imprime entero a propósito: cuando el enlace se quema,
+    # el redirect trae un `access_token` REAL en el fragmento, y pegar esa
+    # salida en un chat o un ticket lo filtra. Se dice QUÉ pasó, no el token.
+    case "$REDIR" in
+      *access_token=*)  QUE="SE QUEMÓ: el destino trae un access_token (sesión real)" ;;
+      *otp_expired*)    QUE="ya estaba quemado (otp_expired) — lo consumió un crawler anterior" ;;
+      *error_code=*)    QUE="el destino trae un error_code" ;;
+      "")               QUE="sin redirect, pero el código no es 200" ;;
+      *)                QUE="redirige a ${REDIR%%\?*}" ;;
+    esac
+    printf '  [ROTA] %-24s %s  %s\n' "$NOMBRE" "$CODIGO" "$QUE"
     FALLAS=$((FALLAS+1))
   fi
 done <<'CRAWLERS'
