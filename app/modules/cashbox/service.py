@@ -428,6 +428,44 @@ async def reopen_session(
             code="CASH_SESSION_ALREADY_OPEN",
         )
 
+    # F21-32: reabrir tiene que deshacer el cierre ENTERO, no solo el acta.
+    #
+    # `repository.reopen_session` borra `expected_cash`/`counted_cash`/
+    # `difference`, pero el `adjustment` que el cierre emitió sigue en la
+    # cuenta. Y como ese ajuste vive con `session_id = NULL` —a propósito, ver
+    # `close_session`—, `_expected_cash` NO lo ve al recerrar: el segundo
+    # cierre calcula su diferencia como si el primero nunca hubiera existido y
+    # emite otro ajuste encima. Los dos se acumulan sobre el saldo del cajón
+    # mientras el acta solo reporta el último. Medido en dev antes del fix:
+    # un acta de -20.000 sobre un cajón desviado +2.700.100.
+    #
+    # La reversa sale del ACTA (`difference`), no de buscar el movimiento: la
+    # apertura y el cierre emiten su ajuste con la MISMA referencia
+    # (`cash_session` + `session_id`) y solo se distinguen por las `notes`, así
+    # que localizarlo sería una heurística sobre texto libre. El acta es el
+    # dato autoritativo y sobrevive a cualquier número de reaperturas.
+    #
+    # Y es un contra-movimiento, no un DELETE: un `cash_movement` es un
+    # documento. Mismo criterio que anular una venta, que repone con un
+    # contra-movimiento en vez de borrar el original.
+    difference = m["difference"]
+    if difference is not None and difference != 0:
+        await integration.record_movement(
+            db,
+            session_id=None,
+            company_id=company_id,
+            module="general",
+            # Invertido respecto del que emitió el cierre.
+            direction="out" if difference > 0 else "in",
+            concept="adjustment",
+            amount=abs(difference),
+            payment_method="cash",
+            reference_type="cash_session",
+            reference_id=session_id,
+            created_by=actor_id,
+            notes=f"Reversa del descuadre de cierre al reabrir la sesión: {reason}",
+        )
+
     await repository.reopen_session(db, company_id=company_id, session_id=session_id)
     await identity_repo.insert_audit_log(
         db,
@@ -437,7 +475,14 @@ async def reopen_session(
         action="reopen_session",
         entity_type="cash_session",
         entity_id=session_id,
-        before={"status": "closed"},
+        before={
+            "status": "closed",
+            # Queda en la auditoría lo que el acta está a punto de perder: sin
+            # esto, reabrir borra `difference` y no quedaría rastro de cuánto
+            # descuadró el cierre que se deshizo.
+            "difference": str(difference) if difference is not None else None,
+            "counted_cash": str(m["counted_cash"]) if m["counted_cash"] is not None else None,
+        },
         after={"status": "open", "reason": reason},
     )
     return await get_session(db, company_id=company_id, session_id=session_id)

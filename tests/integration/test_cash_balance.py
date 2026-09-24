@@ -65,6 +65,10 @@ async def tenant_efectivo(
         "cashbox.view",
         "cashbox.open_close",
         "cashbox.expense",
+        # F21-32 vive justo acá: reabrir es lo único que puede deshacer un
+        # cierre, y hasta ahora deshacía el acta sin deshacer su efecto sobre
+        # el saldo del cajón.
+        "cashbox.reopen",
         "accounts.view",
         "accounts.manage",
         "accounts.transfer",
@@ -341,6 +345,124 @@ def test_el_ajuste_de_cierre_no_ensucia_el_acta(client: TestClient, tenant_efect
     assert reporte.status_code == 200, reporte.text
     # Sigue diciendo lo que se ESPERABA, no lo que se contó.
     assert reporte.json()["expected_cash"] == "100000.00"
+
+
+# --------------------------------------------------------------------------
+# 4-bis. Reabrir deshace el cierre ENTERO, no solo el acta (F21-32)
+# --------------------------------------------------------------------------
+def test_reabrir_revierte_el_ajuste_del_cierre(client: TestClient, tenant_efectivo: dict) -> None:
+    """Reabrir borraba `difference` del acta y dejaba vivo el `adjustment`
+    que el cierre había emitido sobre la cuenta.
+
+    Como ese ajuste va con `session_id = NULL`, `_expected_cash` no lo ve al
+    recerrar: el segundo cierre calcula su diferencia como si el primero
+    nunca hubiera existido y emite OTRO ajuste encima. Los dos se acumulan
+    sobre el saldo y el acta solo reporta el último.
+    """
+    token = tenant_efectivo["token"]
+    cajon = tenant_efectivo["cajon_id"]
+    abierta = _abrir(client, token, counted_cash="100000.00", difference_reason="Base inicial")
+    session_id = abierta["body"]["id"]
+
+    client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/close",
+        headers=_headers(token),
+        json={"counted_cash": "92000.00", "difference_reason": "Faltaron 8.000"},
+    )
+    assert _saldo(client, token, cajon) == Decimal("92000.00")
+
+    reabrir = client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/reopen",
+        headers=_headers(token),
+        json={"reason": "faltó registrar un gasto"},
+    )
+    assert reabrir.status_code == 200, reabrir.text
+
+    # Deshecho el cierre, el cajón vuelve a valer lo que valía ANTES de él.
+    # Sin la reversa, acá el saldo se queda en 92.000: el faltante de 8.000
+    # sigue descontado de una cuenta cuyo cierre ya no existe.
+    assert _saldo(client, token, cajon) == Decimal("100000.00")
+
+
+def test_recerrar_despues_de_reabrir_deja_el_cajon_en_lo_contado(
+    client: TestClient, tenant_efectivo: dict
+) -> None:
+    """El invariante de 00048 —después de cerrar, el cajón vale lo que se
+    contó— tiene que valer también en el segundo cierre.
+
+    Es el caso medido en dev que destapó F21-32: un acta de -20.000 sobre un
+    cajón desviado +2.700.100, con cero movimientos de por medio.
+    """
+    token = tenant_efectivo["token"]
+    cajon = tenant_efectivo["cajon_id"]
+    abierta = _abrir(client, token, counted_cash="100000.00", difference_reason="Base inicial")
+    session_id = abierta["body"]["id"]
+
+    client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/close",
+        headers=_headers(token),
+        json={"counted_cash": "92000.00", "difference_reason": "Faltaron 8.000"},
+    )
+    client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/reopen",
+        headers=_headers(token),
+        json={"reason": "faltó registrar un gasto"},
+    )
+    recerrar = client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/close",
+        headers=_headers(token),
+        json={"counted_cash": "95000.00", "difference_reason": "Recuento: faltaron 5.000"},
+    )
+    assert recerrar.status_code == 200, recerrar.text
+    assert recerrar.json()["difference"] == "-5000.00"
+
+    # Sin el fix son 87.000: el -8.000 del primer cierre sigue restado y el
+    # -5.000 del segundo se le suma encima, mientras el acta solo habla del
+    # segundo. El cajón vale lo que se contó, y punto.
+    assert _saldo(client, token, cajon) == Decimal("95000.00")
+
+
+async def test_reabrir_deja_en_la_auditoria_el_descuadre_que_el_acta_pierde(
+    client: TestClient, tenant_efectivo: dict
+) -> None:
+    """Reabrir borra `difference` de la fila. Si no queda en la auditoría, no
+    queda en ninguna parte cuánto descuadró el cierre que se deshizo."""
+    token = tenant_efectivo["token"]
+    abierta = _abrir(client, token, counted_cash="100000.00", difference_reason="Base inicial")
+    session_id = abierta["body"]["id"]
+    client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/close",
+        headers=_headers(token),
+        json={"counted_cash": "92000.00", "difference_reason": "Faltaron 8.000"},
+    )
+    client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/reopen",
+        headers=_headers(token),
+        json={"reason": "faltó registrar un gasto"},
+    )
+
+    async with AsyncSessionLocal() as session, session.begin():
+        # La fila, no el endpoint: es el dato que reabrir borra.
+        fila = (
+            await session.execute(
+                text("select difference from public.cash_session where id = :sid"),
+                {"sid": str(session_id)},
+            )
+        ).scalar_one()
+        before = (
+            await session.execute(
+                text(
+                    "select before from public.audit_log "
+                    "where company_id = :cid and action = 'reopen_session' "
+                    "and entity_id = :sid"
+                ),
+                {"cid": str(tenant_efectivo["company_id"]), "sid": str(session_id)},
+            )
+        ).scalar_one()
+
+    assert fila is None, "reabrir tiene que limpiar el acta"
+    assert before["difference"] == "-8000.00"
+    assert before["counted_cash"] == "92000.00"
 
 
 # --------------------------------------------------------------------------

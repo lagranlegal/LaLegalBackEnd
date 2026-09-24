@@ -45,6 +45,287 @@
 
 ---
 
+## Tanda de defectos abiertos — 23/09/2026 (once cerrados, uno nuevo de plata)
+
+Se atacó la serie F20-xx / F21-xx que quedaba abierta, repartida en tres frentes en paralelo: los
+**códigos de error** del front, las **etiquetas y consistencia de UX**, y una **medición en solo lectura**
+de los cinco defectos de reportes. El frente de medición no tenía permitido escribir código, a propósito:
+tres de sus cinco tocan la definición de «ingreso», y el arreglo anterior de esa familia (F21-12) se diseñó
+específicamente para no crear una cuarta.
+
+**El resultado que más importa no estaba en ninguna lista** y salió midiendo F21-14.
+
+### ✅ F21-32 · ALTO — Reabrir y volver a cerrar una caja descuadraba el cajón (encontrado y cerrado el 23/09)
+
+**El mecanismo.** `reopen_session` (`app/modules/cashbox/repository.py:216-228`) limpia el acta
+—`expected_cash`, `counted_cash`, `difference` y `difference_reason` a `null`— pero **no revierte el
+`adjustment` que el cierre ya emitió** (`cashbox/service.py:386`). Y como ese ajuste nace con
+`session_id = NULL` —lo cual es deliberado y está bien argumentado en el código: si colgara de la sesión,
+el acta cuadraría sola y el descuadre se volvería invisible—, `_expected_cash`
+(`cashbox/service.py:288-304`) filtra por sesión y **no puede verlo** al recerrar. El segundo cierre
+calcula su diferencia como si el primero nunca hubiera existido, emite su propio ajuste, y **los dos se
+acumulan sobre el saldo de la cuenta mientras el acta solo reporta el último**.
+
+**El daño, medido** (Empresa Demo Front, «Caja principal», historial completo en `audit_log`). Los dos
+ajustes del par reapertura/recierre se ven en crudo:
+
+```
+2026-09-11 03:13:51  in   +2.700.100   ← primer cierre; quedó huérfano
+2026-09-11 03:23:33  out     -20.000   ← recierre; es lo único que reporta el acta
+```
+
+Con **cero movimientos posteriores al último cierre**, el saldo derivado del cajón es **$4.820.100** contra
+los **$2.120.000** contados. Desvío **+$2.700.100**, exactamente el ajuste huérfano.
+
+Rompe de frente el invariante que la migración `00048` vino a establecer: *después de cerrar, el cajón vale
+lo que se contó* — y que la regla 5 de `CLAUDE.md` ya recoge.
+
+**LA GRAN LEGAL no lo tiene hoy:** tiene 1 reapertura, pero su sesión quedó abierta sin `difference`, así
+que no llegó a emitir el ajuste. Está a un cierre-con-descuadre de tenerlo.
+
+**No es el mismo defecto que F21-14**, aunque salieran juntos: F21-14 es que los descuadres no se suman en
+ningún reporte; este es que el saldo queda mal. Se puede arreglar F21-14 y dejar este vivo.
+
+#### El arreglo (23/09/2026)
+
+`reopen_session` ahora **deshace el cierre entero, no solo el acta**: antes de limpiarla emite un
+`adjustment` inverso por el mismo `difference`.
+
+**Tres decisiones de diseño, y ninguna es de estilo:**
+
+- **La reversa sale del ACTA (`difference`), no de buscar el movimiento.** La apertura y el cierre emiten su
+  ajuste con la **misma** referencia (`reference_type='cash_session'` + `reference_id=session_id`) y solo se
+  distinguen por el texto de las `notes` — localizarlo sería una heurística sobre texto libre. El acta es el
+  dato autoritativo y sobrevive a cualquier número de reaperturas.
+- **Es un contra-movimiento, no un `DELETE`.** Un `cash_movement` es un documento, y encima la tabla tiene
+  trigger de inmutabilidad. Mismo criterio que anular una venta, que repone con un contra-movimiento en vez
+  de borrar el original.
+- **El `before` de la auditoría se lleva `difference` y `counted_cash`.** Reabrir borra esos campos de la
+  fila; sin esto no quedaría en ninguna parte cuánto descuadró el cierre que se deshizo.
+
+**Tres tests, los tres vistos fallar con el código viejo** (`tests/integration/test_cash_balance.py`, que es
+donde vive el invariante de `00048`):
+
+| Test | Con el código viejo |
+|---|---|
+| `test_reabrir_revierte_el_ajuste_del_cierre` | `assert Decimal('92000.00') == Decimal('100000.00')` — el faltante seguía descontado de un cierre que ya no existe |
+| `test_recerrar_despues_de_reabrir_deja_el_cajon_en_lo_contado` | `assert Decimal('87000.00') == Decimal('95000.00')` — **el bug exacto**: los dos ajustes acumulados (−8.000 y −5.000) mientras el acta solo habla del segundo |
+| `test_reabrir_deja_en_la_auditoria_el_descuadre_que_el_acta_pierde` | `KeyError: 'difference'` |
+
+El fixture de ese archivo no tenía `cashbox.reopen` — por eso el invariante nunca se había probado del lado
+de la reapertura, aunque el archivo existiera justo para vigilarlo.
+
+**Estado: 447 tests backend en verde y sin saltados** (con Docker arriba), `ruff`, `format` y `mypy`
+limpios. **Falta desplegar**, y los datos ya dañados de Empresa Demo Front (+$2.700.100) **no se repararon**
+— es una empresa de prueba y la reparación es su propia decisión.
+
+### 🟠 Dato de un cliente real — el cajón de LA GRAN LEGAL reporta un número sin sentido
+
+Saldo derivado: **−$1.108.000**. Un cajón no puede estar en negativo. **No lo causa F21-32**: su
+`opening_balance` es **0** y se desembolsaron $1.600.000 en cuatro préstamos, contra $300.000 de ajuste y
+$200.000 de una venta, menos $8.000 de un gasto. Nunca se registró el efectivo con el que se abrió el cajón.
+
+No es un defecto de código — es el síntoma que el punto 28 de `ESTADO.md` describía (*el saldo de apertura
+era el único dato de toda la app que aparecía sin documento*), visto desde el otro lado ahora que el saldo
+se deriva. Pero significa que **la pantalla de caja de un cliente real muestra hoy un número imposible**, y
+eso se le reporta a él, no se corrige por dentro.
+
+### Cerrados: los códigos de error (F20-01, F20-02, F20-03, F21-02, F21-03, F21-06)
+
+Todos del front; **ninguno exigió tocar el backend**. Es la familia del principio que ya costó once días de
+trabajo a una empresa: *un código de error es un contrato entre dos capas, y nadie lo compila.*
+
+| # | Qué era | Cómo quedó |
+|---|---|---|
+| **F20-01** | `errors.ts` catalogaba `ALREADY_CLOSED_TODAY`; el backend emite `CASH_SESSION_ALREADY_CLOSED_TODAY` (`cashbox/service.py:115,119`). Era una **entrada muerta desde que se escribió** — nada más en el front la usaba | Corregido al código real |
+| **F20-02** | `IDEMPOTENCY_IN_PROGRESS` fuera del catálogo (el doble clic en «Vender») | Agregado |
+| **F20-03** | `MULTIPLE_REGISTERS_NOT_SUPPORTED` fuera del catálogo | Agregado |
+| **F21-02** | Anular una venta exige caja abierta | Abre `CashSessionRequiredDialog` — ver la corrección abajo |
+| **F21-03** | Abrir/cerrar caja tapaban el mensaje del backend con un genérico | `openSessionErrorMessage`, exportada y testeable |
+| **F21-06** | `INVITE_RATE_LIMITED` filtraba el nombre del proveedor de infraestructura al usuario | Traducido, nombrando las dos salidas |
+
+**Corrección al hallazgo F21-02, y es la mitad que importa.** El informe decía que el front muestra «No se
+pudo anular la venta. Intenta de nuevo.» Eso **ya no era cierto**: desde el arreglo de F21-31,
+`SaleReceiptDialog.tsx:79` muestra `error.message`, o sea el texto del backend. El defecto sobrevivía igual,
+pero era otro: **es un toast** — se desvanece solo, no dice *dónde* está la acción que falta, y no distingue
+a quien puede abrir la caja de quien tiene que pedírsela. Se arregló con el patrón que ya usan las otras
+diez operaciones, no cambiando el texto. *Un hallazgo que sigue vivo puede haber cambiado de causa: se
+vuelve a medir antes de arreglarlo.*
+
+**Y F20-01 y F21-03 eran el mismo bug.** Con el código sin tipar en `KNOWN_CODES`, cualquier rama que
+preguntara por «la caja de hoy ya se cerró» era **inalcanzable**. El test nuevo falla por las dos razones a
+la vez con el código viejo.
+
+**Dos cosas que aparecieron de paso** y no estaban en ningún hallazgo: el `mutateAsync` de
+`OpenSessionDialog` estaba pelado, así que cada fallo dejaba una promesa rechazada sin dueño; y
+`useOpenSession` no invalidaba `['cashbox']` al fallar.
+
+Cita del informe que ya se había movido: el `raise CashSessionNotOpenError` de anular una venta está en
+`sales/service.py:440`, no en `:384-386` (la guarda de `SALE_HAS_RETURNS` de F21-31 se metió antes).
+
+### Cerrados: etiquetas y consistencia de UX (F21-04, F21-07, F21-08)
+
+**F21-08 era bastante más grande de lo escrito.** Además de `contribution`/`withdrawal` y de
+`accounts`/`capital`, faltaban `capital_movement` en `AUDIT_ENTITY_TYPE_LABELS` y **`owner_contribution` /
+`owner_withdrawal` en `CONCEPT_LABELS`** (`src/lib/modules.ts`) — valores reales del enum `cash_concept`
+(`00054_owner_capital.sql:60-61`) que salían en inglés **en el acta de cierre de caja**. Es el mismo defecto
+que F9-03 con `sale_return`.
+
+**Y un efecto que el hallazgo no menciona: una etiqueta que falta esconde el filtro.** Los filtros de
+`AuditPage` se arman con las **claves** de esos mapas, así que no se podía filtrar la auditoría por capital
+ni por cuentas. El bloque entero era invisible, no solo estaba en inglés.
+
+**Por qué se escapó al guardián.** `test_audit_actions.py` busca `action="..."` con un regex de literales, y
+`capital/service.py:193` escribe `action=direction` — **el único caso dinámico de todo el backend**, y por
+construcción invisible para él. El test nuevo del front cubre el otro lado del contrato y además canta si
+aparece **otra** acción dinámica.
+
+**F21-07 era más grande.** Al unificar el traslado con `CashSessionRequiredDialog` apareció que **una de
+«las otras diez» tampoco funcionaba**: `CapitalMovementDialog` abría el modal compartido pero antes hacía
+`onOpenChange(false)`, y `CapitalPage` lo monta con `key={dialog ?? 'cerrado'}` — ese cierre cambia la key,
+**remonta** el componente y el `cashDialogOpen` se pierde en el mismo render, así que «Abrir caja» no
+aparecía nunca. *Una rama de UI que nunca se ha visto no está escrita, está pendiente* — por tercera vez en
+este documento.
+
+**F21-04** (la cantidad de una línea de venta era un input no controlado) trajo un caso que un `value=`
+ingenuo no cubre: seguir tecleando sobre un valor ya acotado (50→3, después 503→3) no cambia la cantidad del
+carrito, así que una sincronización por props no se entera y **la línea vuelve a mentir**. El input acota
+localmente con la misma función que el carrito (`clampQuantity`, movida a `lib/inventory/units.ts`).
+
+### Corregido: F21-05 estaba mal descrito — la etiqueta no está huérfana
+
+El hallazgo decía que `deactivate_document_template` existe en el catálogo de auditoría y ningún botón lo
+dispara, con la sospecha de que sobraba. **Es al revés:** el backend sí la emite por un camino real
+—`company/router.py:115` expone `POST /company/document-templates/{id}/deactivate` y `company/service.py:276`
+escribe la acción, existe desde F8-02 porque sin él no había vuelta al documento de fábrica— y el endpoint
+hasta está en `src/types/api.ts`. **Lo que falta es el botón**: `documentTemplates/api.ts` tiene
+create/update/delete/activate pero no `useDeactivateDocumentTemplate`.
+
+La etiqueta se queda, porque es correcta. **Queda abierto como feature, no como defecto.**
+
+### Cerrado: F21-09 — y el hallazgo omitía el permiso más grave
+
+**No es un defecto de diseño, es una divergencia entre empresas viejas y nuevas.** `_ASESOR_CODES`
+(`app/modules/platform/service.py:27-43`) **no incluye** `contracts.override_ltv`, así que un Asesor de una
+empresa creada hoy no lo recibe. El reparto lo hizo el backfill de `00051:113-119` sobre las empresas que ya
+existían. El lado correcto ya estaba decidido en el código; los datos viejos quedaron del otro lado.
+
+**El hallazgo omitía `contracts.extend_loan`**, repartido por el mismo backfill y ausente del mismo
+`_ASESOR_CODES`. Es el más grave de los dos: `override_ltv` autoriza una excepción (prestar por encima del
+tope, advertido y auditado); `extend_loan` **desembolsa más dinero** sobre una garantía ya entregada.
+
+**Aplicado sobre LA GRAN LEGAL** —la única de las 8 empresas de dev con usuarios reales en ese rol (2
+activos)— con `scripts/qa/reparar_f21_09.sql`, auditado. Verificado antes y después: los dos permisos
+estaban, ninguno quedó.
+
+**Se verificó el front ANTES de ejecutar**, porque hasta hoy esa rama no la había visto nadie (*un permiso
+que se otorgó a todos no protege a nadie todavía*): `LtvHint.tsx:24` lee el permiso y cambia el texto a
+quién pedírselo en vez de dejar al asesor llegar al 403 final, y `ExtendLoanPanel.tsx:126` está envuelto en
+`<Can>`, así que el panel desaparece en vez de fallar.
+
+**Lo que salió al verificar el después, y vale más que el arreglo.** Se comparó el rol resultante contra
+`_ASESOR_CODES` esperando que quedara idéntico al de una empresa nueva. **No quedó**: sobra
+`contracts.edit` y falta `cashbox.view`. Pero esas no son del backfill — hay tres filas de `audit_log` del
+09/09 donde el admin editó esa matriz a mano, que es exactamente lo que el código permite. **Son decisiones
+del cliente sobre su propio mostrador.** Un script escrito contra el predicado («quitale a todo Asesor lo
+que no esté en `_ASESOR_CODES`») le habría devuelto `cashbox.view` y le habría quitado `contracts.edit`,
+pisando dos decisiones del dueño. *El predicado es lo que hay que vigilar, no lo que se ejecuta a ciegas
+sobre datos reales* — el mismo criterio de `reparar_f21_10.sql`, ganado otra vez.
+
+**Dos cosas anotadas y no ejecutadas:** las otras **6 empresas de dev** tienen la misma divergencia (todas
+de prueba); y el rol **Moderador** también recibió los dos. Por el criterio que el propio código escribe en
+`_MODERADOR_EXCLUDED_CODES` —excluido de todo lo que mueve plata y de toda excepción a una política
+comercial— los dos deberían estar en esa lista y no están. Es decisión de producto, no un arreglo obvio.
+
+### Medidos y NO arreglados, con el número que lo sostiene
+
+**La base de dev no tiene volumen, y eso condiciona todo.** LA GRAN LEGAL: 1 venta, 0 devoluciones, 0
+anulaciones, 0 sesiones cerradas. Todo lo medible vive en las dos empresas de QA. Los números son reales
+pero **no sirven para estimar producción**.
+
+- **F21-13 → el arreglo propuesto era imposible, y hay número.** El hallazgo dice que las devoluciones y
+  anulaciones «sí entran al flujo de caja». Es cierto **solo a medias**: una devolución liquidada con **nota
+  crédito no emite ningún `cash_movement`** (el `else` de `sales/service.py:764` inserta una `credit_note` y
+  nada más). Medido: **2 de 5 devoluciones no tienen ningún movimiento de caja, y son el 51,8 % del valor
+  devuelto** ($1.680.000 de $3.244.000). Netear en `aggregate.ts` es **estructuralmente incapaz** de dar el
+  número correcto — produciría una cuarta definición de «ingreso», ni bruta ni neta, justo lo que F21-12 se
+  diseñó para evitar.
+  **Y la misma pantalla ya muestra el neto, dos veces:** `ReportesPage.tsx` pinta el KPI «Ventas» bruto
+  (`:556`), debajo `<IncomeStatementCard>` (`:559`, neto con «Devoluciones» en línea propia tras F21-12) y
+  debajo `<ProfitCard>` con `profit.net_revenue` (`:104`). No falta el neto: está a pocos píxeles del bruto
+  y **nada dice que son definiciones distintas**. La propuesta pasó a ser renombrar («Ventas cobradas en
+  caja») y separar «Anulaciones» y «Devoluciones pagadas» en tarjetas propias, con los datos que ya están en
+  `summary.totalsByConcept`.
+- **F21-14 → sale casi gratis, y es más grande.** `GET /reports/closings` **ya devuelve** `difference` y
+  `difference_reason` (`reports/schemas.py:50-51`) y `ReportesPage.tsx:340` **ya los tiene en memoria**: solo
+  los usa para contar sesiones. Un `grep` de `difference` sobre `features/reports/` no devuelve nada — el
+  número llega y se descarta. Una función pura y una tarjeta; cero backend, cero red nueva.
+  Medido: **10 sesiones cerradas, 8 con descuadre**; sobrantes $13.726.000, faltantes $755.000, más 7
+  ajustes de apertura por $1.800.000 que el hallazgo no menciona.
+  **Y el INNER JOIN se traga algo más:** un movimiento contra una cuenta **`bank`** no exige sesión (correcto
+  — lo exige el tipo de cuenta), nace con `session_id = NULL` y **queda fuera del reporte para siempre**.
+  Medido: 2 movimientos, $5.060.000. Arreglar eso exige rediseñar la ventana del reporte («sesiones
+  cerradas» → «período») y es su propio ítem.
+- **F21-15 → cero casos.** Una sola anulación en toda la base, vendida y anulada **el mismo mes**; 0 de 5
+  devoluciones cruzaron de mes. El escenario nunca ocurrió. Y la parte difícil no es el filtro SQL: la opción
+  barata (bloquear la anulación tardía, reusando el patrón de `SALE_HAS_RETURNS`) **depende de una definición
+  de «mes cerrado» que hoy no existe**. Ese es el nudo, y es decisión de negocio.
+- **F21-17 → la respuesta concreta.** El endpoint del listado **no** trae el dato y **sí** hay que tocarlo
+  (`_SALE_COLUMNS`, `sales/repository.py:10-13`, no tiene nada de devoluciones). Existe
+  `GET /sales/{id}/returns` pero es por venta: usarlo desde la exportación sería un N+1 de hasta 2.500
+  peticiones. La columna es **`Devuelto` en pesos** —no un Sí/No: una devolución parcial y una total no son
+  lo mismo para quien concilia— y sale de la **misma expresión que ya usa `profit_summary`**
+  (`reports/repository.py:289`), o sea reusando la definición en vez de crear una cuarta.
+- **F21-18 → cerrado como «no es defecto»**, con tres argumentos del código: (a) el principio ya está
+  aplicado en cuatro lugares (`aggregate.ts:26-31` excluye `purchase` de gastos con el mismo argumento);
+  (b) agrupar por `paid_at` daría un número **peor**, porque `inventory/repository.py:584-592` pone
+  `paid_at = now()` y no la fecha real del pago — un mes cerrado cambiaría hacia atrás cada vez que alguien
+  salda una factura vieja, o sea **F21-15 creado a propósito**; (c) la brecha ya tiene su reporte,
+  `payables_by_supplier` (`reports/repository.py:408-452`), que filtra `e.paid_at is null`.
+  La brecha es real y grande —$3.285.000 de $4.125.000 (79,6 %) con `paid_at` nulo en Demo Front 2026-08— y
+  **aun así el cálculo es correcto**.
+
+### Un bug encontrado de paso, sin número de hallazgo todavía
+
+**La columna «Nota crédito redimida» del Excel de Ventas está SIEMPRE vacía.** `SalesListPage.tsx:41` lee
+`sale.credit_note_redeemed_amount`, pero `list_sales` (`sales/service.py:371`) llama a
+`_row_to_sale(row, lines)` **sin** ese parámetro, que tiene default `None` (`schemas.py:72`). Solo
+`create_sale` y `get_sale` lo llenan. Misma familia que F21-28 y F21-01, y **el mismo `LEFT JOIN LATERAL`
+que resuelve F21-17 la arregla de paso**.
+
+### Lo que quedó en tests
+
+**225 tests en el front** (28 archivos), `typecheck` limpio, `lint` con 0 errores, `build` ok. Los archivos
+nuevos, todos **vistos fallar con el código viejo** antes de darlos por buenos:
+
+- `tests/error-codes-contract.test.ts` — 11 casos que miran el **código**, nunca el status. Los sobres están
+  copiados literal de la línea del backend que los emite, con la cita al lado. Vistos fallar: 7 de 11.
+- `tests/void-sale-cash-session.test.tsx` — visto fallar con `Unable to find an element with the text:
+  MODAL_ABRIR_CAJA`.
+- `tests/label-catalogs.test.ts` — el molde de `test_audit_actions.py` **del otro lado del contrato**, sobre
+  cuatro catálogos extraídos del backend. Como en CI del front no existe `../backend-starter`, el congelado
+  corre siempre y el bloque que re-deriva del backend va con `describe.runIf`. Visto fallar: 4 rojos
+  nombrando los 7 valores sin etiqueta.
+- `tests/sale-quantity-input.test.tsx` — visto fallar 6 de 8 con `defaultValue`.
+- `tests/cash-session-dialog.test.ts` — lee el código: toda pantalla que decide por `CASH_SESSION_NOT_OPEN`
+  debe usar `<CashSessionRequiredDialog`. Visto fallar con el `TransferDialog` viejo. *Su primera versión
+  pasaba de más porque un comentario mencionaba el componente*; ahora busca el uso en JSX.
+
+### Trampas de método de esta tanda
+
+- **`PGOPTIONS='-c default_transaction_read_only=on'` NO funciona contra Supavisor en modo transacción.** El
+  pooler ignora las opciones de arranque: `show default_transaction_read_only` devuelve `off`, y un
+  `UPDATE ... WHERE 1=0` pasa como no-op sin que nada lo detenga. **La única barrera efectiva es
+  `BEGIN TRANSACTION READ ONLY` explícito por consulta.** Importa porque la dev remota tiene datos reales
+  bajo Ley 1581 y una medición «en solo lectura» que confíe en esa variable no lo está.
+- **Tres citas de este documento apuntaban a líneas que ya se movieron**, y se corrigieron arriba: F21-13
+  citaba `sales/service.py:407-419` (hoy ahí vive la guarda de F21-31; el contra-movimiento está en
+  `:465-471`) y `:697-701` (está en `:750-756`); F21-18 citaba `reports/repository.py:465-491` (hoy ahí vive
+  `inventory_valuation`; `inventory_purchased` está en `:590-617`). *Una cita con número de línea envejece
+  sola, y el que la lee no tiene forma de saberlo.*
+
+---
+
 ## Cierre: los hallazgos aplicados (09/09/2026)
 
 Tras las diez fases, se tomó la lista de hallazgos abiertos y se aplicó lo que era **código**, dejando fuera solo lo que necesita una decisión de negocio o de diseño. Cada fix con su test, y **cada test visto fallar sin él**.
