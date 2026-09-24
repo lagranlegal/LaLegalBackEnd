@@ -293,6 +293,14 @@ pero **no sirven para estimar producción**.
 `create_sale` y `get_sale` lo llenan. Misma familia que F21-28 y F21-01, y **el mismo `LEFT JOIN LATERAL`
 que resuelve F21-17 la arregla de paso**.
 
+**✅ Backend arreglado el 24/09/2026 con F21-17** (descripción verificada exacta contra el código). El
+listado ahora trae `credit_note_redeemed_amount` en la misma fila, por un lateral sobre
+`credit_note_redemption` (misma lectura que `get_sale_credit_note_redemption`, por el UNIQUE
+`(company_id, sale_id, credit_note_id)`), y `list_sales` se lo pasa a `_row_to_sale`. `None` sigue
+significando «no se usó nota». **El front no necesita cambio**: `SalesListPage.tsx:41` ya lee ese campo.
+Test `test_listado_de_ventas_trae_la_nota_credito_redimida` (`tests/integration/test_sale_returns.py`),
+visto fallar antes (`None == '200000.00'`).
+
 ### Lo que quedó en tests
 
 **225 tests en el front** (28 archivos), `typecheck` limpio, `lint` con 0 errores, `build` ok. Los archivos
@@ -1173,7 +1181,7 @@ descuento, devolución en un mes distinto al de la venta (el mes viejo queda id�
 `concept='sale_return'` (`:697-701`): **ninguna de las dos toca «Ventas» ni «Ingresos operativos»**, aunque
 sí entran al flujo de caja. Los KPI del período son **brutos** de devoluciones y anulaciones.
 
-### F21-14 · MEDIO — Los descuadres de caja no aparecen en ningún reporte
+### ✅ F21-14 · MEDIO — Los descuadres de caja no aparecen en ningún reporte · **CERRADO 24/09/2026 (solo front)**
 
 El ajuste del arqueo se graba con `session_id = None` (`app/modules/cashbox/service.py:385-396`) y
 `closings_breakdown` hace **INNER JOIN** con `cash_session` (`app/modules/reports/repository.py:156`).
@@ -1183,6 +1191,27 @@ descuadres, y los faltantes del mes **solo se ven en el Histórico**, uno por un
 El `session_id = None` está bien argumentado en el código (si el ajuste colgara de la sesión, el acta
 cuadraría sola y el descuadre se volvería invisible). **Lo que falta es el otro lado: nada suma los
 descuadres de un período.**
+
+#### El arreglo (24/09/2026, front)
+
+Verificado contra el código antes de construir: `ClosingHistoryOut` trae `difference`
+(`counted_cash − expected_cash`, con signo, `cashbox/service.py:354`) y `ReportesPage` ya tenía la lista en
+memoria para contar sesiones. Cero backend.
+
+- `aggregateCashDifferences` (`frontend-starter/src/features/reports/aggregate.ts`), función pura en
+  centavos (`sumMoney`/`subtractMoney`): faltantes y sobrantes **por separado, en positivo** — no se
+  compensan —, neto con signo como dato adicional, y conteo de cierres con descuadre.
+- Tarjeta «Descuadres de caja al cierre» en Reportes › Período. Se muestra con cualquier filtro de módulo y
+  **lo dice**: el arqueo es del cajón entero, no tiene módulo.
+- 6 tests (`tests/reports-cash-differences.test.ts`), los 6 vistos fallar sin la implementación.
+
+**Lo que NO cubre, a propósito:**
+- **Descuadres de apertura:** su ajuste nace con `session_id = NULL` y la cifra solo queda en `audit_log`
+  (`open_session`), no en la fila de la sesión. La tarjeta lo aclara en su pie. Sumarlos exige backend.
+- **«Cierres sin motivo»** no se agregó: el backend rechaza cerrar con diferencia y sin
+  `difference_reason` (`service.py:355`), así que el número sería siempre 0.
+- **Movimientos contra cuentas `bank` fuera del INNER JOIN** (medido: 2 movimientos, $5.060.000) — sigue
+  abierto como ítem propio, ver la medición de arriba.
 
 ### F21-15 · MEDIO — Un mes ya cerrado cambia hacia atrás
 
@@ -1207,6 +1236,55 @@ tras el arreglo de F21-12 (22/09/2026)**, y a propósito: el Estado de resultado
 en línea propia, pero la lista de Ventas es otra pantalla — `sale.status` sigue en `completed` después de
 una devolución, que es precisamente la decisión que se tomó. Lo que falta ahí es una columna, no un
 cambio de estado.
+
+**Backend resuelto el 24/09/2026; falta la columna en el front.** `SaleOut` expone
+**`returned_amount`** (string decimal, `"0.00"` sin devoluciones) en `GET /sales` y `GET /sales/{id}`.
+Es el **contra-ingreso**: bruto devuelto menos su parte prorrateada del descuento, o sea una venta
+totalmente devuelta da exactamente su `total`. Suma todas las devoluciones de la venta, sin filtro de
+fecha y sin importar si se liquidaron en efectivo o con nota crédito (esta última no emite
+`cash_movement`, así que la caja no podía ser la fuente).
+
+- **Una sola definición, ahora de verdad.** La expresión ya existía **dos veces copiada** en
+  `reports/repository.py` (`profit_summary` y `monthly_series`). Se sacó a dos fragmentos,
+  `RETURN_LINE_GROSS_SQL` y `RETURN_LINE_DISCOUNT_SQL` en `sales/repository.py`, y los tres lugares los
+  interpolan; los tests de reportes de F21-12 siguen pasando sin tocarlos.
+- **Rendimiento.** `list_sales` pagina primero (`order by id limit`) y aplica los laterales AFUERA de la
+  página ya cortada, así que corren solo para las `limit + 1` filas (verificado con `EXPLAIN ANALYZE`:
+  `loops` = filas de la página), cada uno por índice: `ix_sale_return_sale`, `ix_sale_return_line_*`,
+  `ix_sale_line_sale` y el UNIQUE de `credit_note_redemption`. Sin migración nueva.
+- **Tests** (`tests/integration/test_sale_returns.py`, vistos fallar antes):
+  `test_listado_de_ventas_trae_lo_devuelto_neto_del_descuento_prorrateado` — 2 × 500.000 con 100.000
+  de descuento; devolver 1 unidad da `450000.00` (no el bruto), la segunda suma `900000.00` = `total`, y
+  el detalle coincide con el listado.
+- **Pendiente del front:** columna «Devuelto» en la tabla y el Excel de `SalesListPage.tsx`, leyendo
+  `sale.returned_amount` (tras regenerar los tipos del OpenAPI).
+
+**Visto de paso:** la devolución le liquida al cliente el bruto — ver **F21-33**, que es de plata.
+
+### F21-33 · ALTO (plata) — una devolución sobre una venta con descuento le paga al cliente de más
+
+**Abierto, sin arreglar.** Encontrado el 24/09 leyendo el código al cerrar F21-17; **no medido contra
+datos reales todavía**.
+
+Lo que se le **liquida al cliente** en una devolución (`repository.sum_sale_return_amount`, en efectivo o
+en nota crédito) es el **bruto** `quantity × unit_price`, sin prorratear el `discount_amount`, que vive en
+la cabecera de la venta y no en la línea. En una venta con descuento el cliente recibe **más de lo que
+pagó**: venta de 900.000 (1.000.000 − 100.000 de descuento), devuelta completa, liquida **1.000.000**.
+Son 100.000 que salen del cajón (o quedan como nota crédito redimible) sin haber entrado nunca.
+
+Y el Estado de resultados **no lo ve**: desde F21-12 resta el contra-ingreso **neto** del descuento
+(`RETURN_LINE_*_SQL`), así que la diferencia entre lo que se pagó y lo que se restó no queda registrada
+en ninguna parte del reporte. «Devuelto» del listado (450.000 por unidad) tampoco coincide con la nota
+crédito o el egreso (500.000).
+
+**Qué falta:**
+1. **Medir** cuántas devoluciones reales cayeron sobre ventas con descuento y cuánto se pagó de más, por
+   empresa, con `BEGIN TRANSACTION READ ONLY` (base con datos Ley 1581).
+2. **Decidir con Mateo** la regla de negocio antes de tocar código: ¿se devuelve lo pagado (neto
+   prorrateado) o el precio de lista? Lo esperable es lo pagado, pero es su decisión.
+3. El arreglo natural es que `sum_sale_return_amount` use los mismos `RETURN_LINE_*_SQL` — liquidación y
+   contra-ingreso pasan a ser **el mismo número**, sin una definición nueva. Test que lo reproduzca
+   (900.000 → 1.000.000) visto fallar antes.
 
 ### F21-18 · BAJO — `inventory_purchased` ignora `paid_at`
 
