@@ -660,6 +660,33 @@ Un recordatorio sobre **el propio contrato que la persona firmó** es *servicio 
 
 ---
 
+### 12.2 · Resueltas el 24/09/2026 — Mateo delegó el criterio
+
+Mateo pidió resolverlas «como lo haría una app profesional de este tipo». Criterio común: **ningún correo
+sin información**, umbrales **configurables por empresa**, y lo que va al **cliente**, conservador. Con esto
+**no queda ninguna pregunta de §12.1 abierta del lado de producto**; solo la consulta al abogado.
+
+1. **Cuota:** recordatorio a **3 días** y **el día del vencimiento**. Ya vencida: **máximo uno por semana**,
+   en horario hábil, nunca domingo ni festivo — diseñado dentro de la **Ley 2300 de 2023** («dejen de
+   fregar»). Si esa ley aplica a una compraventa **va en la misma consulta al abogado** que (a) y la 7.
+   Parámetros por empresa; `grace_days` sigue sin reusarse.
+2. **Resumen diario:** **solo si hubo actividad o alertas.** Además un **resumen semanal que sale siempre**
+   (lunes): prueba que el sistema vive sin entrenar a archivar. Patrón de Square/Toast.
+3. **Correos por inquilino:** **no.** La empresa personaliza nombre, logo, teléfono y una línea de cierre;
+   el cuerpo es de la plataforma (§4.4).
+4. **Umbrales de «descuento grande» y «descuadre grande»:** **configurables por empresa, nacen en 0**
+   (se avisa todo). Por debajo del umbral el evento **igual sale en el resumen**; el umbral decide solo la
+   alerta inmediata.
+5. **`stale_after_days` = 2.**
+6. **Cliente por inquilino: confirmado.** Cada compraventa es la *responsable* del dato ante la Ley 1581 y
+   Prendo el *encargado*; el opt-out por inquilino es lo correcto, no un bug.
+7. **Aviso de prórroga (R3): APAGADO por defecto hasta el concepto del abogado.** Apagarlo cuesta casi nada
+   (2 de 16 clientes tienen correo) y quita un riesgo legal sin concepto. Se enciende por empresa con el
+   mismo interruptor de `auction_ready_customer`.
+
+**Esto es criterio de producto, no asesoría legal.** La consulta al abogado lleva tres puntos: el aviso de
+remate (a), el de prórroga (7) y si la Ley 2300 aplica a los recordatorios (1).
+
 ## 13. Defectos y cosas de arrastre encontradas al escribir esto
 
 Ninguno bloquea el diseño; todos lo tocan.
