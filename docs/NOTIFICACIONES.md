@@ -687,6 +687,21 @@ sin información**, umbrales **configurables por empresa**, y lo que va al **cli
 **Esto es criterio de producto, no asesoría legal.** La consulta al abogado lleva tres puntos: el aviso de
 remate (a), el de prórroga (7) y si la Ley 2300 aplica a los recordatorios (1).
 
+### 12.3 · Las tres preguntas legales, EN PAUSA (Mateo, 24/09/2026)
+
+Mateo decidió **no hacer la consulta por ahora**, con la condición de que activarlas después no cueste un
+rediseño. Consecuencia concreta:
+
+- **Todos los avisos al CLIENTE** —recordatorio de cuota (R1), cuota vencida (R2), prórroga (R3) y
+  `auction_ready_customer`— **se construyen y quedan en el catálogo con `default_enabled = false`**. La
+  Fase 5b entrega solo los avisos a la **empresa**. Encender uno es un interruptor por empresa, sin código.
+- **Los límites de la Ley 2300 se construyen como PARÁMETROS del despachador**, no como lógica fija:
+  tope de envíos por destinatario y semana, ventana horaria hábil, y exclusión de domingos y festivos
+  colombianos. Nacen **activos para `audience='customer'`** (el caso conservador) y sin efecto para la
+  empresa. Si el abogado dice que la ley no aplica, se relajan por configuración.
+- Lo que la decisión (1) fijó —3 días antes, el día del vencimiento, máximo uno semanal ya vencida— queda
+  como **valor por defecto** de esos eventos para el día que se enciendan.
+
 ## 13. Defectos y cosas de arrastre encontradas al escribir esto
 
 Ninguno bloquea el diseño; todos lo tocan.
