@@ -1,6 +1,8 @@
 # NOTIFICACIONES.md — Avisos por correo al cliente y a la empresa (spec)
 
-> **Estado: DISEÑADO, sin una línea de código.** El backend no tiene hoy ningún módulo de correo: cero dependencias (`pyproject.toml` no menciona ninguna librería de email), cero plantillas, cero cola, cero tabla. Todo el correo que sale de la plataforma lo manda **Supabase Auth** con su SMTP compartido, que responde `429 INVITE_RATE_LIMITED` a las pocas invitaciones (`app/modules/identity/auth_admin.py:70`). Se va a migrar a **Resend** sobre `prendo.com.co`.
+> **Estado (24/09/2026): FASE 1 IMPLEMENTADA en `dev`, sin desplegar** — maquinaria, catálogo completo, resumen diario/semanal a la empresa y límites de la Ley 2300 como parámetros. Qué quedó, qué no y dónde el código contradijo este documento: **§15**. El párrafo que sigue describe el punto de partida y se deja como estaba.
+>
+> **Estado original: DISEÑADO, sin una línea de código.** El backend no tenía ningún módulo de correo: cero dependencias (`pyproject.toml` no menciona ninguna librería de email), cero plantillas, cero cola, cero tabla. Todo el correo que sale de la plataforma lo manda **Supabase Auth** con su SMTP compartido, que responde `429 INVITE_RATE_LIMITED` a las pocas invitaciones (`app/modules/identity/auth_admin.py:70`). Se va a migrar a **Resend** sobre `prendo.com.co`.
 >
 > Pedido por Mateo: *"notificar todo lo que valga la pena — contratos, abonos, ventas, vencimiento de cuota, prórroga, remate, paz y salvo, entre otras cosas — al cliente y a la empresa."*
 >
@@ -732,3 +734,55 @@ Ninguno bloquea el diseño; todos lo tocan.
 - **Permisos nuevos en el seed** (`notifications.receive_digest`, `notifications.receive_alerts`) y en el mapa de `scripts/qa/map_endpoints.py`.
 - **Etiquetas en español** para las acciones nuevas de `audit_log` en `frontend-starter/src/features/audit/labels.ts` — si no, la pantalla muestra `resend_notification` en crudo. Ya pasó con doce acciones.
 - **Verificado en vivo, no solo en tests:** un correo real recibido, con el remitente de §8 tal como se ve en Gmail y en Outlook. *"Push ok" no prueba nada.*
+
+---
+
+## 15. Fase 1 — lo implementado (24/09/2026)
+
+**Migración `00058_notifications.sql`** (aplicada y probada solo en local): tres tablas —`notification_event_type`
+(el catálogo, global, como `permission`), `notification_event` y `notification_delivery`— con RLS `enable`+`force` y
+`tenant_isolation` en las dos por empresa, y los permisos `notifications.receive_digest` / `notifications.receive_alerts`
+sembrados al rol con `identity.manage_roles` de las empresas existentes. Aditiva: se puede aplicar antes del deploy.
+
+**Código:** `app/modules/notifications/` (`catalog`, `preferences`, `limits`, `templates`, `providers`, `service`,
+`digest`, `dispatcher`, `router`), `app/common/co_holidays.py`, `app/modules/contracts/integration.py` y dos funciones
+nuevas en `reports/integration.py`. El job nocturno tiene ahora cuatro pasos (ARCHITECTURE §11).
+
+### 15.1 · Qué quedó
+
+| Pieza | Cómo quedó |
+|---|---|
+| **Catálogo** | Los 19 tipos de §2 desde el día uno, en la tabla y en `catalog.py` (un test exige que coincidan en las dos direcciones). **Los 12 al cliente (C1–C7, R1–R5 incluido `auction_ready_customer`) nacen `default_enabled = false`** (§12.3). Resúmenes y alertas a la empresa, `true`. `purpose` sin default |
+| **Preferencias** | `company.settings.notifications`: `enabled` (interruptor general, **apagado**), `events.<code>` (override del catálogo), `thresholds` (descuento y descuadre, **nacen en 0**), `customer_contact_limits` (Ley 2300), `stale_after_days` (**2**). Faltante = default; nada exige backfill |
+| **Resumen** | Paso 3 del job, después de `recompute_all_statuses`. Secciones: E1 (reusa `repository.list_ready_for_auction`, el predicado de `GET /contracts/ready-for-auction`), E2, E3, E4, E8 (15/7/1 por cruce de hito), descuentos, movimiento del período, entregas `dead`; el semanal suma E5 y E7 |
+| **Diario / semanal** | El diario se **registra siempre** (latido del job, §5.3) y **sale solo con actividad o alertas nuevas** desde la corrida anterior. El semanal **sale siempre**: el lunes, o en la primera corrida de la semana si el lunes no hubo; ese día el diario va adentro y no sale aparte |
+| **Umbrales** | Por empresa, nacen en 0. Lo que está por debajo **igual sale** en el resumen; el umbral solo pone la marca «⚠ sobre el umbral» (y decidirá la alerta inmediata de la fase 7) |
+| **Idempotencia** | `unique(company_id, dedupe_key)` + `on conflict do nothing` como camino normal. Llaves: `digest:<empresa>:<día>`, `weekly_digest:<empresa>:<lunes>`, `auction_ready:<contrato>:<extension_ends_at>` |
+| **Despachador** | Paso 4 del job. Único lugar donde se aplican rezago, límites al cliente y tope (§14). Reintentos +1 h/+6 h/+24 h y `dead` al cuarto; `for update skip locked`; `Idempotency-Key` de Resend = la entrega; `sending` colgado >1 h vuelve a `failed` |
+| **Ley 2300** | Parámetros en `customer_contact_limits`, activos para `audience='customer'` y sin efecto para la empresa: L-V 7:00–19:00, sáb 8:00–15:00, sin domingos ni festivos colombianos (calculados, Ley Emiliani + Pascua), máx. 1 por semana y 3 por día por destinatario y empresa. Fuera de horario la entrega se corre al próximo momento hábil; pasado el tope, `throttled` |
+| **Proveedor** | `ResendProvider` (HTTP, `RESEND_API_KEY`), `NullProvider` sin key → la entrega queda **`skipped_no_provider`** y el job sigue; `RecordingProvider` en tests. Remitente `notificaciones@prendo.com.co` (`NOTIFICATIONS_FROM_ADDRESS`) |
+| **Remitente** | Resumen: `"Prendo" <notificaciones@…>` (el destinatario es un usuario de Prendo, §8). Cliente: `"<Empresa> (vía Prendo)"`, asunto sin «Prendo», `Reply-To` = `contact_email` o ninguno |
+| **Endpoints** | `GET`/`PATCH /api/v1/notifications/settings` y `GET /api/v1/notifications/deliveries`, los tres con `company.configure`; el cambio se audita como `update_settings` (módulo `notifications`) con antes y después. Contrato en `API_GUIDE.md` §13-ter |
+
+### 15.2 · Discrepancias: dónde el código contradijo este documento (y ganó)
+
+1. **E2 no sale "del delta que escribió `recompute_all_statuses`"** (§2.4). Esa función devuelve un entero, y el recálculo al abrir un contrato (`get_contract`) ya persiste el cambio antes que el job: un contrato que alguien miró en el día desaparecería del resumen. El día de entrada se **deriva** del ancla con `rules.add_months` (mora = `interest_paid_until + 1 mes`; prórroga = `+ arrears_window_months`), igual que `compute_status`.
+2. **E4 no lee `cash_movement` tipo `adjustment`** (§2.4). Desde `00048` esos ajustes van con `session_id = NULL`; el descuadre del cierre vive en `cash_session.difference` (+ `difference_reason`), que es lo que se lee.
+3. **E5 "cuentas por pagar vencidas" no existe como dato:** una compra a crédito no guarda fecha de vencimiento. El semanal reporta el total y la franja de más de 60 días de `GET /reports/payables`.
+4. **E6 (cuentas `settlement` sin liquidar hace N días) no se implementó:** no hay forma barata de fechar desde cuándo una cuenta tiene saldo. Queda para cuando se haga la fase 7.
+5. **El interruptor de empresa gobierna TODO, también el resumen.** §4.3 lo describe como «¿este negocio le escribe a sus clientes?», pero §11 pide para la fase 1 «el interruptor por empresa apagado». Se resolvió así: `enabled` general, apagado, y el resto por evento. Motivo: el deploy no puede, solo, empezar a escribirle a los administradores de las 7 empresas de dev — dos son laboratorios de QA con correos inventados, y el primer rebote se paga en la reputación del dominio.
+6. **§4.1 se amplió:** tabla de catálogo propia; `notification_event.target_date` (la fecha de la que habla el aviso, para la ventana de rezago); `notification_delivery.recipient_user_id`; `scheduled_at not null default now()`; `unique nulls not distinct (event_id, channel, to_address)`; y el estado **`skipped_no_provider`**, que §4.2 no tenía.
+7. **Un aviso al cliente encendido hoy nace `suppressed`, no `pending`.** `customer.email_basis` es de la fase 3 y no existe; con la matriz de §9.2-c, sin base no sale nada. Encender `auction_ready_customer` produce las dos entregas que pide §14 (la de la empresa y la del cliente), pero la del cliente queda `suppressed` (o `unroutable` si no tiene correo). Es a propósito: encender un evento no puede adelantarse a la base legal que lo sostiene.
+8. **`bounced`/`delivered` no se escriben todavía:** exigen el webhook de Resend. Un rechazo permanente de la API (4xx que no sea 401/403/429) va directo a `dead`, no a `bounced` — no es un rebote.
+9. **El semanal sale en la primera corrida de cada semana** (no estrictamente el lunes) para que un lunes perdido no se coma la semana. Consecuencia: la primera noche tras el deploy sale un semanal, sea el día que sea.
+10. **La hora del job no es fija:** `--schedule daily` de Fly no fija la hora, así que el resumen puede llegar a cualquier hora. Al cliente lo protege la ventana horaria del despachador; a la empresa no se le aplica.
+11. **Las alertas A1–A4 y P1 existen en el catálogo pero sin productor.** `notifications.receive_alerts` ya está sembrado.
+
+### 15.3 · Lo que NO quedó (y en qué fase cae)
+
+- Ningún evento al cliente tiene **productor** salvo `auction_ready_customer` (§14 lo pide probado encendido y apagado): C1–C7 y R1–R4 están en catálogo y plantilla, sin disparo.
+- Webhook de Resend (`delivered`/`bounced`, `customer.email_invalid_at`), `resend_notification`, enlace de baja, `email_basis` y `EmailStr` del cliente: fase 3.
+- `BackgroundTasks` para los transaccionales (§5.1): no hay transaccionales todavía.
+- Pantalla del front y la etiqueta nueva de auditoría: no hace falta etiqueta, se reusó la acción `update_settings`.
+- **Verificado en vivo** (§14, último punto): pendiente — exige la key en Fly y un correo real recibido en Gmail y Outlook.
+- **Por verificar antes de encender al cliente:** que los horarios y el «uno por semana» sean los de la Ley 2300 (son mi lectura de la ley, no un concepto); y el tope diario del plan de Resend (§10).

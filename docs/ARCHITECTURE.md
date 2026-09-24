@@ -148,8 +148,13 @@ app/
                    histórico de cierres con filtro de fecha. Solo lectura;
                    usa `platform.integration.get_company_timezone` para que
                    "ventas de hoy" sea el día local de la empresa, no UTC
+    notifications/ avisos por correo (00058, docs/NOTIFICACIONES.md): catálogo,
+                   preferencias por empresa, resumen a la empresa, despachador
+                   con límites de la Ley 2300 y proveedor Resend/nulo. Lee de
+                   `contracts.integration` y `reports.integration`
   jobs/            job nocturno: recalcula estados de contratos + vence
-                   suscripciones, todas las empresas (§11 más abajo)
+                   suscripciones + resumen a la empresa + despacho de correos,
+                   todas las empresas (§11 más abajo)
   main.py          create_app(): registra middlewares, exception handlers, routers
 tests/
   unit/            reglas puras, sin BD (JWT, formato de errores, matrices de permisos, paginación)
@@ -240,10 +245,12 @@ Regla del proyecto desde entonces: ninguna regla de negocio con fecha usa `date.
 
 ## 11. Job nocturno
 
-`app/jobs/nightly.py` es el único código del proyecto que corre **fuera** del ciclo de request de FastAPI. Hace dos cosas, cada una en su propia transacción de bypass (`AsyncSessionLocal` directo — no `get_tenant_db`, porque necesita ver todas las empresas, no una sola):
+`app/jobs/nightly.py` es el único código del proyecto que corre **fuera** del ciclo de request de FastAPI. Hace cuatro cosas —las dos primeras de siempre y, desde `00058`, dos de avisos por correo—, cada una en su propia transacción de bypass (`AsyncSessionLocal` directo — no `get_tenant_db`, porque necesita ver todas las empresas, no una sola):
 
 1. `contracts.service.recompute_all_statuses(db)` — recorre los contratos no terminales de TODAS las empresas y recalcula su estado (`app/modules/contracts/rules.py::compute_status`) contra el "hoy" de cada empresa. Ya existía desde el paso 5 pero nadie lo invocaba; el job es lo que lo vuelve real.
 2. `platform.service.expire_overdue_subscriptions(db)` — marca `expired` las suscripciones cuyo `expires_at` ya pasó (según el "hoy" de esa empresa) y audita el cambio. Esto es lo que de verdad bloquea acceso: `security.get_current_user` rechaza con `402 SUBSCRIPTION_EXPIRED` en cuanto `subscription.status` deja de ser `active` — sin este job, una suscripción vencida seguiría dando acceso indefinidamente porque el chequeo en cada request compara contra el `status` persistido, no recalcula `expires_at` al vuelo.
+3. `notifications.digest.build_all_digests(now=...)` — el resumen a la empresa (`docs/NOTIFICACIONES.md` §2.4, §15). **Va después del paso 1 a propósito:** "entró en mora" y "listo para remate" se leen del estado que ese paso acaba de persistir. Una transacción **por empresa**: la falla de una se registra y no revierte las demás. Registra el resumen diario de cada empresa activa **salga o no** — así *"¿corrió anoche?"* se contesta desde la base: `select max(occurred_on) from notification_event`.
+4. `notifications.dispatcher.dispatch_due(provider=...)` — manda las entregas pendientes, fuera de toda transacción de negocio. **Sin `RESEND_API_KEY` no falla:** las entregas quedan `skipped_no_provider`. Toma su propio reloj después del paso 3 (las entregas recién creadas nacen con `scheduled_at = now()` de la base).
 
 > **La máquina del job desapareció entre el 27/08 y el 08/09/2026, y nadie se enteró.** La encontró la auditoría de QA: `fly machines list` devolvía una sola máquina, la del process group `app`. La causa más probable es la limpieza de infraestructura del 27/08, que borró «una máquina huérfana, fuera del process group, sin deploys desde el 17/08» — que es **exactamente** el perfil de esta máquina, porque estar fuera del fleet de `fly deploy` es justo su diseño.
 >
