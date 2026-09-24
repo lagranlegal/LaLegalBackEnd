@@ -70,6 +70,15 @@ class SaleOut(BaseModel):
     #: pero por algún motivo cubrió cero (no debería pasar, pero la
     #: distinción evita ambigüedad en el comprobante).
     credit_note_redeemed_amount: Decimal | None = None
+    #: Cuánto de esta venta se devolvió, en pesos (F21-17). `sale.status`
+    #: sigue en `completed` tras una devolución —a propósito—, así que sin
+    #: este campo el listado y su Excel no tienen cómo mostrarlas. Es el
+    #: CONTRA-INGRESO: bruto devuelto menos su parte prorrateada del
+    #: descuento, la misma definición que resta el Estado de resultados
+    #: (`sales.repository.RETURN_LINE_*_SQL`); una venta totalmente devuelta
+    #: da exactamente su `total`. Suma todas las devoluciones de la venta,
+    #: sin importar su fecha ni cómo se liquidaron (efectivo o nota crédito).
+    returned_amount: Decimal = Decimal("0.00")
 
 
 class VoidSaleIn(BaseModel):

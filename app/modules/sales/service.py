@@ -37,7 +37,11 @@ from app.modules.sales.schemas import (
 
 
 def _row_to_sale(
-    row: Row[Any], lines: list[SaleLineOut], *, credit_note_redeemed_amount: Decimal | None = None
+    row: Row[Any],
+    lines: list[SaleLineOut],
+    *,
+    credit_note_redeemed_amount: Decimal | None = None,
+    returned_amount: Decimal = Decimal("0.00"),
 ) -> SaleOut:
     m = row._mapping
     return SaleOut(
@@ -54,6 +58,7 @@ def _row_to_sale(
         lines=lines,
         account_id=m["account_id"],
         credit_note_redeemed_amount=credit_note_redeemed_amount,
+        returned_amount=returned_amount,
     )
 
 
@@ -328,8 +333,15 @@ async def get_sale(db: AsyncSession, *, company_id: UUID, sale_id: UUID) -> Sale
     if row is None:
         raise NotFoundError("La venta no existe en esta empresa.")
     lines = await repository.list_sale_lines(db, company_id=company_id, sale_id=sale_id)
-    redeemed = await _get_credit_note_redemption_amount(db, company_id=company_id, sale_id=sale_id)
-    return _row_to_sale(row, [_row_to_line(r) for r in lines], credit_note_redeemed_amount=redeemed)
+    totals = (
+        await repository.get_sale_return_totals(db, company_id=company_id, sale_id=sale_id)
+    )._mapping
+    return _row_to_sale(
+        row,
+        [_row_to_line(r) for r in lines],
+        credit_note_redeemed_amount=totals["credit_note_redeemed_amount"],
+        returned_amount=totals["returned_amount"],
+    )
 
 
 async def list_sales(
@@ -368,7 +380,18 @@ async def list_sales(
         lines = await repository.list_sale_lines(
             db, company_id=company_id, sale_id=row._mapping["id"]
         )
-        out.append(_row_to_sale(row, [_row_to_line(r) for r in lines]))
+        # Lo devuelto y la nota redimida vienen en la MISMA fila (laterales de
+        # `repository.list_sales`): antes esta llamada omitía la nota y la
+        # columna «Nota crédito redimida» del Excel salía siempre vacía.
+        m = row._mapping
+        out.append(
+            _row_to_sale(
+                row,
+                [_row_to_line(r) for r in lines],
+                credit_note_redeemed_amount=m["credit_note_redeemed_amount"],
+                returned_amount=m["returned_amount"],
+            )
+        )
     return CursorPage(items=out, next_cursor=page.next_cursor)
 
 

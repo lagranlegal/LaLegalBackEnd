@@ -7,6 +7,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.sales.repository import RETURN_LINE_DISCOUNT_SQL, RETURN_LINE_GROSS_SQL
+
 _CLOSING_COLUMNS = (
     "id, session_date, opening_balance, expected_cash, counted_cash, difference, "
     "difference_reason, closed_by, closed_at"
@@ -235,7 +237,7 @@ async def profit_summary(
     """
     result = await db.execute(
         text(
-            """
+            f"""
             with ventas as (
                 select id, discount_amount
                 from public.sale
@@ -286,18 +288,9 @@ async def profit_summary(
             devoluciones as (
                 select
                   count(distinct r.id)                                      as return_count,
-                  coalesce(sum(round(srl.quantity * sl.unit_price, 2)), 0)  as bruto,
+                  coalesce(sum({RETURN_LINE_GROSS_SQL}), 0)                 as bruto,
                   coalesce(sum(round(srl.quantity * srl.unit_cost, 2)), 0)  as costo,
-                  coalesce(
-                    sum(
-                      round(
-                        s.discount_amount * (srl.quantity * sl.unit_price)
-                        / nullif(bv.bruto_venta, 0),
-                        2
-                      )
-                    ),
-                    0
-                  )                                                         as descuento
+                  coalesce(sum({RETURN_LINE_DISCOUNT_SQL}), 0)              as descuento
                 from public.sale_return r
                 join public.sale_return_line srl
                   on srl.return_id = r.id and srl.company_id = r.company_id
@@ -644,7 +637,7 @@ async def monthly_series(
     """
     result = await db.execute(
         text(
-            """
+            f"""
             with meses as (
                 select generate_series(
                     date_trunc('month', (now() at time zone :tz)::date)
@@ -710,17 +703,8 @@ async def monthly_series(
             devoluciones as (
                 select
                   date_trunc('month', r.return_date)::date as month,
-                  coalesce(sum(round(srl.quantity * sl.unit_price, 2)), 0)
-                  - coalesce(
-                      sum(
-                        round(
-                          s.discount_amount * (srl.quantity * sl.unit_price)
-                          / nullif(bv.bruto_venta, 0),
-                          2
-                        )
-                      ),
-                      0
-                    )                                      as total
+                  coalesce(sum({RETURN_LINE_GROSS_SQL}), 0)
+                  - coalesce(sum({RETURN_LINE_DISCOUNT_SQL}), 0)  as total
                 from public.sale_return r
                 join public.sale_return_line srl
                   on srl.return_id = r.id and srl.company_id = r.company_id

@@ -62,6 +62,7 @@ async def returns_tenant(
         "sales.create",
         "sales.void",
         "sales.return",
+        "sales.apply_discount",
         "inventory.view",
         "inventory.create",
     )
@@ -842,3 +843,139 @@ async def test_void_bloqueado_si_la_venta_esta_totalmente_devuelta(
     assert status == "completed"
     assert quantity == 5  # 5 − 1 vendida + 1 devuelta
     assert voids == 0
+
+
+# --- F21-17: el listado de ventas trae lo devuelto -------------------------
+
+
+def _list_sales_by_id(client: TestClient, tenant: dict) -> dict[str, dict]:
+    response = client.get("/api/v1/sales?limit=200", headers=_headers(tenant["full_token"]))
+    assert response.status_code == 200, response.text
+    return {s["id"]: s for s in response.json()["items"]}
+
+
+async def test_listado_de_ventas_trae_lo_devuelto_neto_del_descuento_prorrateado(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """F21-17: el Excel de Ventas no tenía cómo mostrar devoluciones porque el
+    listado no traía nada de ellas (`sale.status` sigue en `completed`).
+
+    Venta de 2 × 500.000 con 100.000 de descuento (total 900.000). Se
+    devuelve 1 unidad con nota crédito y la otra en efectivo: lo devuelto se
+    mide con la MISMA expresión que `profit_summary` —bruto de la línea menos
+    su parte del descuento por participación en el bruto—, así que cada
+    unidad vale 450.000 y la venta totalmente devuelta suma 900.000 = su
+    `total`. La devolución con nota crédito no emite `cash_movement`: por eso
+    el dato no podía salir de la caja.
+    """
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    con_descuento = client.post(
+        "/api/v1/sales",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(returns_tenant["customer_id"]),
+            "payment_method": "cash",
+            "discount_amount": "100000.00",
+            "discount_reason": "cliente frecuente",
+            "lines": [
+                {
+                    "item_id": str(returns_tenant["item_id"]),
+                    "quantity": "2",
+                    "unit_price": "500000.00",
+                }
+            ],
+        },
+    )
+    assert con_descuento.status_code == 201, con_descuento.text
+    venta = con_descuento.json()
+    assert venta["total"] == "900000.00"
+    # Una venta recién creada no tiene devoluciones.
+    assert venta["returned_amount"] == "0.00"
+    sin_devolucion = _make_sale(client, returns_tenant)
+
+    primera = client.post(
+        f"/api/v1/sales/{venta['id']}/returns",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [{"sale_line_id": venta["lines"][0]["id"], "quantity": "1"}],
+            "reason": "defect",
+            "settlement_method": "credit_note",
+        },
+    )
+    assert primera.status_code == 201, primera.text
+
+    listado = _list_sales_by_id(client, returns_tenant)
+    # Parcial: 500.000 − 50.000 de descuento prorrateado, no el bruto.
+    assert listado[venta["id"]]["returned_amount"] == "450000.00"
+    assert listado[sin_devolucion["id"]]["returned_amount"] == "0.00"
+    # El estado NO cambia: la columna nueva es lo que deja ver la devolución.
+    assert listado[venta["id"]]["status"] == "completed"
+
+    segunda = client.post(
+        f"/api/v1/sales/{venta['id']}/returns",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [{"sale_line_id": venta["lines"][0]["id"], "quantity": "1"}],
+            "reason": "other",
+            "settlement_method": "cash",
+        },
+    )
+    assert segunda.status_code == 201, segunda.text
+
+    listado = _list_sales_by_id(client, returns_tenant)
+    # Dos devoluciones de la misma venta se suman; total devuelto = total.
+    assert listado[venta["id"]]["returned_amount"] == "900000.00"
+    # Y el detalle dice lo mismo que el listado.
+    detalle = client.get(
+        f"/api/v1/sales/{venta['id']}", headers=_headers(returns_tenant["full_token"])
+    )
+    assert detalle.status_code == 200, detalle.text
+    assert detalle.json()["returned_amount"] == "900000.00"
+
+
+async def test_listado_de_ventas_trae_la_nota_credito_redimida(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """La columna «Nota crédito redimida» del Excel de Ventas salía SIEMPRE
+    vacía: `list_sales` llamaba a `_row_to_sale` sin ese dato (default
+    `None`), aunque `create_sale` y `get_sale` sí lo llenaban.
+    """
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    original = _make_sale(client, returns_tenant)
+    ret = client.post(
+        f"/api/v1/sales/{original['id']}/returns",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [{"sale_line_id": original["lines"][0]["id"], "quantity": "1"}],
+            "reason": "other",
+            "settlement_method": "credit_note",
+        },
+    )
+    assert ret.status_code == 201, ret.text
+    redime = client.post(
+        "/api/v1/sales",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(returns_tenant["customer_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "item_id": str(returns_tenant["item_id"]),
+                    "quantity": "1",
+                    "unit_price": "300000.00",
+                }
+            ],
+            "credit_note_id": ret.json()["credit_note_id"],
+            "credit_note_amount": "200000.00",
+        },
+    )
+    assert redime.status_code == 201, redime.text
+
+    listado = _list_sales_by_id(client, returns_tenant)
+    assert listado[redime.json()["id"]]["credit_note_redeemed_amount"] == "200000.00"
+    # `None` sigue significando «no se usó nota», distinto de 0.
+    assert listado[original["id"]]["credit_note_redeemed_amount"] is None

@@ -19,6 +19,62 @@ _RETURN_COLUMNS = (
 _RETURN_LINE_COLUMNS = "id, sale_line_id, item_id, quantity, unit_cost, restock"
 _CREDIT_NOTE_COLUMNS = "id, number, customer_id, sale_return_id, amount, notes, created_at"
 
+# --- Monto devuelto: UNA sola definición (F21-12, F21-17) --------------------
+#
+# Cuánto de una venta se devolvió, medido como CONTRA-INGRESO: el bruto de la
+# línea devuelta (`quantity × unit_price`) menos su parte del descuento de la
+# cabecera, prorrateada por participación en el bruto de la venta. Es lo que
+# resta el Estado de resultados (`reports.profit_summary` y `monthly_series`)
+# y lo que muestra la columna «Devuelto» del listado de ventas: los tres
+# lugares interpolan ESTOS fragmentos para que no pueda nacer una cuarta
+# definición copiando SQL a mano.
+#
+# Contrato de alias, que cada consulta que los use debe respetar:
+#   `srl` = sale_return_line, `sl` = sale_line, `s` = sale,
+#   `bv.bruto_venta` = suma de `sale_line.subtotal` de esa venta.
+#
+# Ojo: NO es lo mismo que `sum_sale_return_amount` (lo que se le liquidó al
+# cliente, en efectivo o nota crédito), que es BRUTO de descuento.
+RETURN_LINE_GROSS_SQL = "round(srl.quantity * sl.unit_price, 2)"
+RETURN_LINE_DISCOUNT_SQL = (
+    "round(s.discount_amount * (srl.quantity * sl.unit_price) / nullif(bv.bruto_venta, 0), 2)"
+)
+
+# Una fila por venta `s` (alias externo): lo devuelto y la nota crédito
+# redimida. Ambos van por índice — `ix_sale_return_sale (company_id,
+# sale_id)`, `ix_sale_return_line_return`, `ix_sale_line_sale` y el UNIQUE
+# `(company_id, sale_id, credit_note_id)` de `credit_note_redemption`— y se
+# evalúan SOLO para las filas de la página (ver `list_sales`).
+_SALE_RETURNS_LATERALS = f"""
+    left join lateral (
+        -- `::numeric(14, 2)`: sin devoluciones el `coalesce` da un 0 sin
+        -- escala y la API respondería "0" en vez de "0.00".
+        select (
+          coalesce(sum({RETURN_LINE_GROSS_SQL}), 0)
+          - coalesce(sum({RETURN_LINE_DISCOUNT_SQL}), 0)
+        )::numeric(14, 2) as returned_amount
+        from public.sale_return r
+        join public.sale_return_line srl
+          on srl.return_id = r.id and srl.company_id = r.company_id
+        join public.sale_line sl
+          on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
+        cross join (
+            select coalesce(sum(subtotal), 0) as bruto_venta
+            from public.sale_line
+            where company_id = :company_id and sale_id = s.id
+        ) bv
+        where r.company_id = :company_id and r.sale_id = s.id
+    ) dev on true
+    left join lateral (
+        -- Una venta redime a lo sumo una nota crédito: misma lectura que
+        -- `get_sale_credit_note_redemption`.
+        select cnr.amount
+        from public.credit_note_redemption cnr
+        where cnr.company_id = :company_id and cnr.sale_id = s.id
+        limit 1
+    ) cnr on true
+"""
+
 
 async def next_number(db: AsyncSession, *, company_id: UUID) -> int:
     result = await db.execute(
@@ -187,8 +243,32 @@ async def list_sales(
         query += " and id > :cursor"
         params["cursor"] = str(cursor)
     query += " order by id limit :limit"
+    # Los laterales van AFUERA de la página ya cortada: así se evalúan solo
+    # para las `limit + 1` filas que se devuelven, no para cada venta que
+    # pasa el filtro (con el filtro de fechas el plan ordena, y un lateral
+    # dentro podría correr sobre todo el rango antes del `limit`).
+    query = (
+        f"select s.*, dev.returned_amount, cnr.amount as credit_note_redeemed_amount "
+        f"from ({query}) s {_SALE_RETURNS_LATERALS} order by s.id"
+    )
     result = await db.execute(text(query), params)
     return list(result.all())
+
+
+async def get_sale_return_totals(db: AsyncSession, *, company_id: UUID, sale_id: UUID) -> Row[Any]:
+    """Lo devuelto y la nota crédito redimida de UNA venta, con los mismos
+    laterales que el listado — el detalle y la fila del Excel no pueden
+    decir cosas distintas.
+    """
+    result = await db.execute(
+        text(
+            "select dev.returned_amount, cnr.amount as credit_note_redeemed_amount "
+            f"from public.sale s {_SALE_RETURNS_LATERALS} "
+            "where s.company_id = :company_id and s.id = :id"
+        ),
+        {"company_id": str(company_id), "id": str(sale_id)},
+    )
+    return result.one()
 
 
 async def void_sale(
