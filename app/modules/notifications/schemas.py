@@ -1,0 +1,144 @@
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator
+
+DeliveryStatus = Literal[
+    "pending",
+    "sending",
+    "sent",
+    "delivered",
+    "bounced",
+    "failed",
+    "dead",
+    "unroutable",
+    "suppressed",
+    "throttled",
+    "skipped_stale",
+    "skipped_no_provider",
+]
+
+
+class EventTypeSettingOut(BaseModel):
+    code: str
+    audience: Literal["customer", "company", "platform"]
+    purpose: Literal["service", "marketing"]
+    family: str
+    description: str
+    default_enabled: bool
+    #: El valor del evento para esta empresa (override o default del catálogo),
+    #: SIN mirar el interruptor general.
+    enabled: bool
+    #: `true` si la empresa lo cambió respecto del catálogo.
+    overridden: bool
+    #: Lo que de verdad pasa hoy: `enabled` Y el interruptor general.
+    effective: bool
+
+
+class ThresholdsOut(BaseModel):
+    discount_amount: Decimal
+    cash_difference_amount: Decimal
+
+
+class ContactLimitsOut(BaseModel):
+    """Límites de contacto al CLIENTE (Ley 2300). No aplican a la empresa."""
+
+    enabled: bool
+    max_per_week: int
+    max_per_day: int
+    weekday_hours: tuple[str, str]
+    saturday_hours: tuple[str, str]
+    sundays_and_holidays: bool
+
+
+class DigestRecipientOut(BaseModel):
+    user_id: UUID
+    full_name: str
+    email: str
+
+
+class NotificationSettingsOut(BaseModel):
+    #: Interruptor general de la empresa. Apagado por defecto (§4.3, §11).
+    enabled: bool
+    #: Hay proveedor de correo configurado en la plataforma. Si es `false`,
+    #: nada sale aunque todo esté encendido (las entregas quedan
+    #: `skipped_no_provider`) — la pantalla debe decirlo.
+    provider_configured: bool
+    events: list[EventTypeSettingOut]
+    thresholds: ThresholdsOut
+    customer_contact_limits: ContactLimitsOut
+    stale_after_days: int
+    #: A quién le llega hoy el resumen: usuarios activos con el permiso
+    #: `notifications.receive_digest`.
+    digest_recipients: list[DigestRecipientOut]
+
+
+class ThresholdsIn(BaseModel):
+    discount_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
+    cash_difference_amount: Decimal | None = Field(
+        default=None, ge=0, max_digits=14, decimal_places=2
+    )
+
+
+def _check_hhmm(value: str) -> str:
+    parts = value.split(":")
+    if len(parts) != 2 or not all(p.isdigit() and len(p) == 2 for p in parts):
+        raise ValueError("La hora va como HH:MM.")
+    hh, mm = int(parts[0]), int(parts[1])
+    if hh > 23 or mm > 59:
+        raise ValueError("La hora va como HH:MM.")
+    return value
+
+
+class ContactLimitsIn(BaseModel):
+    enabled: bool | None = None
+    max_per_week: int | None = Field(default=None, ge=0, le=50)
+    max_per_day: int | None = Field(default=None, ge=0, le=20)
+    weekday_hours: tuple[str, str] | None = None
+    saturday_hours: tuple[str, str] | None = None
+    sundays_and_holidays: bool | None = None
+
+    @field_validator("weekday_hours", "saturday_hours")
+    @classmethod
+    def _hours(cls, value: tuple[str, str] | None) -> tuple[str, str] | None:
+        if value is None:
+            return None
+        start, end = _check_hhmm(value[0]), _check_hhmm(value[1])
+        if start >= end:
+            raise ValueError("La hora de inicio tiene que ser anterior a la de fin.")
+        return start, end
+
+
+class NotificationSettingsUpdateIn(BaseModel):
+    """PATCH parcial: lo que no viene no cambia.
+
+    `events` es un mapa código → `true`/`false`/`null`; `null` borra el
+    override y el evento vuelve al default del catálogo.
+    """
+
+    enabled: bool | None = None
+    events: dict[str, bool | None] | None = None
+    thresholds: ThresholdsIn | None = None
+    customer_contact_limits: ContactLimitsIn | None = None
+    stale_after_days: int | None = Field(default=None, ge=0, le=30)
+
+
+class DeliveryOut(BaseModel):
+    id: UUID
+    event_id: UUID
+    event_type: str
+    audience: str
+    occurred_on: date
+    channel: str
+    to_address: str | None
+    recipient_user_id: UUID | None
+    status: DeliveryStatus
+    attempts: int
+    last_error: str | None
+    provider_id: str | None
+    scheduled_at: datetime
+    sent_at: datetime | None
+    created_at: datetime
+    updated_at: datetime

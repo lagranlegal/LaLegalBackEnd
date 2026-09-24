@@ -9,6 +9,11 @@ os.environ.setdefault("SUPABASE_URL", "http://127.0.0.1:54321")
 os.environ.setdefault("SUPABASE_JWKS_URL", "http://127.0.0.1:54321/auth/v1/.well-known/jwks.json")
 os.environ.setdefault("JWT_AUDIENCE", "authenticated")
 os.environ.setdefault("ENVIRONMENT", "test")
+# Asignación, no `setdefault`: una key real en el `.env` o en la shell de quien
+# corre la suite NO debe mandar correos desde los tests. Con esto vacío el
+# despachador cae en el proveedor nulo; los tests que quieren "enviar"
+# inyectan un `RecordingProvider` explícito.
+os.environ["RESEND_API_KEY"] = ""
 
 import pytest
 from cryptography.hazmat.primitives import serialization

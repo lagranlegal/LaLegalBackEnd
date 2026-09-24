@@ -90,6 +90,13 @@ _MODERADOR_EXCLUDED_CODES = {
     "capital.view",
     "capital.contribute",
     "capital.withdraw",
+    # Los correos a la empresa (00058, docs/NOTIFICACIONES.md §4.3: "solo
+    # Admin"). El resumen trae descuadres de caja, descuentos y el vencimiento
+    # de la suscripción: es leer los números del negocio entero, y el Moderador
+    # ya no ve `audit.view` ni `company.configure`. Si un dueño quiere que su
+    # encargado lo reciba, se lo da a su rol — un permiso, no una casilla.
+    "notifications.receive_digest",
+    "notifications.receive_alerts",
 }
 
 

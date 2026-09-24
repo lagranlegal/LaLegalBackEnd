@@ -37,3 +37,31 @@ async def get_operating_profit(
         db, company_id=company_id, from_date=from_date, to_date=to_date
     )
     return estado.operating_profit
+
+
+async def get_stale_inventory_summary(
+    db: AsyncSession, *, company_id: UUID, threshold_days: int = 90
+) -> dict[str, object]:
+    """Para el resumen SEMANAL a la empresa (docs/NOTIFICACIONES.md §2.4, E7):
+    los totales del universo, no la lista — el detalle está en la pantalla.
+    Mismo umbral por defecto que `GET /reports/stale-inventory`."""
+    stale = await service.get_stale_inventory(
+        db, company_id=company_id, threshold_days=threshold_days, limit=1
+    )
+    return {
+        "threshold_days": stale.threshold_days,
+        "product_count": stale.product_count,
+        "total_cost_value": str(stale.total_cost_value),
+    }
+
+
+async def get_payables_summary(db: AsyncSession, *, company_id: UUID) -> dict[str, object]:
+    """Para el resumen SEMANAL (§2.4, E5). El sistema no guarda fecha de
+    vencimiento de una compra a crédito, así que "vencida" no existe: se
+    reporta el total y la franja de más de 60 días de `GET /reports/payables`."""
+    payables = await service.get_payables(db, company_id=company_id)
+    return {
+        "total": str(payables.total),
+        "entry_count": payables.entry_count,
+        "days_over_60": str(payables.days_over_60),
+    }

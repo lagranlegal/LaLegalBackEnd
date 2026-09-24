@@ -116,3 +116,70 @@ async def _document_template_ids_visible_as(company_id: uuid.UUID) -> list[uuid.
         )
         rows = await session.execute(text("select id from public.document_template"))
         return [row[0] for row in rows]
+
+
+async def test_notification_tables_isolated_between_tenants(
+    two_companies: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    """00058: `notification_event` y `notification_delivery` llevan la política
+    `tenant_isolation` de siempre. Una entrega trae la dirección de correo de
+    un cliente: que otra empresa la vea sería una fuga de datos personales."""
+    company_a, company_b = two_companies
+    event_id, delivery_id = uuid.uuid4(), uuid.uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.notification_event "
+                "(id, company_id, event_type, audience, payload, dedupe_key, occurred_on) "
+                "values (:id, :cid, 'company_daily_digest', 'company', '{}'::jsonb, "
+                "'rls-test', '2030-09-02')"
+            ),
+            {"id": str(event_id), "cid": str(company_a)},
+        )
+        await session.execute(
+            text(
+                "insert into public.notification_delivery "
+                "(id, company_id, event_id, to_address, status) "
+                "values (:id, :cid, :eid, 'a@example.com', 'pending')"
+            ),
+            {"id": str(delivery_id), "cid": str(company_a), "eid": str(event_id)},
+        )
+
+    async def _visible(company_id: uuid.UUID, table: str) -> list[uuid.UUID]:
+        async with AsyncSessionLocal() as session, session.begin():
+            await apply_tenant_claims(
+                session, {"sub": str(uuid.uuid4()), "company_id": str(company_id)}
+            )
+            rows = await session.execute(text(f"select id from public.{table}"))
+            return [row[0] for row in rows]
+
+    try:
+        assert await _visible(company_a, "notification_event") == [event_id]
+        assert await _visible(company_a, "notification_delivery") == [delivery_id]
+        assert await _visible(company_b, "notification_event") == []
+        assert await _visible(company_b, "notification_delivery") == []
+        # Y B tampoco puede escribir filas a nombre de A.
+        with pytest.raises(Exception, match="row-level security"):
+            async with AsyncSessionLocal() as session, session.begin():
+                await apply_tenant_claims(
+                    session, {"sub": str(uuid.uuid4()), "company_id": str(company_b)}
+                )
+                await session.execute(
+                    text(
+                        "insert into public.notification_event "
+                        "(company_id, event_type, audience, payload, dedupe_key, occurred_on) "
+                        "values (:cid, 'company_daily_digest', 'company', '{}'::jsonb, "
+                        "'rls-test-b', '2030-09-02')"
+                    ),
+                    {"cid": str(company_a)},
+                )
+    finally:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text("delete from public.notification_delivery where id = :id"),
+                {"id": str(delivery_id)},
+            )
+            await session.execute(
+                text("delete from public.notification_event where id = :id"),
+                {"id": str(event_id)},
+            )

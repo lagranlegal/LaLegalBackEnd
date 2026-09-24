@@ -431,6 +431,20 @@ Reglas: origen ≠ destino; **ninguna de las dos puede ser `settlement`** (no se
 
 **El documento es inmutable** (`forbid_change`), igual que un traslado o un recibo de abono: corregirlo es registrar el movimiento contrario.
 
+## 13-ter. Módulo `notifications` (avisos por correo — fase 1)
+
+> Diseño y decisiones: [`NOTIFICACIONES.md`](NOTIFICACIONES.md) (lo implementado, en su §15). Migración `00058`. Los correos los produce y manda el **job nocturno**, no estos endpoints: acá solo se configuran y se consultan.
+
+| Método | Ruta | Permiso | Notas |
+|---|---|---|---|
+| `GET` | `/api/v1/notifications/settings` | `company.configure` | Preferencias de la empresa. `{enabled, provider_configured, events[], thresholds{discount_amount, cash_difference_amount}, customer_contact_limits{enabled, max_per_week, max_per_day, weekday_hours[2], saturday_hours[2], sundays_and_holidays}, stale_after_days, digest_recipients[{user_id, full_name, email}]}`. Cada `events[]` trae `{code, audience, purpose, family, description, default_enabled, enabled, overridden, effective}`: `enabled` es el valor del evento para la empresa y `effective` le suma el interruptor general. |
+| `PATCH` | `/api/v1/notifications/settings` | `company.configure` | Parcial: lo que no viene no cambia. Body `{enabled?, events?: {code: true\|false\|null}, thresholds?: {discount_amount?, cash_difference_amount?}, customer_contact_limits?: {…}, stale_after_days?}`. `null` en un evento borra el override y vuelve al default del catálogo. Horas como `"HH:MM"`, inicio < fin (si no, 422). Responde lo mismo que el `GET`. **Auditado** (`update_settings`, módulo `notifications`, con antes y después). Errores: `NOTIFICATION_EVENT_UNKNOWN`, `NOTIFICATION_EVENT_NOT_CONFIGURABLE`. |
+| `GET` | `/api/v1/notifications/deliveries` | `company.configure` | Entregas, **las más nuevas primero** (cursor `(created_at, id)`). `?status=&event_type=&limit=&cursor=`. Cada una: `{id, event_id, event_type, audience, occurred_on, channel, to_address, recipient_user_id, status, attempts, last_error, provider_id, scheduled_at, sent_at, created_at, updated_at}`. Incluye las que **no** salieron: son la mayoría y son información. |
+
+**Estados de una entrega** (`status`): `pending` → `sending` → `sent` (`delivered`/`bounced` llegarán con el webhook de Resend); `failed` es reintentable (+1 h, +6 h, +24 h) y al cuarto intento pasa a `dead`. Terminales que **no son un error**: `unroutable` (el cliente no tiene correo — el caso normal), `suppressed` (sin base legal, o el aviso se apagó), `throttled` (tope de contactos de la Ley 2300), `skipped_stale` (el aviso llegó tarde: el job estuvo caído) y `skipped_no_provider` (la plataforma no tiene `RESEND_API_KEY`).
+
+**Qué debe decir la pantalla, y por qué.** `enabled` nace en `false`: encender es un acto explícito. Si `provider_configured` es `false`, nada sale aunque todo esté encendido. Y el evento `auction_ready_customer` tiene que mostrar el texto de `NOTIFICACIONES.md` §2.2-c antes de encenderlo: el interruptor es fácil; la consecuencia legal, no.
+
 
 ## 14. Esquema completo y tipos para el front
 
@@ -479,6 +493,8 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `CONTRACT_NOT_READY_FOR_AUCTION` | 409 | Se intentó Rematar un contrato que no está en `in_extension` con la prórroga vencida. |
 | `EXTENSION_WINDOW_CLOSED` | 409 | Se intentó ampliar el préstamo pasada la ventana. Se mide desde el **primer contrato de la cadena**, no desde el actual: si se midiera desde el actual, un recargo de $1 el último día reiniciaría el reloj para siempre. |
 | `CONTRACT_INTEREST_OVERDUE` | 409 | Se intentó ampliar el préstamo con meses de interés adeudados. Hay que abonar primero: el interés vencido **nunca** se suma al capital nuevo (capitalizar interés es anatocismo, y volvería el saldo imposible de auditar contra los recibos). |
+| `NOTIFICATION_EVENT_UNKNOWN` | 400 | `PATCH /notifications/settings` con un código de evento que no está en el catálogo (`notification_event_type`). `details.unknown` los lista. Un override de un evento inexistente no apagaría nada y quedaría guardado como si lo hiciera. |
+| `NOTIFICATION_EVENT_NOT_CONFIGURABLE` | 400 | `PATCH /notifications/settings` intentó encender o apagar un evento de `audience='platform'` (la invitación de usuario). La contraparte de esos correos es Prendo, no la empresa (docs/NOTIFICACIONES.md §8), así que no se apagan desde un inquilino. |
 | `CONTRACT_WITHOUT_APPRAISAL` | 409 | Se intentó ampliar el préstamo de un contrato sin tasación. Sin avalúo no hay techo que calcular, y prestar sin techo es prestar a ciegas. |
 | `CONTRACT_LEGACY_CODE_EXISTS` | 409 | `POST /contracts/import` con un `legacy_code` que ya existe en la empresa. |
 | `IMPORT_CAPITAL_EXCEEDS_PRINCIPAL` | 422 | `POST /contracts/import` con `capital_balance ≤ 0` o `capital_balance > principal`. |

@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # confirmado en vivo (un invitado con `confirmed_at` y `last_sign_in_at`
     # poblados y `app_user.status` todavía en `invited`).
     frontend_url: str = ""
+    # Correo saliente (docs/NOTIFICACIONES.md §8). Sin `RESEND_API_KEY` nada
+    # sale: el despachador deja cada entrega en `skipped_no_provider` y el job
+    # sigue — nunca falla por falta de proveedor. El remitente es SIEMPRE del
+    # dominio de la plataforma; el nombre visible lo decide cada correo.
+    resend_api_key: str = ""
+    notifications_from_address: str = "notificaciones@prendo.com.co"
 
     @model_validator(mode="after")
     def _resolve_jwks_url(self) -> "Settings":

@@ -162,6 +162,9 @@ async def recompute_tenant(
         except Exception:
             pass
 
+    # `nightly.run()` ahora también registra el resumen (00058) de cada empresa.
+    await _try_delete("delete from public.notification_delivery where company_id = :cid")
+    await _try_delete("delete from public.notification_event where company_id = :cid")
     await _try_delete("delete from public.contract_item where company_id = :cid")
     await _try_delete("delete from public.contract where company_id = :cid")
     await _try_delete("delete from public.code_counter where company_id = :cid")
@@ -303,6 +306,8 @@ async def overdue_company(
         except Exception:
             pass
 
+    await _try_delete("delete from public.notification_delivery where company_id = :cid")
+    await _try_delete("delete from public.notification_event where company_id = :cid")
     await _try_delete("delete from public.app_user where company_id = :cid")
     await _try_delete(
         "delete from public.role_permission where role_id in "
