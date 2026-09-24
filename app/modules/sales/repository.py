@@ -19,26 +19,102 @@ _RETURN_COLUMNS = (
 _RETURN_LINE_COLUMNS = "id, sale_line_id, item_id, quantity, unit_cost, restock"
 _CREDIT_NOTE_COLUMNS = "id, number, customer_id, sale_return_id, amount, notes, created_at"
 
-# --- Monto devuelto: UNA sola definición (F21-12, F21-17) --------------------
+
+# --- Monto devuelto: UNA sola definición (F21-12, F21-17, F21-33) -----------
 #
-# Cuánto de una venta se devolvió, medido como CONTRA-INGRESO: el bruto de la
-# línea devuelta (`quantity × unit_price`) menos su parte del descuento de la
-# cabecera, prorrateada por participación en el bruto de la venta. Es lo que
-# resta el Estado de resultados (`reports.profit_summary` y `monthly_series`)
-# y lo que muestra la columna «Devuelto» del listado de ventas: los tres
-# lugares interpolan ESTOS fragmentos para que no pueda nacer una cuarta
-# definición copiando SQL a mano.
+# Cuánto vale cada línea devuelta, medido como lo que el cliente PAGÓ por ella:
+# su bruto (`quantity × unit_price`) menos su parte del descuento de la
+# cabecera, prorrateada por participación en el bruto de la venta — un
+# descuento de 10.000 sobre una cadena de 900.000 y un anillo de 100.000 no
+# se reparte 50/50.
 #
-# Contrato de alias, que cada consulta que los use debe respetar:
-#   `srl` = sale_return_line, `sl` = sale_line, `s` = sale,
-#   `bv.bruto_venta` = suma de `sale_line.subtotal` de esa venta.
+# Es a la vez, y por construcción el mismo número:
+#   - lo que se LIQUIDA al cliente (`sum_sale_return_amount`: egreso de caja
+#     o nota crédito, auditoría y `SaleReturnOut.total_amount`) — F21-33;
+#   - el CONTRA-INGRESO del Estado de resultados (`reports.profit_summary` y
+#     `monthly_series`) — F21-12;
+#   - «Devuelto» del listado y el detalle de ventas (`SaleOut.returned_amount`)
+#     — F21-17.
+# Hasta F21-33 la liquidación era el BRUTO: en una venta de 900.000
+# (1.000.000 − 100.000) devuelta completa, al cliente se le pagaban 1.000.000
+# y el reporte restaba 900.000; los 100.000 no quedaban en ninguna parte.
 #
-# Ojo: NO es lo mismo que `sum_sale_return_amount` (lo que se le liquidó al
-# cliente, en efectivo o nota crédito), que es BRUTO de descuento.
-RETURN_LINE_GROSS_SQL = "round(srl.quantity * sl.unit_price, 2)"
-RETURN_LINE_DISCOUNT_SQL = (
-    "round(s.discount_amount * (srl.quantity * sl.unit_price) / nullif(bv.bruto_venta, 0), 2)"
-)
+# REDONDEO — por qué es ACUMULADO y no por línea. Redondear cada línea a
+# centavos por separado no suma lo que el cliente pagó: 3 × 333.333,33 con
+# 100.000 de descuento (total 899.999,99) da 33.333,33 de descuento por
+# unidad, y tres devoluciones de una unidad liquidarían 3 × 300.000,00 =
+# 900.000,00 — un centavo MÁS de lo pagado. Por eso cada línea devuelta vale
+# la diferencia entre el acumulado devuelto de la venta DESPUÉS de ella y
+# ANTES de ella, redondeando el acumulado (en orden de devolución, `number`, y
+# `id` para desempatar líneas de la misma devolución):
+#   - bruto: acumulado de cantidad POR LÍNEA DE VENTA × `unit_price`;
+#   - descuento: `discount_amount × bruto acumulado / bruto de la venta`.
+# La suma telescopa: lo liquidado hasta cualquier punto es el acumulado
+# redondeado UNA vez, así que nunca supera `sale.total` (el descuento
+# pendiente, en centavos, nunca pasa del bruto pendiente porque
+# `discount_amount <= bruto`), y la devolución que agota la venta se lleva el
+# residuo y cierra EXACTO en `total` (el acumulado final es `bruto − discount`).
+# Una devolución solo depende de las ANTERIORES, así que su monto no cambia
+# cuando llegan otras después (y `create_return` bloquea la venta para que
+# dos devoluciones simultáneas no calculen sobre el mismo "antes").
+#
+# `sale_filter` es un predicado SOLO sobre `ret.sale_id` y debe traer ventas
+# COMPLETAS — el valor de una devolución depende de las anteriores de su
+# venta, así que filtrar por fecha o por devolución ADENTRO daría otro número.
+# Esos filtros van afuera, sobre las columnas que devuelve:
+#   `return_line_id`, `return_id`, `sale_id`, `return_date`, `gross`, `discount`.
+# Usa el parámetro `:company_id`.
+def return_line_amounts_sql(sale_filter: str) -> str:
+    return f"""(
+        select
+          acc.return_line_id, acc.return_id, acc.sale_id, acc.return_date, acc.gross,
+          coalesce(
+            round(acc.discount_amount * acc.cum_gross / nullif(acc.sale_gross, 0), 2)
+            - round(
+                acc.discount_amount * (acc.cum_gross - acc.gross) / nullif(acc.sale_gross, 0), 2
+              ),
+            0
+          ) as discount
+        from (
+          select
+            ln.*,
+            sum(ln.gross) over (
+              partition by ln.sale_id order by ln.return_number, ln.return_line_id
+              rows between unbounded preceding and current row
+            ) as cum_gross
+          from (
+            select
+              ret_line.id as return_line_id,
+              ret_line.return_id,
+              ret.sale_id,
+              ret.number as return_number,
+              ret.return_date,
+              ret_sale.discount_amount,
+              (
+                select sum(x.subtotal) from public.sale_line x
+                where x.company_id = ret.company_id and x.sale_id = ret.sale_id
+              ) as sale_gross,
+              round(sum(ret_line.quantity) over w * ret_sl.unit_price, 2)
+              - round(
+                  (sum(ret_line.quantity) over w - ret_line.quantity) * ret_sl.unit_price, 2
+                ) as gross
+            from public.sale_return ret
+            join public.sale_return_line ret_line
+              on ret_line.return_id = ret.id and ret_line.company_id = ret.company_id
+            join public.sale_line ret_sl
+              on ret_sl.id = ret_line.sale_line_id and ret_sl.company_id = ret_line.company_id
+            join public.sale ret_sale
+              on ret_sale.id = ret.sale_id and ret_sale.company_id = ret.company_id
+            where ret.company_id = :company_id and ({sale_filter})
+            window w as (
+              partition by ret.sale_id, ret_line.sale_line_id
+              order by ret.number, ret_line.id
+              rows between unbounded preceding and current row
+            )
+          ) ln
+        ) acc
+    )"""
+
 
 # Una fila por venta `s` (alias externo): lo devuelto y la nota crédito
 # redimida. Ambos van por índice — `ix_sale_return_sale (company_id,
@@ -49,21 +125,8 @@ _SALE_RETURNS_LATERALS = f"""
     left join lateral (
         -- `::numeric(14, 2)`: sin devoluciones el `coalesce` da un 0 sin
         -- escala y la API respondería "0" en vez de "0.00".
-        select (
-          coalesce(sum({RETURN_LINE_GROSS_SQL}), 0)
-          - coalesce(sum({RETURN_LINE_DISCOUNT_SQL}), 0)
-        )::numeric(14, 2) as returned_amount
-        from public.sale_return r
-        join public.sale_return_line srl
-          on srl.return_id = r.id and srl.company_id = r.company_id
-        join public.sale_line sl
-          on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
-        cross join (
-            select coalesce(sum(subtotal), 0) as bruto_venta
-            from public.sale_line
-            where company_id = :company_id and sale_id = s.id
-        ) bv
-        where r.company_id = :company_id and r.sale_id = s.id
+        select coalesce(sum(ra.gross - ra.discount), 0)::numeric(14, 2) as returned_amount
+        from {return_line_amounts_sql("ret.sale_id = s.id")} ra
     ) dev on true
     left join lateral (
         -- Una venta redime a lo sumo una nota crédito: misma lectura que
@@ -177,6 +240,24 @@ async def get_sale(db: AsyncSession, *, company_id: UUID, sale_id: UUID) -> Row[
     result = await db.execute(
         text(
             f"select {_SALE_COLUMNS} from public.sale where company_id = :company_id and id = :id"
+        ),
+        {"company_id": str(company_id), "id": str(sale_id)},
+    )
+    return result.first()
+
+
+async def get_sale_for_update(
+    db: AsyncSession, *, company_id: UUID, sale_id: UUID
+) -> Row[Any] | None:
+    """`FOR UPDATE`: serializa lo que se hace SOBRE una venta ya emitida
+    (devolverla, anularla). Dos devoluciones simultáneas leerían la misma
+    cantidad ya devuelta —y el mismo acumulado del que se deriva su monto
+    (`return_line_amounts_sql`)—; la segunda espera y ve la primera.
+    """
+    result = await db.execute(
+        text(
+            f"select {_SALE_COLUMNS} from public.sale "
+            "where company_id = :company_id and id = :id for update"
         ),
         {"company_id": str(company_id), "id": str(sale_id)},
     )
@@ -450,18 +531,23 @@ async def sum_returned_quantity(
 
 
 async def sum_sale_return_amount(db: AsyncSession, *, company_id: UUID, return_id: UUID) -> Decimal:
-    """El monto de una devolución se DERIVA de sus líneas × el precio de la
-    línea de venta original — nunca se guarda una columna `total`, mismo
-    principio que el saldo de una nota crédito o una cuenta por pagar.
+    """Lo que se le liquida al cliente por una devolución: lo que PAGÓ por lo
+    devuelto (bruto menos su parte del descuento), con la misma definición que
+    el Estado de resultados y «Devuelto» — ver `return_line_amounts_sql`.
+
+    Se DERIVA, nunca se guarda una columna `total`: mismo principio que el
+    saldo de una nota crédito o una cuenta por pagar. Se calcula sobre la
+    venta ENTERA y se filtra la devolución afuera, porque su monto depende de
+    las devoluciones anteriores (redondeo acumulado).
     """
+    amounts = return_line_amounts_sql(
+        "ret.sale_id = (select sale_id from public.sale_return "
+        "where company_id = :company_id and id = :return_id)"
+    )
     result = await db.execute(
         text(
-            """
-            select coalesce(sum(round(srl.quantity * sl.unit_price, 2)), 0)
-            from public.sale_return_line srl
-            join public.sale_line sl on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
-            where srl.company_id = :company_id and srl.return_id = :return_id
-            """
+            f"select coalesce(sum(ra.gross - ra.discount), 0)::numeric(14, 2) "
+            f"from {amounts} ra where ra.return_id = :return_id"
         ),
         {"company_id": str(company_id), "return_id": str(return_id)},
     )

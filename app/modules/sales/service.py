@@ -398,7 +398,7 @@ async def list_sales(
 async def void_sale(
     db: AsyncSession, *, company_id: UUID, sale_id: UUID, reason: str, actor_id: UUID
 ) -> SaleOut:
-    row = await repository.get_sale(db, company_id=company_id, sale_id=sale_id)
+    row = await repository.get_sale_for_update(db, company_id=company_id, sale_id=sale_id)
     if row is None:
         raise NotFoundError("La venta no existe en esta empresa.")
     if row._mapping["status"] != "completed":
@@ -418,14 +418,12 @@ async def void_sale(
     #
     # Se rechaza en vez de anular solo el remanente, por tres razones:
     #
-    # 1. **El remanente en plata no tiene un número bien definido acá.** El
-    #    monto de una devolución se deriva del BRUTO (`quantity ×
-    #    unit_price`, ver `repository.sum_sale_return_amount`), mientras que
-    #    `sale.total` es NETO del `discount_amount` de la cabecera. Restar
-    #    uno del otro sobre una venta con descuento da un número equivocado,
-    #    y hacerlo bien exigiría prorratear el descuento — una CUARTA
-    #    definición del mismo cálculo que F21-12 dejó escrito en tres
-    #    lugares a propósito para no multiplicar.
+    # 1. **Lo ya devuelto se liquidó con el cliente.** Anular el remanente
+    #    exigiría un contra-movimiento por `total − lo devuelto` (desde
+    #    F21-33 lo devuelto es neto del descuento prorrateado, ver
+    #    `repository.return_line_amounts_sql`), y las devoluciones
+    #    liquidadas al BRUTO antes de F21-33 harían ese número incorrecto
+    #    en ventas con descuento.
     # 2. **La nota crédito no es reversible.** Si la devolución se liquidó
     #    con una nota crédito ya redimida en otra venta, no hay forma de
     #    deshacerla sin arrastrar una tercera venta.
@@ -554,7 +552,7 @@ async def create_return(
     if existing is not None:
         return await get_return(db, company_id=company_id, return_id=existing._mapping["id"])
 
-    sale = await repository.get_sale(db, company_id=company_id, sale_id=sale_id)
+    sale = await repository.get_sale_for_update(db, company_id=company_id, sale_id=sale_id)
     if sale is None:
         raise NotFoundError("La venta no existe en esta empresa.")
     if sale._mapping["status"] != "completed":
@@ -631,7 +629,14 @@ async def create_return(
     # Es lo que habilita la devolución PARCIAL: cada intento nuevo solo
     # puede tomar lo que no se haya devuelto ya, a diferencia de
     # `void_sale`, que es todo-o-nada.
+    #
+    # Lo que pide ESTA devolución se acumula por línea de venta (F21-33): el
+    # cuerpo puede repetir una `sale_line_id`, y comparar cada repetición
+    # por separado contra lo devuelto en la base dejaba devolver —y
+    # liquidar— el doble de lo vendido. El `FOR UPDATE` de la venta (arriba)
+    # cubre el mismo hueco entre devoluciones simultáneas.
     resolved_lines: list[tuple[Row[Any], Any]] = []
+    requested: dict[UUID, Decimal] = {}
     for line in body.lines:
         sale_line = await repository.get_sale_line(
             db, company_id=company_id, sale_line_id=line.sale_line_id
@@ -644,7 +649,9 @@ async def create_return(
         already_returned = await repository.sum_returned_quantity(
             db, company_id=company_id, sale_line_id=line.sale_line_id
         )
-        available = sale_line._mapping["quantity"] - already_returned
+        in_this_return = requested.get(line.sale_line_id, Decimal("0"))
+        available = sale_line._mapping["quantity"] - already_returned - in_this_return
+        requested[line.sale_line_id] = in_this_return + line.quantity
         if line.quantity > available:
             raise AppError(
                 "La cantidad a devolver supera lo disponible de esa línea.",

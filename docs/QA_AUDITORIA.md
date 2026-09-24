@@ -1263,8 +1263,7 @@ fecha y sin importar si se liquidaron en efectivo o con nota crédito (esta últ
 
 ### F21-33 · ALTO (plata) — una devolución sobre una venta con descuento le paga al cliente de más
 
-**Abierto, sin arreglar.** Encontrado el 24/09 leyendo el código al cerrar F21-17; **no medido contra
-datos reales todavía**.
+Encontrado el 24/09 leyendo el código al cerrar F21-17; **no medido contra datos reales todavía**.
 
 Lo que se le **liquida al cliente** en una devolución (`repository.sum_sale_return_amount`, en efectivo o
 en nota crédito) es el **bruto** `quantity × unit_price`, sin prorratear el `discount_amount`, que vive en
@@ -1277,14 +1276,58 @@ Y el Estado de resultados **no lo ve**: desde F21-12 resta el contra-ingreso **n
 en ninguna parte del reporte. «Devuelto» del listado (450.000 por unidad) tampoco coincide con la nota
 crédito o el egreso (500.000).
 
-**Qué falta:**
-1. **Medir** cuántas devoluciones reales cayeron sobre ventas con descuento y cuánto se pagó de más, por
-   empresa, con `BEGIN TRANSACTION READ ONLY` (base con datos Ley 1581).
-2. **Decidir con Mateo** la regla de negocio antes de tocar código: ¿se devuelve lo pagado (neto
-   prorrateado) o el precio de lista? Lo esperable es lo pagado, pero es su decisión.
-3. El arreglo natural es que `sum_sale_return_amount` use los mismos `RETURN_LINE_*_SQL` — liquidación y
-   contra-ingreso pasan a ser **el mismo número**, sin una definición nueva. Test que lo reproduzca
-   (900.000 → 1.000.000) visto fallar antes.
+**Arreglado en código el 24/09/2026; falta medir las históricas.** Regla decidida por Mateo: al cliente
+se le devuelve **lo que pagó** — el bruto menos su parte prorrateada del descuento.
+
+- **Una sola definición, ahora también para la plata.** `RETURN_LINE_GROSS_SQL`/`RETURN_LINE_DISCOUNT_SQL`
+  se reemplazaron por `return_line_amounts_sql(sale_filter)` en `sales/repository.py`, que devuelve
+  `gross` y `discount` por línea devuelta. La usan los cuatro consumidores: `sum_sale_return_amount`
+  (egreso de caja, nota crédito, `after.total_amount` de la auditoría y `SaleReturnOut.total_amount`,
+  que es lo que muestra el recibo), `SaleOut.returned_amount`, `profit_summary` y `monthly_series`.
+  Liquidación, contra-ingreso y «Devuelto» son **el mismo número al centavo**.
+- **El redondeo por línea NO alcanzaba — verificado, no supuesto.** Con el arreglo ingenuo (los
+  fragmentos viejos dentro de `sum_sale_return_amount`), 3 × 333.333,33 con 100.000 de descuento
+  (total 899.999,99) liquida 3 × 300.000,00 = **900.000,00, un centavo más de lo pagado**: el test
+  falló así. El comentario viejo de `profit_summary` ya reconocía el residuo y lo daba por irresoluble
+  («no se sabe cuál devolución es la última»). Se resolvió con **redondeo ACUMULADO**: cada línea vale
+  el acumulado devuelto de la venta después de ella menos el de antes (orden `sale_return.number`, `id`
+  para desempatar), redondeando el acumulado — la cantidad por línea de venta × `unit_price` para el
+  bruto, `discount_amount × bruto acumulado / bruto de la venta` para el descuento. La suma telescopa:
+  lo liquidado hasta cualquier punto es un único redondeo del acumulado, **nunca supera `sale.total`**
+  (el descuento pendiente en centavos no pasa del bruto pendiente, porque `discount_amount <= bruto`) y
+  la devolución que agota la venta **se lleva el residuo** y cierra exacto: 300.000,00 + 299.999,99 +
+  300.000,00 = 899.999,99. Una devolución depende solo de las anteriores, así que releerla no cambia su
+  monto. Por eso la definición se calcula sobre ventas **completas** y los filtros de fecha o de
+  devolución van afuera.
+- **La validación de cantidad tenía dos huecos, cerrados:** (a) cada línea del cuerpo se comparaba
+  contra lo devuelto EN LA BASE sin sumar las otras líneas de la misma petición, así que repetir la
+  `sale_line_id` devolvía —y liquidaba— el doble de lo vendido (reproducido: vendida 1, devueltas 2,
+  1.000.000 pagados); ahora se acumula por línea dentro de la petición. (b) `get_sale` no bloqueaba, así
+  que dos devoluciones simultáneas leían la misma cantidad devuelta (y ahora el mismo acumulado);
+  `create_return` y `void_sale` toman la venta con `get_sale_for_update` (`FOR UPDATE`), lo que
+  también cierra la carrera devolución-vs-anulación de la guarda de F21-31. Sin migración nueva.
+- **Sin cambio:** la validación de Sistecrédito sin liquidar (mira el saldo de la cuenta, no el monto de
+  la devolución) y la guarda de F21-31 (mira si existen devoluciones). El cierre de caja lee los
+  `cash_movement`, que ya nacen con el monto correcto.
+- **Tests** (`tests/integration/test_sale_returns.py`, los tres vistos fallar antes):
+  `test_devolucion_total_de_venta_con_descuento_liquida_lo_pagado` (900.000 devuelta completa, en
+  efectivo y en nota crédito: liquidaba `1000000.00`; ahora egreso/nota, auditoría, respuesta, listado
+  de devoluciones y `returned_amount` dan `900000.00`),
+  `test_devoluciones_parciales_con_redondeo_cierran_exacto_en_el_total` (el caso de arriba, más
+  `/reports/profit` y `/reports/series` restando `899999.99`, ingreso neto 0) y
+  `test_una_devolucion_no_puede_repetir_la_linea_para_pasarse_de_lo_vendido`. Suite completa: 452
+  passed, 0 skipped.
+
+**Qué queda:**
+1. **Medir las históricas.** No se repararon datos ni se tocó la base remota. Las devoluciones sobre
+   ventas con descuento liquidadas antes de este arreglo **pagaron el bruto** y así quedan en su
+   `cash_movement`/`credit_note`. Hay que medir cuántas son y cuánto se pagó de más, por empresa, con
+   `BEGIN TRANSACTION READ ONLY` (base con datos Ley 1581). **Ojo al medir:** su
+   `SaleReturnOut.total_amount` se deriva, así que desde este arreglo **muestra el neto**, no lo que se
+   pagó — para ellas el recibo y el egreso/nota ya no coinciden, y esa diferencia es justo lo que hay
+   que medir (`cash_movement.amount` o `credit_note.amount` contra `sum_sale_return_amount`).
+2. Una devolución parcial nueva sobre una venta que ya tuvo una liquidada al bruto se calcula neta: no
+   recupera el exceso de la anterior.
 
 ### F21-18 · BAJO — `inventory_purchased` ignora `paid_at`
 

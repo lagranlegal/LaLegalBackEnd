@@ -65,6 +65,7 @@ async def returns_tenant(
         "sales.apply_discount",
         "inventory.view",
         "inventory.create",
+        "reports.view",
     )
     # Solo este rol puede saltarse el plazo de devolución.
     override_codes = (*full_codes, "sales.return_override_time_limit")
@@ -979,3 +980,211 @@ async def test_listado_de_ventas_trae_la_nota_credito_redimida(
     assert listado[redime.json()["id"]]["credit_note_redeemed_amount"] == "200000.00"
     # `None` sigue significando «no se usó nota», distinto de 0.
     assert listado[original["id"]]["credit_note_redeemed_amount"] is None
+
+
+# --- F21-33: la devolución liquida lo PAGADO, no el bruto -------------------
+
+
+def _make_discounted_sale(
+    client: TestClient, tenant: dict, *, quantity: str, unit_price: str, discount: str
+) -> dict:
+    response = client.post(
+        "/api/v1/sales",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(tenant["customer_id"]),
+            "payment_method": "cash",
+            "discount_amount": discount,
+            "discount_reason": "cliente frecuente",
+            "lines": [
+                {"item_id": str(tenant["item_id"]), "quantity": quantity, "unit_price": unit_price}
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _return(
+    client: TestClient, tenant: dict, sale: dict, *, quantity: str, settlement: str = "cash"
+):
+    return client.post(
+        f"/api/v1/sales/{sale['id']}/returns",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [{"sale_line_id": sale["lines"][0]["id"], "quantity": quantity}],
+            "reason": "other",
+            "settlement_method": settlement,
+        },
+    )
+
+
+async def _return_settlements(company_id, return_id: str) -> tuple[str | None, str | None, str]:
+    """(egreso de caja, nota crédito, `total_amount` auditado) de UNA devolución."""
+    async with AsyncSessionLocal() as session, session.begin():
+        cash = (
+            await session.execute(
+                text(
+                    "select amount from public.cash_movement where company_id = :cid "
+                    "and reference_type = 'sale_return' and reference_id = :rid"
+                ),
+                {"cid": str(company_id), "rid": return_id},
+            )
+        ).scalar_one_or_none()
+        note = (
+            await session.execute(
+                text(
+                    "select amount from public.credit_note where company_id = :cid "
+                    "and sale_return_id = :rid"
+                ),
+                {"cid": str(company_id), "rid": return_id},
+            )
+        ).scalar_one_or_none()
+        audited = (
+            await session.execute(
+                text(
+                    "select after->>'total_amount' from public.audit_log where company_id = :cid "
+                    "and action = 'create_return' and entity_id = :rid"
+                ),
+                {"cid": str(company_id), "rid": return_id},
+            )
+        ).scalar_one()
+    return (
+        str(cash) if cash is not None else None,
+        str(note) if note is not None else None,
+        audited,
+    )
+
+
+async def test_devolucion_total_de_venta_con_descuento_liquida_lo_pagado(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """F21-33: venta de 900.000 (2 × 500.000 − 100.000 de descuento) devuelta
+    completa. Liquidaba 1.000.000 —el bruto—: 100.000 salían del cajón (o
+    quedaban como nota crédito redimible) sin haber entrado nunca. Ahora el
+    cliente recibe lo que pagó, en efectivo y en nota crédito, y la
+    liquidación, la auditoría, la respuesta y «Devuelto» son el mismo número.
+    """
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    for settlement in ("cash", "credit_note"):
+        venta = _make_discounted_sale(
+            client, returns_tenant, quantity="2", unit_price="500000.00", discount="100000.00"
+        )
+        assert venta["total"] == "900000.00"
+
+        ret = _return(client, returns_tenant, venta, quantity="2", settlement=settlement)
+        assert ret.status_code == 201, ret.text
+        assert ret.json()["total_amount"] == "900000.00"
+
+        cash, note, audited = await _return_settlements(
+            returns_tenant["company_id"], ret.json()["id"]
+        )
+        assert (cash if settlement == "cash" else note) == "900000.00"
+        assert audited == "900000.00"
+
+        # El detalle de la devolución (recibo) y el de la venta coinciden.
+        listado = client.get(
+            f"/api/v1/sales/{venta['id']}/returns", headers=_headers(returns_tenant["full_token"])
+        )
+        assert listado.status_code == 200, listado.text
+        assert [r["total_amount"] for r in listado.json()] == ["900000.00"]
+        detalle = client.get(
+            f"/api/v1/sales/{venta['id']}", headers=_headers(returns_tenant["full_token"])
+        )
+        assert detalle.json()["returned_amount"] == "900000.00"
+
+
+async def test_devoluciones_parciales_con_redondeo_cierran_exacto_en_el_total(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """F21-33, el caso del redondeo: 3 × 333.333,33 (bruto 999.999,99) con
+    100.000 de descuento → total 899.999,99. El descuento por unidad es
+    33.333,333…, que redondeado POR LÍNEA da 33.333,33 cada vez: tres
+    devoluciones de 300.000,00 sumarían 900.000,00 — UN centavo más de lo
+    que el cliente pagó.
+
+    La regla: cada devolución liquida la diferencia entre lo devuelto
+    ACUMULADO después de ella y antes de ella, redondeando el acumulado. La
+    suma telescopa, así que nunca supera lo pagado y la que agota la venta
+    se lleva el residuo: 300.000,00 + 299.999,99 + 300.000,00 = 899.999,99.
+    """
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    venta = _make_discounted_sale(
+        client, returns_tenant, quantity="3", unit_price="333333.33", discount="100000.00"
+    )
+    assert venta["total"] == "899999.99"
+
+    liquidado: list[Decimal] = []
+    for esperado in ("300000.00", "299999.99", "300000.00"):
+        ret = _return(client, returns_tenant, venta, quantity="1")
+        assert ret.status_code == 201, ret.text
+        assert ret.json()["total_amount"] == esperado
+        cash, _, _ = await _return_settlements(returns_tenant["company_id"], ret.json()["id"])
+        assert cash == esperado
+        liquidado.append(Decimal(esperado))
+        # En NINGÚN punto lo liquidado supera lo pagado.
+        assert sum(liquidado) <= Decimal(venta["total"])
+
+    assert sum(liquidado) == Decimal("899999.99")
+    detalle = client.get(
+        f"/api/v1/sales/{venta['id']}", headers=_headers(returns_tenant["full_token"])
+    )
+    assert detalle.json()["returned_amount"] == "899999.99"
+    # Y releer las devoluciones no cambia lo que ya se liquidó.
+    releidas = client.get(
+        f"/api/v1/sales/{venta['id']}/returns", headers=_headers(returns_tenant["full_token"])
+    )
+    assert [r["total_amount"] for r in releidas.json()] == ["300000.00", "299999.99", "300000.00"]
+
+    # El contra-ingreso del Estado de resultados es el MISMO número: la venta
+    # entró y salió entera el mismo día, así que el ingreso neto queda en 0.
+    hoy = releidas.json()[0]["return_date"]
+    profit = client.get(
+        "/api/v1/reports/profit",
+        params={"from_date": hoy, "to_date": hoy},
+        headers=_headers(returns_tenant["full_token"]),
+    )
+    assert profit.status_code == 200, profit.text
+    assert profit.json()["sales_returns"] == "899999.99"
+    assert Decimal(profit.json()["net_revenue"]) == 0
+    series = client.get(
+        "/api/v1/reports/series",
+        params={"months": 1},
+        headers=_headers(returns_tenant["full_token"]),
+    )
+    assert series.status_code == 200, series.text
+    assert Decimal(series.json()["points"][-1]["sales_returns"]) == Decimal("899999.99")
+
+
+async def test_una_devolucion_no_puede_repetir_la_linea_para_pasarse_de_lo_vendido(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """F21-33, visto al revisar la validación de cantidad: cada línea del
+    cuerpo se comparaba contra lo devuelto EN LA BASE, sin sumar las otras
+    líneas de la misma petición. Repitiendo la línea se devolvía (y se
+    liquidaba) el doble de lo vendido.
+    """
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    venta = _make_sale(client, returns_tenant)
+    line_id = venta["lines"][0]["id"]
+    ret = client.post(
+        f"/api/v1/sales/{venta['id']}/returns",
+        headers=_headers(returns_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [
+                {"sale_line_id": line_id, "quantity": "1"},
+                {"sale_line_id": line_id, "quantity": "1"},
+            ],
+            "reason": "other",
+            "settlement_method": "cash",
+        },
+    )
+    assert ret.status_code == 400, ret.text
+    # Lo que le queda a la REPETICIÓN, ya descontada la primera.
+    assert ret.json()["details"]["available"] == "0.000"

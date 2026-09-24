@@ -74,10 +74,11 @@ class SaleOut(BaseModel):
     #: sigue en `completed` tras una devolución —a propósito—, así que sin
     #: este campo el listado y su Excel no tienen cómo mostrarlas. Es el
     #: CONTRA-INGRESO: bruto devuelto menos su parte prorrateada del
-    #: descuento, la misma definición que resta el Estado de resultados
-    #: (`sales.repository.RETURN_LINE_*_SQL`); una venta totalmente devuelta
-    #: da exactamente su `total`. Suma todas las devoluciones de la venta,
-    #: sin importar su fecha ni cómo se liquidaron (efectivo o nota crédito).
+    #: descuento, la misma definición que resta el Estado de resultados y
+    #: que se liquida al cliente (`sales.repository.return_line_amounts_sql`,
+    #: F21-33); una venta totalmente devuelta da exactamente su `total`.
+    #: Suma todas las devoluciones de la venta, sin importar su fecha ni
+    #: cómo se liquidaron (efectivo o nota crédito).
     returned_amount: Decimal = Decimal("0.00")
 
 
@@ -129,8 +130,10 @@ class SaleReturnOut(BaseModel):
     created_at: datetime
     lines: list[SaleReturnLineOut]
     credit_note_id: UUID | None
-    #: Derivado de las líneas × el precio de la venta original — nunca
-    #: guardado (mismo principio que el saldo de una nota crédito).
+    #: Lo liquidado al cliente (efectivo o nota crédito): lo que PAGÓ por lo
+    #: devuelto, neto del descuento prorrateado (F21-33). Derivado de las
+    #: líneas y la venta original — nunca guardado (mismo principio que el
+    #: saldo de una nota crédito).
     total_amount: Decimal
     #: Se registró pasado el `return_window_days` de la empresa —
     #: informativo, no cambia nada del resultado (advierte, no bloquea).

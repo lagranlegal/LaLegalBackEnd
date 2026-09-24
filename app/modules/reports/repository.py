@@ -7,7 +7,14 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.sales.repository import RETURN_LINE_DISCOUNT_SQL, RETURN_LINE_GROSS_SQL
+from app.modules.sales.repository import return_line_amounts_sql
+
+# Ventas con alguna devolución en el rango: `return_line_amounts_sql` necesita
+# ventas COMPLETAS (ver su comentario), el filtro de fecha va afuera.
+_SALES_WITH_RETURNS_IN_RANGE = (
+    "ret.sale_id in (select sale_id from public.sale_return "
+    "where company_id = :company_id and return_date between :from_date and :to_date)"
+)
 
 _CLOSING_COLUMNS = (
     "id, session_date, opening_balance, expected_cash, counted_cash, difference, "
@@ -254,51 +261,33 @@ async def profit_summary(
                 join ventas v on v.id = sl.sale_id
                 where sl.company_id = :company_id
             ),
-            -- Bruto de CADA venta que tiene devoluciones en el rango: es el
-            -- denominador del prorrateo del descuento. Se calcula aparte (y
-            -- no con un join a las líneas) por el mismo motivo de siempre:
-            -- un join plano repetiría el descuento una vez por línea.
-            devueltas as (
-                select distinct r.sale_id
-                from public.sale_return r
-                where r.company_id = :company_id
-                  and r.return_date between :from_date and :to_date
-            ),
-            bruto_por_venta as (
-                select sl.sale_id, coalesce(sum(sl.subtotal), 0) as bruto_venta
-                from public.sale_line sl
-                join devueltas d on d.sale_id = sl.sale_id
-                where sl.company_id = :company_id
-                group by sl.sale_id
-            ),
             -- PRORRATEO DEL DESCUENTO: el descuento vive en la CABECERA de la
             -- venta, así que una devolución parcial solo puede llevarse la
-            -- parte proporcional. Se prorratea por PARTICIPACIÓN EN EL BRUTO
-            -- de la venta —`quantity * unit_price` sobre el bruto total— y no
-            -- por unidades: un descuento de 10.000 sobre una venta de una
-            -- cadena de 900.000 y un anillo de 100.000 no se reparte 50/50.
-            -- Sin el prorrateo se restaría el ingreso BRUTO de lo devuelto y
-            -- saldría más plata del resultado de la que entró.
+            -- parte proporcional por PARTICIPACIÓN EN EL BRUTO. Sin él se
+            -- restaría el ingreso BRUTO de lo devuelto y saldría más plata
+            -- del resultado de la que entró.
             --
-            -- Se redondea POR LÍNEA a 2 decimales, igual que `subtotal` al
-            -- vender. Devolver una venta completa en varias devoluciones
-            -- puede dejar un residuo de centavos contra `discount_amount`;
-            -- repartirlo exigiría saber cuál devolución es "la última", que
-            -- es un dato que no existe al consultar.
+            -- El valor de cada línea sale de `return_line_amounts_sql`, la
+            -- MISMA definición con que se liquida al cliente (F21-33): el
+            -- contra-ingreso es lo que se le pagó, al centavo. El redondeo es
+            -- ACUMULADO por venta, así que una venta devuelta completa en
+            -- varias devoluciones cierra exacto en su `total`. Se calcula
+            -- sobre las ventas ENTERAS que tienen devoluciones en el rango y
+            -- se filtra por fecha afuera: el valor de una devolución depende
+            -- de las anteriores de su venta, aunque caigan en otro período.
             devoluciones as (
                 select
                   count(distinct r.id)                                      as return_count,
-                  coalesce(sum({RETURN_LINE_GROSS_SQL}), 0)                 as bruto,
+                  coalesce(sum(ra.gross), 0)                                as bruto,
                   coalesce(sum(round(srl.quantity * srl.unit_cost, 2)), 0)  as costo,
-                  coalesce(sum({RETURN_LINE_DISCOUNT_SQL}), 0)              as descuento
+                  coalesce(sum(ra.discount), 0)                             as descuento
                 from public.sale_return r
                 join public.sale_return_line srl
                   on srl.return_id = r.id and srl.company_id = r.company_id
-                join public.sale_line sl
-                  on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
                 join public.sale s
                   on s.id = r.sale_id and s.company_id = r.company_id
-                join bruto_por_venta bv on bv.sale_id = r.sale_id
+                join {return_line_amounts_sql(_SALES_WITH_RETURNS_IN_RANGE)} ra
+                  on ra.return_line_id = srl.id
                 where r.company_id = :company_id
                   and s.status = 'completed'
                   and r.return_date between :from_date and :to_date
@@ -690,30 +679,14 @@ async def monthly_series(
             -- (sin `at time zone`: ya es la fecha del negocio), así que una
             -- devolución de enero baja enero y nunca reescribe el mes de la
             -- venta original.
-            bruto_por_venta as (
-                select sl.sale_id, coalesce(sum(sl.subtotal), 0) as bruto_venta
-                from public.sale_line sl
-                where sl.company_id = :company_id
-                  and sl.sale_id in (
-                      select sale_id from public.sale_return
-                      where company_id = :company_id
-                  )
-                group by sl.sale_id
-            ),
             devoluciones as (
                 select
-                  date_trunc('month', r.return_date)::date as month,
-                  coalesce(sum({RETURN_LINE_GROSS_SQL}), 0)
-                  - coalesce(sum({RETURN_LINE_DISCOUNT_SQL}), 0)  as total
-                from public.sale_return r
-                join public.sale_return_line srl
-                  on srl.return_id = r.id and srl.company_id = r.company_id
-                join public.sale_line sl
-                  on sl.id = srl.sale_line_id and sl.company_id = srl.company_id
+                  date_trunc('month', ra.return_date)::date as month,
+                  coalesce(sum(ra.gross - ra.discount), 0)  as total
+                from {return_line_amounts_sql("true")} ra
                 join public.sale s
-                  on s.id = r.sale_id and s.company_id = r.company_id
-                join bruto_por_venta bv on bv.sale_id = r.sale_id
-                where r.company_id = :company_id and s.status = 'completed'
+                  on s.id = ra.sale_id and s.company_id = :company_id
+                where s.status = 'completed'
                 group by 1
             ),
             gastos as (
