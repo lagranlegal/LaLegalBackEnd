@@ -213,8 +213,23 @@ def test_invitation_carries_the_app_link_in_text_and_html() -> None:
     # En el HTML el `&` va escapado dentro del atributo — y sigue siendo el
     # mismo enlace para el navegador.
     assert LINK.replace("&", "&amp;") in rendered.html
-    assert "Hola, Ana:" in rendered.text
+    # El saludo es el de la plantilla de Supabase (`correo-invitacion.html`).
+    assert "Hola Ana, te damos la bienvenida" in rendered.text
+    assert "Hola Ana, te damos la bienvenida" in rendered.html
     assert "LA GRAN LEGAL" in rendered.text
+    # El enlace va dos veces en el HTML: el botón y el respaldo en texto (si el
+    # botón no se ve, igual se entra).
+    assert rendered.html.count(f'href="{LINK.replace("&", "&amp;")}"') == 2
+
+
+def test_invitation_header_is_prendo_and_body_names_the_company() -> None:
+    """§8: la marca del encabezado es la de la plataforma, no la del inquilino;
+    la empresa va en el cuerpo, que es lo que la persona reconoce."""
+    rendered = _render()
+    assert ">Prendo</p>" in rendered.html
+    assert ">LA GRAN LEGAL</p>" not in rendered.html
+    assert "Te invitaron a trabajar en" in rendered.text
+    assert "Este enlace es personal y temporal." in rendered.text
 
 
 def test_invitation_never_carries_a_get_redeemable_token() -> None:
@@ -256,6 +271,13 @@ def test_invitation_company_name_is_escaped() -> None:
     )
     assert "<script>" not in rendered.html
     assert "&lt;script&gt;" in rendered.html
+
+
+def test_invitee_name_is_escaped() -> None:
+    """El nombre lo escribe un admin en un formulario: es dato, no HTML."""
+    rendered = _render(invitee_name="<img src=x onerror=alert(1)> Pérez")
+    assert "<img" not in rendered.html
+    assert "&lt;img" in rendered.html
 
 
 # ------------------------------------------------------------ preferencias ----

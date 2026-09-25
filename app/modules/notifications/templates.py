@@ -96,64 +96,200 @@ def _esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
+# ------------------------------------------------------------------ molde ----
+# El lenguaje visual es el de las plantillas de Supabase Auth que están en uso
+# (`frontend-starter/docs/correo-invitacion.html` y `correo-recuperacion.html`),
+# y las razones son las de su cabecera: tablas y estilos EN LÍNEA (Outlook y
+# Gmail ignoran hojas de estilo y rompen con flex/grid), 560 px como tope y una sola
+# columna (se lee en móvil sin media queries), el botón es una tabla con fondo
+# (un <button> se ve como texto), el enlace se repite como texto, y ninguna
+# imagen externa (se bloquean por defecto, y no hay píxel de apertura).
+#
+# Los colores son los de ese molde, con los contrastes medidos allá (WCAG AA):
+# sobre el beige nunca va `_MUTED` (4.39:1), va `_BODY`.
+_BG = "#f1ebdd"  # fondo del correo y de los recuadros de aviso
+_BORDER = "#ddd7c9"
+_BRAND = "#7a5a1c"  # la marca del encabezado y los enlaces
+_TITLE = "#24211c"
+_BODY = "#4b463d"
+_MUTED = "#716c63"  # secundario, solo sobre blanco
+_GOLD = "#c99a3d"  # el botón, con texto `_TITLE` (blanco daría 2.57:1)
+_FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+
+#: La línea debajo de la tarjeta en los correos de la plataforma: la misma de
+#: las plantillas de Supabase.
+PLATFORM_TAGLINE = f"{PLATFORM_NAME} — el sistema de gestión para compraventas"
+
+
+def _tr(inner: str, *, top: int = 24) -> str:
+    """Una franja de la tarjeta. Cada bloque va en su propia fila, como en el
+    molde: el espaciado vertical lo da el `padding`, que es lo único que todos
+    los clientes respetan igual."""
+    return f'<tr><td style="padding:{top}px 32px 0 32px;">{inner}</td></tr>'
+
+
 def _layout(
     *,
+    brand_label: str,
     title: str,
-    blocks_html: list[str],
-    footer_lines: list[str] | None = None,
-    footer_html: list[str] | None = None,
+    rows_html: list[str],
+    footer_html: list[str],
+    meta: str | None = None,
+    tagline: str | None = None,
 ) -> str:
-    """`footer_lines` se escapan; `footer_html` ya viene escapado (el pie del
-    cliente lleva un enlace, y un enlace no se puede escapar entero)."""
-    body = "\n".join(blocks_html)
-    footer = "<br>".join(
-        footer_html if footer_html is not None else [_esc(x) for x in footer_lines or []]
+    """El marco común. `brand_label`, `title`, `meta` y `tagline` son texto y se
+    escapan acá; `rows_html` y `footer_html` ya vienen escapados (llevan
+    enlaces, y un enlace no se puede escapar entero).
+
+    `brand_label` es la marca del encabezado — «Prendo» en los correos de la
+    plataforma, el nombre de la empresa en los del cliente (§8)."""
+    meta_html = (
+        f'<p style="margin:8px 0 0 0;font-size:14px;line-height:1.5;color:{_MUTED};">'
+        f"{_esc(meta)}</p>"
+        if meta
+        else ""
+    )
+    footer = "".join(
+        f'<p style="margin:{0 if i == 0 else 8}px 0 0 0;font-size:12px;line-height:1.6;'
+        f'color:{_MUTED};">{line}</p>'
+        for i, line in enumerate(footer_html)
+    )
+    tagline_html = (
+        f'<p style="margin:16px 0 0 0;font-size:12px;color:{_BODY};">{_esc(tagline)}</p>'
+        if tagline
+        else ""
     )
     return (
         "<!doctype html>\n"
-        '<html lang="es"><body style="margin:0;padding:0;background:#f4f4f5;'
-        'font-family:Arial,sans-serif;color:#18181b">\n'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-        '<tr><td align="center" style="padding:24px 12px">\n'
-        '<table role="presentation" width="600" cellpadding="0" cellspacing="0" '
-        'style="max-width:600px;width:100%;background:#ffffff;border-radius:8px">\n'
-        '<tr><td style="padding:24px 24px 8px 24px">'
-        f'<h1 style="margin:0;font-size:20px">{_esc(title)}</h1></td></tr>\n'
-        '<tr><td style="padding:8px 24px 16px 24px;font-size:14px;line-height:1.5">\n'
-        f"{body}\n"
+        '<html lang="es"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>{_esc(title)}</title></head>\n"
+        f'<body style="margin:0;padding:0;background-color:{_BG};">\n'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="background-color:{_BG};margin:0;padding:32px 12px;font-family:{_FONT};">'
+        '<tr><td align="center">\n'
+        # 100 % con tope de 560, y no 560 con `max-width:100%` como en la
+        # plantilla de Supabase: una tabla con ancho fijo no se encoge, y a
+        # 360 px esa desborda (medido: 592 px de ancho). Outlook de escritorio
+        # ignora `max-width`, así que para él va una tabla fantasma de 560.
+        '<!--[if mso]><table role="presentation" width="560" cellpadding="0" '
+        'cellspacing="0" align="center"><tr><td><![endif]-->\n'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="width:100%;max-width:560px;background-color:#ffffff;border-radius:14px;'
+        f'border:1px solid {_BORDER};overflow:hidden;">\n'
+        # Encabezado
+        '<tr><td style="padding:28px 32px 0 32px;">'
+        '<p style="margin:0;font-size:13px;font-weight:600;letter-spacing:0.08em;'
+        f'text-transform:uppercase;color:{_BRAND};">{_esc(brand_label)}</p></td></tr>\n'
+        # Título
+        '<tr><td style="padding:20px 32px 0 32px;">'
+        '<h1 style="margin:0;font-size:26px;line-height:1.25;'
+        f'color:{_TITLE};font-weight:600;">{_esc(title)}</h1>{meta_html}</td></tr>\n'
+        + "\n".join(rows_html)
+        + "\n"
+        # Pie
+        '<tr><td style="padding:24px 32px 28px 32px;">'
+        f'<div style="border-top:1px solid {_BORDER};padding-top:16px;">{footer}</div>'
         "</td></tr>\n"
-        '<tr><td style="padding:16px 24px 24px 24px;font-size:12px;color:#71717a;'
-        f'border-top:1px solid #e4e4e7">{footer}</td></tr>\n'
-        "</table></td></tr></table></body></html>"
+        "</table>\n"
+        "<!--[if mso]></td></tr></table><![endif]-->\n"
+        f"{tagline_html}\n"
+        "</td></tr></table>\n</body></html>"
     )
 
 
-def _p(text: str) -> str:
-    return f'<p style="margin:0 0 12px 0">{_esc(text)}</p>'
-
-
-def _section(title: str, rows: list[str], *, note: str | None = None) -> str:
-    items = "".join(f'<li style="margin:0 0 4px 0">{_esc(r)}</li>' for r in rows)
-    note_html = f'<p style="margin:0 0 8px 0;color:#52525b">{_esc(note)}</p>' if note else ""
+def _p(text: str, *, last: bool = False) -> str:
+    """Un párrafo del cuerpo; escapa. `last` le quita el margen de abajo."""
     return (
-        f'<h2 style="margin:20px 0 8px 0;font-size:16px">{_esc(title)}</h2>'
-        f'{note_html}<ul style="margin:0 0 8px 0;padding-left:20px">{items}</ul>'
+        f'<p style="margin:0 0 {0 if last else 16}px 0;font-size:16px;line-height:1.6;'
+        f'color:{_BODY};">{_esc(text)}</p>'
     )
+
+
+def _paragraphs(texts: list[str]) -> str:
+    return "".join(_p(t, last=i == len(texts) - 1) for i, t in enumerate(texts))
+
+
+def _button(url: str, label: str) -> str:
+    """Píldora dorada hecha con una tabla (un <button> no se ve en un correo)."""
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+        f'<td style="background-color:{_GOLD};border-radius:9999px;">'
+        f'<a href="{_esc(url)}" style="display:inline-block;padding:14px 32px;font-size:16px;'
+        f'font-weight:600;color:{_TITLE};text-decoration:none;">{_esc(label)}</a>'
+        "</td></tr></table>"
+    )
+
+
+def _link_fallback(url: str) -> str:
+    """El enlace repetido como texto: si el botón no se ve, igual se entra."""
+    return (
+        f'<p style="margin:0 0 6px 0;font-size:13px;line-height:1.5;color:{_MUTED};">'
+        "Si el botón no funciona, copia y pega esta dirección en tu navegador:</p>"
+        '<p style="margin:0;font-size:13px;line-height:1.5;word-break:break-all;">'
+        f'<a href="{_esc(url)}" style="color:{_BRAND};">{_esc(url)}</a></p>'
+    )
+
+
+def _notice(inner_html: str) -> str:
+    """Recuadro de aviso sobre beige. El texto va en `_BODY`: `_MUTED` no llega
+    a AA sobre este fondo."""
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="background-color:{_BG};border-radius:10px;"><tr>'
+        '<td style="padding:14px 16px;">'
+        f'<p style="margin:0;font-size:13px;line-height:1.6;color:{_BODY};">{inner_html}</p>'
+        "</td></tr></table>"
+    )
+
+
+def _strong(text: str) -> str:
+    return f'<strong style="color:{_TITLE};">{_esc(text)}</strong>'
 
 
 # ------------------------------------------------------------ resumen (E*) ----
 _LIST_CAP = 30
 
 
-def _capped(rows: list[str], total: int) -> list[str]:
+@dataclass(frozen=True)
+class DigestRow:
+    """Un renglón del resumen. En el HTML, `label` a la izquierda y `amount` a
+    la derecha, alineados como en un libro; en el texto plano, la frase de
+    siempre (`text`), o «label: amount» si no hay una propia.
+
+    `note` (el motivo de un descuadre) y `alert` (sobre el umbral) se muestran
+    aparte en el HTML y al final de la frase en el texto."""
+
+    label: str
+    amount: str | None = None
+    text: str | None = None
+    note: str | None = None
+    alert: bool = False
+    muted: bool = False
+
+    def plain(self) -> str:
+        if self.text:
+            base = self.text
+        elif self.amount:
+            base = f"{self.label}: {self.amount}"
+        else:
+            base = self.label
+        note = f" — «{self.note}»" if self.note else ""
+        flag = " ⚠ sobre el umbral" if self.alert else ""
+        return f"{base}{note}{flag}"
+
+
+def _capped(rows: list[DigestRow], total: int) -> list[DigestRow]:
     if total > len(rows):
-        return [*rows, f"… y {total - len(rows)} más en la aplicación."]
+        return [*rows, DigestRow(f"… y {total - len(rows)} más en la aplicación.", muted=True)]
     return rows
 
 
-def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str | None]]:
+def digest_sections(
+    payload: dict[str, Any],
+) -> list[tuple[str, list[DigestRow], str | None]]:
     """Secciones del resumen en orden de urgencia: (título, renglones, nota)."""
-    sections: list[tuple[str, list[str], str | None]] = []
+    sections: list[tuple[str, list[DigestRow], str | None]] = []
 
     sub = payload.get("subscription")
     if sub:
@@ -163,9 +299,11 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
             (
                 "Su suscripción a Prendo vence pronto",
                 [
-                    f"Vence {when}, el {long_date(sub['expires_at'])}. "
-                    "Al vencer se bloquea el acceso de todos los usuarios; "
-                    "los datos no se borran."
+                    DigestRow(
+                        f"Vence {when}, el {long_date(sub['expires_at'])}. "
+                        "Al vencer se bloquea el acceso de todos los usuarios; "
+                        "los datos no se borran."
+                    )
                 ],
                 None,
             )
@@ -174,8 +312,10 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
     ready = payload.get("ready_for_auction") or {}
     if ready.get("total"):
         rows = [
-            f"Contrato #{c['number']} — prórroga vencida el {short_date(c['extension_ends_at'])}"
-            + (" (nuevo)" if c.get("new") else "")
+            DigestRow(
+                f"Contrato #{c['number']} — prórroga vencida el "
+                f"{short_date(c['extension_ends_at'])}" + (" (nuevo)" if c.get("new") else "")
+            )
             for c in ready.get("contracts", [])
         ]
         new = int(ready.get("new", 0))
@@ -189,7 +329,10 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
         sections.append(
             (
                 "Caja sin cerrar",
-                [f"La caja del {long_date(s['session_date'])} sigue abierta." for s in unclosed],
+                [
+                    DigestRow(f"La caja del {long_date(s['session_date'])} sigue abierta.")
+                    for s in unclosed
+                ],
                 None,
             )
         )
@@ -199,11 +342,15 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
         rows = []
         for d in diffs:
             kind = "sobrante" if Decimal(str(d["difference"])) > 0 else "faltante"
-            flag = " ⚠ sobre el umbral" if d.get("above_threshold") else ""
-            reason = f" — «{d['reason']}»" if d.get("reason") else ""
+            amount = money(abs(Decimal(str(d["difference"]))))
             rows.append(
-                f"Cierre del {short_date(d['session_date'])}: {kind} de "
-                f"{money(abs(Decimal(str(d['difference']))))}{reason}{flag}"
+                DigestRow(
+                    f"Cierre del {short_date(d['session_date'])}: {kind}",
+                    amount=amount,
+                    text=f"Cierre del {short_date(d['session_date'])}: {kind} de {amount}",
+                    note=d.get("reason") or None,
+                    alert=bool(d.get("above_threshold")),
+                )
             )
         sections.append(("Descuadres de arqueo", rows, None))
 
@@ -212,8 +359,14 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
         rows = []
         for d in discounts:
             what = "Venta" if d["kind"] == "sale" else "Abono (recibo)"
-            flag = " ⚠ sobre el umbral" if d.get("above_threshold") else ""
-            rows.append(f"{what} #{d['number']}: descuento de {money(d['amount'])}{flag}")
+            rows.append(
+                DigestRow(
+                    f"{what} #{d['number']}: descuento",
+                    amount=money(d["amount"]),
+                    text=f"{what} #{d['number']}: descuento de {money(d['amount'])}",
+                    alert=bool(d.get("above_threshold")),
+                )
+            )
         sections.append(("Descuentos concedidos", rows, None))
 
     arrears = payload.get("entered_arrears") or []
@@ -223,7 +376,7 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
                 "Entraron en mora",
                 _capped(
                     [
-                        f"Contrato #{c['number']} (desde el {short_date(c['since'])})"
+                        DigestRow(f"Contrato #{c['number']} (desde el {short_date(c['since'])})")
                         for c in arrears
                     ],
                     int(payload.get("entered_arrears_total", len(arrears))),
@@ -238,8 +391,10 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
                 "Entraron en prórroga",
                 _capped(
                     [
-                        f"Contrato #{c['number']} — la prórroga vence el "
-                        f"{short_date(c['extension_ends_at'])}"
+                        DigestRow(
+                            f"Contrato #{c['number']} — la prórroga vence el "
+                            f"{short_date(c['extension_ends_at'])}"
+                        )
                         for c in extension
                     ],
                     int(payload.get("entered_extension_total", len(extension))),
@@ -256,15 +411,27 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
             if period and period.get("from") != period.get("to")
             else (f"del {short_date(period['to'])}" if period else "")
         )
+        voided = f"; anuladas: {act['sales_voided']}" if act.get("sales_voided") else ""
         sections.append(
             (
                 f"Movimiento {label}".strip(),
                 [
-                    f"Contratos nuevos: {act['contracts_created']} "
-                    f"({money(act['contracts_amount'])} prestados)",
-                    f"Abonos: {act['payments']} ({money(act['payments_amount'])})",
-                    f"Ventas: {act['sales']} ({money(act['sales_amount'])})"
-                    + (f"; anuladas: {act['sales_voided']}" if act.get("sales_voided") else ""),
+                    DigestRow(
+                        f"Contratos nuevos: {act['contracts_created']} — monto prestado",
+                        amount=money(act["contracts_amount"]),
+                        text=f"Contratos nuevos: {act['contracts_created']} "
+                        f"({money(act['contracts_amount'])} prestados)",
+                    ),
+                    DigestRow(
+                        f"Abonos: {act['payments']}",
+                        amount=money(act["payments_amount"]),
+                        text=f"Abonos: {act['payments']} ({money(act['payments_amount'])})",
+                    ),
+                    DigestRow(
+                        f"Ventas: {act['sales']}{voided}",
+                        amount=money(act["sales_amount"]),
+                        text=f"Ventas: {act['sales']} ({money(act['sales_amount'])}){voided}",
+                    ),
                 ],
                 None,
             )
@@ -276,8 +443,14 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
             (
                 "Mercancía sin rotación",
                 [
-                    f"{stale['product_count']} producto(s) llevan {stale['threshold_days']} días "
-                    f"o más en vitrina, con {money(stale['total_cost_value'])} al costo."
+                    DigestRow(
+                        f"{stale['product_count']} producto(s) llevan {stale['threshold_days']} "
+                        "días o más en vitrina (al costo)",
+                        amount=money(stale["total_cost_value"]),
+                        text=f"{stale['product_count']} producto(s) llevan "
+                        f"{stale['threshold_days']} días o más en vitrina, con "
+                        f"{money(stale['total_cost_value'])} al costo.",
+                    )
                 ],
                 None,
             )
@@ -288,8 +461,8 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
             (
                 "Cuentas por pagar a proveedores",
                 [
-                    f"Total: {money(payables['total'])}; con más de 60 días: "
-                    f"{money(payables['days_over_60'])}."
+                    DigestRow("Total", amount=money(payables["total"])),
+                    DigestRow("Con más de 60 días", amount=money(payables["days_over_60"])),
                 ],
                 None,
             )
@@ -298,9 +471,56 @@ def digest_sections(payload: dict[str, Any]) -> list[tuple[str, list[str], str |
     dead = int(payload.get("dead_deliveries", 0))
     if dead:
         sections.append(
-            ("Avisos que no se pudieron enviar", [f"{dead} correo(s) fallaron 3 veces."], None)
+            (
+                "Avisos que no se pudieron enviar",
+                [DigestRow(f"{dead} correo(s) fallaron 3 veces.")],
+                None,
+            )
         )
     return sections
+
+
+def _digest_row_html(row: DigestRow, *, first: bool) -> str:
+    border = "" if first else f"border-top:1px solid {_BORDER};"
+    color = _MUTED if row.muted else _BODY
+    extra = ""
+    if row.note:
+        extra += f'<br><span style="font-size:13px;color:{_MUTED};">«{_esc(row.note)}»</span>'
+    if row.alert:
+        extra += (
+            f'<br><span style="display:inline-block;margin-top:4px;padding:2px 8px;'
+            f"border-radius:9999px;background-color:{_BG};font-size:12px;font-weight:600;"
+            f'color:{_BRAND};">⚠ Sobre el umbral</span>'
+        )
+    amount = (
+        f'<td align="right" valign="top" style="{border}padding:10px 0 10px 12px;'
+        f'font-size:15px;line-height:1.5;font-weight:600;color:{_TITLE};white-space:nowrap;">'
+        f"{_esc(row.amount)}</td>"
+        if row.amount
+        else ""
+    )
+    colspan = "" if row.amount else ' colspan="2"'
+    return (
+        f'<tr><td{colspan} valign="top" style="{border}padding:10px 0;font-size:15px;'
+        f'line-height:1.5;color:{color};">{_esc(row.label)}{extra}</td>{amount}</tr>'
+    )
+
+
+def _digest_section_html(title: str, rows: list[DigestRow], note: str | None) -> str:
+    note_html = (
+        f'<p style="margin:4px 0 0 0;font-size:13px;line-height:1.5;color:{_MUTED};">'
+        f"{_esc(note)}</p>"
+        if note
+        else ""
+    )
+    body = "".join(_digest_row_html(r, first=i == 0) for i, r in enumerate(rows))
+    return _tr(
+        f'<h2 style="margin:0;font-size:18px;line-height:1.3;color:{_TITLE};font-weight:600;">'
+        f"{_esc(title)}</h2>{note_html}"
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="margin-top:8px;">{body}</table>',
+        top=28,
+    )
 
 
 def render_digest(event_type: str, payload: dict[str, Any], branding: Branding) -> RenderedEmail:
@@ -316,26 +536,35 @@ def render_digest(event_type: str, payload: dict[str, Any], branding: Branding) 
     )
     if not sections:
         intro += " Todo en orden: no hay alertas ni movimiento que reportar."
-    blocks = [_p(intro)] + [_section(t, rows, note=n) for t, rows, n in sections]
-    footer = [
+    meta = f"{branding.company_name} · {long_date(day)}"
+    why = (
         f"Lo recibe porque su rol en {branding.company_name} tiene el permiso "
         "«Recibir el resumen». Quien administra la empresa puede quitarlo o apagar "
-        "el resumen en Configuración.",
-        f"{PLATFORM_NAME} · prendo.com.co",
+        "el resumen en Configuración."
+    )
+    rows = [_tr(_p(intro, last=True), top=20)] + [
+        _digest_section_html(t, r, n) for t, r, n in sections
     ]
-    text_lines = [intro, ""]
-    for title, rows, note in sections:
+    text_lines = [PLATFORM_NAME.upper(), "", kind, meta, "", intro, ""]
+    for title, section_rows, note in sections:
         text_lines.append(title.upper())
         if note:
             text_lines.append(note)
-        text_lines.extend(f"- {r}" for r in rows)
+        text_lines.extend(f"- {r.plain()}" for r in section_rows)
         text_lines.append("")
-    text_lines.extend(footer)
+    text_lines.extend(["---", why, "", f"{PLATFORM_TAGLINE} · prendo.com.co"])
     return RenderedEmail(
         # §8: el destinatario es un usuario de Prendo; la contraparte es Prendo.
         from_name=PLATFORM_NAME,
         subject=subject,
-        html=_layout(title=f"{kind} — {long_date(day)}", blocks_html=blocks, footer_lines=footer),
+        html=_layout(
+            brand_label=PLATFORM_NAME,
+            title=kind,
+            meta=meta,
+            rows_html=rows,
+            footer_html=[_esc(why)],
+            tagline=PLATFORM_TAGLINE,
+        ),
         text="\n".join(text_lines),
         reply_to=None,
     )
@@ -427,32 +656,57 @@ def _check_unsubscribe_url(url: Any) -> str:
 
 
 def render_customer(event_type: str, payload: dict[str, Any], branding: Branding) -> RenderedEmail:
+    """Aviso al cliente. **El autor es la empresa** (§8): su nombre va en el
+    encabezado, donde los correos de la plataforma dicen «Prendo». El molde es
+    el mismo —es la plataforma la que lo gobierna, §4.4—, pero un cliente de
+    la compraventa que lee «PRENDO» arriba de su contrato de empeño ve una marca
+    que nunca oyó, y eso se lee como phishing. Prendo aparece solo donde lo
+    exige la honestidad: «Enviado por Prendo en nombre de …», bajo la tarjeta.
+    """
     unsubscribe_url = _check_unsubscribe_url(payload.get("unsubscribe_url"))
     subject_tail, paragraphs = _customer_lines(event_type, payload)
     first = _first_name(payload)
+    company = branding.company_name
     greeting = f"Hola, {first}:" if first else "Hola:"
     contact = (
         f"Tel. {branding.contact_phone}"
         if branding.contact_phone
         else (branding.contact_email or "")
     )
-    footer = [
-        " · ".join(x for x in (branding.company_name, contact, branding.footer_note or "") if x),
-        f"Enviado por {PLATFORM_NAME} en nombre de {branding.company_name}.",
-    ]
-    optout = f"¿No quiere recibir más avisos de {branding.company_name} por correo?"
-    blocks = [_p(greeting)] + [_p(line) for line in paragraphs]
-    footer_html = [_esc(line) for line in footer] + [
-        f'{_esc(optout)} <a href="{_esc(unsubscribe_url)}" style="color:#71717a">Darse de baja</a>'
+    signature = " · ".join(x for x in (company, contact, branding.footer_note or "") if x)
+    sent_by = f"Enviado por {PLATFORM_NAME} en nombre de {company}."
+    optout = f"¿No quiere recibir más avisos de {company} por correo?"
+    rows = [_tr(_paragraphs([greeting, *paragraphs]), top=20)]
+    if contact or branding.footer_note:
+        # La firma de la empresa, a la vista: es a quien el cliente le responde.
+        rows.append(_tr(_notice(_esc(signature))))
+    footer_html = [
+        f'{_esc(optout)} <a href="{_esc(unsubscribe_url)}" '
+        f'style="color:{_BRAND};text-decoration:underline;">Darse de baja</a>'
     ]
     return RenderedEmail(
         # §8: el remitente es la plataforma, el autor es la empresa.
-        from_name=f"{branding.company_name} (vía {PLATFORM_NAME})",
+        from_name=f"{company} (vía {PLATFORM_NAME})",
         # §8: el asunto nunca dice Prendo.
-        subject=f"{branding.company_name} · {subject_tail}",
-        html=_layout(title=subject_tail, blocks_html=blocks, footer_html=footer_html),
+        subject=f"{company} · {subject_tail}",
+        html=_layout(
+            brand_label=company,
+            title=subject_tail,
+            rows_html=rows,
+            footer_html=footer_html,
+            tagline=sent_by,
+        ),
         text="\n\n".join(
-            [greeting, *paragraphs, *footer, f"{optout} Darse de baja: {unsubscribe_url}"]
+            [
+                company.upper(),
+                subject_tail,
+                greeting,
+                *paragraphs,
+                "---",
+                signature,
+                sent_by,
+                f"{optout} Darse de baja: {unsubscribe_url}",
+            ]
         ),
         reply_to=branding.contact_email or None,
     )
@@ -481,11 +735,18 @@ def _check_invite_link(link: str) -> str:
 def render_user_invitation(payload: dict[str, Any], branding: Branding) -> RenderedEmail:
     """P1 · Invitación de usuario (docs/NOTIFICACIONES.md §2.6, §8, §16).
 
+    **Es la plantilla «Invite user» de Supabase** (`frontend-starter/docs/
+    correo-invitacion.html`) con los mismos textos, en *tú*, y dos diferencias
+    a propósito: nombra a la empresa en el cuerpo —el backend sí sabe quién
+    invitó; Supabase, con una sola plantilla por proyecto, no— y el pie no
+    repite el correo del destinatario (solo se leen las dos claves de abajo).
+
     **El remitente es Prendo, sin «(vía …)» y sin `Reply-To`** (§8): la
-    contraparte de alguien que va a ser usuario de Prendo es Prendo. El nombre
-    de la empresa va en el asunto y en el cuerpo porque es lo que la persona
-    reconoce — «me invitaron a la compraventa donde trabajo» —, pero ni su
-    teléfono ni su `footer_note`: el correo no es de la empresa.
+    contraparte de alguien que va a ser usuario de Prendo es Prendo, y por eso
+    la marca del encabezado también. El nombre de la empresa va en el asunto y
+    en el cuerpo porque es lo que la persona reconoce —«me invitaron a la
+    compraventa donde trabajo»—, pero ni su teléfono ni su `footer_note`: el
+    correo no es de la empresa.
 
     Solo lee `invitee_name` e `invite_link`. El enlace NO viene del payload
     guardado: lo pone el despachador en memoria al enviar (§16), porque es una
@@ -494,34 +755,63 @@ def render_user_invitation(payload: dict[str, Any], branding: Branding) -> Rende
     link = _check_invite_link(str(payload["invite_link"]))
     first = _first_name({"first_name": payload.get("invitee_name")})
     company = branding.company_name
-    greeting = f"Hola, {first}:" if first else "Hola:"
+    title = f"Hola {first}, te damos la bienvenida" if first else "Te damos la bienvenida"
     subject = f"Invitación a {company} en {PLATFORM_NAME}"
-    paragraphs = [
-        f"{company} lo invitó a usar {PLATFORM_NAME}, el sistema con el que lleva sus "
-        "contratos, su inventario y su caja.",
-        "Para activar su cuenta, abra el enlace y cree su contraseña:",
-    ]
-    after = [
-        "El enlace sirve una sola vez y vence en poco tiempo. Si ya no funciona, pídale "
-        f"a quien lo invitó en {company} que le genere uno nuevo.",
-        "Si no esperaba esta invitación, ignore este correo: sin contraseña nadie puede "
-        "entrar a la cuenta.",
-    ]
-    footer = [f"{PLATFORM_NAME} · prendo.com.co"]
-    button = (
-        '<p style="margin:16px 0 20px 0">'
-        f'<a href="{_esc(link)}" style="display:inline-block;background:#18181b;'
-        "color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:6px;"
-        'font-weight:bold">Crear mi contraseña</a></p>'
-        '<p style="margin:0 0 12px 0;font-size:12px;color:#52525b">'
-        f"Si el botón no abre, copie esta dirección en el navegador:<br>{_esc(link)}</p>"
+    invited = (
+        f"Te invitaron a trabajar en {company} con {PLATFORM_NAME}, el sistema con el que "
+        "tu equipo maneja la compraventa."
     )
-    blocks = [_p(greeting), *[_p(x) for x in paragraphs], button, *[_p(x) for x in after]]
+    duties = (
+        "Desde ahí vas a atender clientes, registrar contratos de empeño, vender en la tienda "
+        "y manejar la caja del día, según el rol que te asignaron."
+    )
+    start = "Para empezar solo falta que crees tu contraseña."
+    notice_strong = "Este enlace es personal y temporal."
+    notice_rest = (
+        "No lo compartas con nadie. Si vence antes de que puedas usarlo, pídele al "
+        f"administrador de {company} que te mande uno nuevo."
+    )
+    why = (
+        f"Recibiste este correo porque alguien de {company} creó una cuenta a tu nombre. "
+        "Si no esperabas esta invitación, puedes ignorar este mensaje: la cuenta no se "
+        "activa hasta que crees tu contraseña."
+    )
+    # El mismo texto que `invited`, con la empresa en negrita: por eso no pasa
+    # por `_p`, que escaparía el <strong>. Cada pedazo dinámico va escapado.
+    body = (
+        f'<p style="margin:0 0 16px 0;font-size:16px;line-height:1.6;color:{_BODY};">'
+        f"Te invitaron a trabajar en {_strong(company)} con {_esc(PLATFORM_NAME)}, el "
+        f"sistema con el que tu equipo maneja la compraventa. {_esc(duties)}</p>"
+    )
+    rows = [
+        _tr(body + _p(start, last=True), top=20),
+        _tr(_button(link, "Crear mi contraseña")),
+        _tr(_link_fallback(link)),
+        _tr(_notice(f"{_strong(notice_strong)} {_esc(notice_rest)}")),
+    ]
+    text = "\n\n".join(
+        [
+            PLATFORM_NAME.upper(),
+            title,
+            f"{invited} {duties}",
+            f"{start} Créala en esta dirección:\n{link}",
+            f"{notice_strong} {notice_rest}",
+            "---",
+            why,
+            PLATFORM_TAGLINE,
+        ]
+    )
     return RenderedEmail(
         from_name=PLATFORM_NAME,
         subject=subject,
-        html=_layout(title=f"Lo invitaron a {company}", blocks_html=blocks, footer_lines=footer),
-        text="\n\n".join([greeting, *paragraphs, link, *after, *footer]),
+        html=_layout(
+            brand_label=PLATFORM_NAME,
+            title=title,
+            rows_html=rows,
+            footer_html=[_esc(why)],
+            tagline=PLATFORM_TAGLINE,
+        ),
+        text=text,
         reply_to=None,
     )
 

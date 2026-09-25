@@ -53,6 +53,40 @@ def test_customer_sender_is_platform_on_behalf_of_company() -> None:
     assert rendered.reply_to == "contacto@lagranlegal.example"
 
 
+def test_customer_header_is_the_company_not_prendo() -> None:
+    """§8: el autor del aviso es la empresa. La marca del encabezado es la
+    suya; Prendo aparece solo en «Enviado por Prendo en nombre de …»."""
+    rendered = templates.render(
+        "auction_ready_customer",
+        {"contract_number": 1, "extension_ends_at": "2030-09-01", "unsubscribe_url": UNSUB},
+        BRAND,
+    )
+    assert ">LA GRAN LEGAL</p>" in rendered.html
+    assert ">Prendo</p>" not in rendered.html
+    assert "Enviado por Prendo en nombre de LA GRAN LEGAL." in rendered.html
+    assert "Enviado por Prendo en nombre de LA GRAN LEGAL." in rendered.text
+    # La firma de la empresa (teléfono, nota) queda a la vista.
+    assert "Tel. 300 000 0000" in rendered.html
+
+
+def test_customer_values_are_escaped_in_html() -> None:
+    brand = templates.Branding(
+        company_name="<b>X</b>", contact_phone="<i>1</i>", footer_note="<u>n</u>"
+    )
+    rendered = templates.render(
+        "auction_ready_customer",
+        {
+            "contract_number": "<s>1</s>",
+            "extension_ends_at": "2030-09-01",
+            "first_name": "<script>alert(1)</script>",
+            "unsubscribe_url": UNSUB + '"><script>',
+        },
+        brand,
+    )
+    for tag in ("<b>", "<i>", "<u>", "<s>", "<script>"):
+        assert tag not in rendered.html, tag
+
+
 def test_no_reply_to_when_company_has_no_contact_email() -> None:
     brand = templates.Branding(company_name="X")
     rendered = templates.render(
@@ -145,3 +179,6 @@ def test_digest_render_lists_ready_contracts_and_flags_thresholds() -> None:
     assert "faltante de $20.000" in rendered.text
     assert "sobre el umbral" not in rendered.text
     assert "Vence en 7 días" in rendered.text
+    # En el HTML el monto va en su propia celda, alineado a la derecha.
+    assert 'align="right"' in rendered.html
+    assert ">$20.000</td>" in rendered.html
