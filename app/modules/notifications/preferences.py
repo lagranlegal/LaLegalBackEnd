@@ -81,13 +81,33 @@ class NotificationPrefs:
 
     def event_enabled(self, code: str) -> bool:
         """El interruptor efectivo de un evento: el de la empresa Y el del evento
-        (override por empresa, o el `default_enabled` del catálogo)."""
+        (override por empresa, o el `default_enabled` del catálogo).
+
+        **Salvo los de la plataforma** (`audience='platform'`, hoy solo la
+        invitación, docs/NOTIFICACIONES.md §16): ni el interruptor general ni
+        un override los tocan. El interruptor contesta «¿este negocio le
+        escribe a sus clientes / a sus administradores?»; la invitación no la
+        escribe el negocio, la escribe Prendo a alguien que todavía no tiene
+        cuenta (§8). Si el interruptor —que nace apagado— la gobernara, ninguna
+        empresa podría invitar a nadie por correo hasta encender los avisos a
+        sus clientes: dos decisiones sin relación, amarradas por accidente.
+        """
+        if catalog.get(code).audience == "platform":
+            return self.event_setting(code)
         if not self.enabled:
             return False
         return self.event_setting(code)
 
     def event_setting(self, code: str) -> bool:
-        """El valor del evento sin mirar el interruptor general."""
+        """El valor del evento sin mirar el interruptor general.
+
+        Para los de la plataforma, siempre el del catálogo: el PATCH ya rechaza
+        el override (`NOTIFICATION_EVENT_NOT_CONFIGURABLE`), pero el jsonb se
+        puede escribir por otros caminos y leer tiene que ser tan estricto como
+        escribir."""
+        et = catalog.get(code)
+        if et.audience == "platform":
+            return et.default_enabled
         if code in self.events:
             return self.events[code]
         return catalog.get(code).default_enabled

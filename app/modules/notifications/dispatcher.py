@@ -18,20 +18,38 @@ Orden de decisión por entrega, y el porqué del orden:
 
 `bounced`/`delivered` los escribirá el webhook de Resend (fase posterior): el
 estado ya existe en la tabla para no necesitar migración ese día.
+
+**La invitación de usuario (P1, §16) tiene un paso propio**, entre 3 y 4: su
+enlace es una credencial que vence en minutos y NO se guarda en ninguna fila.
+El envío inmediato (`dispatch_delivery`, después del commit) lo recibe en
+memoria; el job, que llega horas después, le pide a Supabase uno nuevo para la
+misma cuenta — antes de lo cual comprueba que la persona siga `invited` y que
+su cuenta de acceso exista.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from fastapi import BackgroundTasks
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.common.tenant_time import DEFAULT_TIMEZONE, today_in
 from app.core.db import AsyncSessionLocal
 from app.core.settings import get_settings
-from app.modules.notifications import limits, preferences, repository, service, templates
-from app.modules.notifications.providers import EmailMessage, EmailProvider
+from app.modules.identity import integration as identity_integration
+from app.modules.notifications import (
+    limits,
+    preferences,
+    providers,
+    repository,
+    service,
+    templates,
+)
+from app.modules.notifications.providers import EmailMessage, EmailProvider, SendResult
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +76,9 @@ def _zone(tz_name: str | None) -> ZoneInfo:
         return ZoneInfo(DEFAULT_TIMEZONE)
 
 
+INVITATION = "user_invitation"
+
+
 @dataclass(frozen=True)
 class _Prepared:
     message: EmailMessage | None
@@ -65,10 +86,19 @@ class _Prepared:
     final_status: str | None = None
     error: str | None = None
     reschedule_to: datetime | None = None
+    #: Invitación sin enlace en memoria: hay que pedirle uno a Supabase, FUERA
+    #: de la transacción de lectura (es una llamada HTTP).
+    needs_invite_link: bool = False
+    invitee_name: str | None = None
 
 
-async def _prepare(delivery: Any, *, now: datetime) -> _Prepared:
-    """Todo lo que se decide leyendo la base, en una transacción corta."""
+async def _prepare(
+    delivery: Any, *, now: datetime, secrets: dict[str, str] | None = None
+) -> _Prepared:
+    """Todo lo que se decide leyendo la base, en una transacción corta.
+
+    `secrets` es lo que se renderiza pero NUNCA se guarda: hoy, el enlace de la
+    invitación. Se mezcla al payload solo en memoria."""
     d = delivery._mapping
     async with AsyncSessionLocal() as db, db.begin():
         event = await repository.get_event(db, event_id=d["event_id"])
@@ -119,6 +149,31 @@ async def _prepare(delivery: Any, *, now: datetime) -> _Prepared:
             if customer is not None:
                 payload["first_name"] = customer._mapping["full_name"]
 
+        if e["event_type"] == INVITATION:
+            user = (
+                await repository.get_app_user(
+                    db, company_id=c["id"], user_id=d["recipient_user_id"]
+                )
+                if d["recipient_user_id"] is not None
+                else None
+            )
+            if user is None or user._mapping["status"] != "invited":
+                # Mientras el correo esperaba, la persona entró por otro camino
+                # («Generar enlace») o la desactivaron. Ya no aplica; y pedir
+                # un enlace nuevo sería tocar su cuenta sin motivo.
+                return _Prepared(
+                    None,
+                    "suppressed",
+                    "La persona ya activó su cuenta o fue desactivada: la invitación no aplica.",
+                )
+            payload["invitee_name"] = user._mapping["full_name"]
+            link = (secrets or {}).get("invite_link")
+            if not link:
+                return _Prepared(
+                    None, needs_invite_link=True, invitee_name=user._mapping["full_name"]
+                )
+            payload["invite_link"] = link
+
         documents = settings.get("documents") or {}
         branding = templates.Branding(
             company_name=c["name"],
@@ -151,26 +206,25 @@ async def _finish(delivery_id: UUID, **fields: Any) -> None:
         await repository.update_delivery(db, delivery_id=delivery_id, **fields)
 
 
-async def _dispatch_one(
-    delivery: Any, *, provider: EmailProvider, now: datetime, stats: DispatchStats
-) -> None:
+async def _fresh_invite_link(delivery: Any, *, invitee_name: str) -> tuple[str | None, _Prepared]:
+    """Pide a Supabase un enlace NUEVO para la invitación (§16). Fuera de toda
+    transacción. Devuelve (enlace, desenlace si no hay enlace)."""
     d = delivery._mapping
-    prepared = await _prepare(delivery, now=now)
+    fresh = await identity_integration.fresh_invitation_link(
+        user_id=d["recipient_user_id"], email=d["to_address"], full_name=invitee_name
+    )
+    if fresh.link is not None:
+        return fresh.link, _Prepared(None)
+    if fresh.retryable:
+        # Supabase caído o limitando (429): se trata como una falla de envío
+        # reintentable, con el mismo contador y el mismo backoff.
+        return None, _Prepared(None, final_status="failed", error=fresh.error)
+    return None, _Prepared(None, final_status=fresh.final_status or "dead", error=fresh.error)
 
-    if prepared.reschedule_to is not None:
-        await _finish(d["id"], status="pending", scheduled_at=prepared.reschedule_to)
-        stats.rescheduled += 1
-        stats.bump("pending")
-        return
-    if prepared.final_status is not None or prepared.message is None:
-        status = prepared.final_status or "dead"
-        await _finish(d["id"], status=status, last_error=prepared.error)
-        stats.bump(status)
-        return
 
-    # Fuera de toda transacción (§5.1): un proveedor lento no retiene nada.
-    result = await provider.send(prepared.message)
-
+async def _record_result(
+    d: Any, result: SendResult, *, now: datetime, stats: DispatchStats
+) -> None:
     if result.not_configured:
         await _finish(d["id"], status="skipped_no_provider", last_error=result.error)
         stats.bump("skipped_no_provider")
@@ -200,6 +254,92 @@ async def _dispatch_one(
     stats.bump("dead")
 
 
+async def _dispatch_one(
+    delivery: Any,
+    *,
+    provider: EmailProvider,
+    now: datetime,
+    stats: DispatchStats,
+    secrets: dict[str, str] | None = None,
+) -> None:
+    d = delivery._mapping
+    prepared = await _prepare(delivery, now=now, secrets=secrets)
+
+    regenerated = False
+    if prepared.needs_invite_link:
+        if provider.name == providers.NullProvider.name:
+            # Sin proveedor no se le pide nada a Supabase: regenerar mataría el
+            # enlace anterior para no mandar ninguno.
+            await _finish(
+                d["id"],
+                status="skipped_no_provider",
+                last_error="No hay proveedor de correo configurado (RESEND_API_KEY vacía).",
+            )
+            stats.bump("skipped_no_provider")
+            return
+        link, outcome = await _fresh_invite_link(delivery, invitee_name=prepared.invitee_name or "")
+        if link is None:
+            if outcome.final_status == "failed":
+                await _record_result(
+                    d,
+                    SendResult(ok=False, retryable=True, error=outcome.error),
+                    now=now,
+                    stats=stats,
+                )
+            else:
+                status = outcome.final_status or "dead"
+                await _finish(d["id"], status=status, last_error=outcome.error)
+                stats.bump(status)
+            return
+        regenerated = True
+        prepared = await _prepare(
+            delivery, now=now, secrets={**(secrets or {}), "invite_link": link}
+        )
+
+    if prepared.reschedule_to is not None:
+        await _finish(d["id"], status="pending", scheduled_at=prepared.reschedule_to)
+        stats.rescheduled += 1
+        stats.bump("pending")
+        return
+    if prepared.final_status is not None or prepared.message is None:
+        status = prepared.final_status or "dead"
+        await _finish(d["id"], status=status, last_error=prepared.error)
+        stats.bump(status)
+        return
+
+    message = prepared.message
+    if regenerated:
+        # Cada intento con enlace regenerado lleva OTRO token, o sea otro cuerpo.
+        # Resend responde 409 `invalid_idempotent_request` si una llave se reusa
+        # con otro payload (resend.com/docs, «Idempotency keys»), y eso mandaría
+        # la invitación a `dead`. La llave es entonces por intento. El costo,
+        # dicho: si un envío anterior sí salió pero el proceso murió antes de
+        # registrarlo, la persona recibe dos correos; el último es el que sirve
+        # (regenerar mata el token anterior — verificado contra GoTrue).
+        message = replace(message, idempotency_key=f"delivery-{d['id']}-a{d['attempts'] + 1}")
+
+    # Fuera de toda transacción (§5.1): un proveedor lento no retiene nada.
+    result = await provider.send(message)
+    await _record_result(d, result, now=now, stats=stats)
+
+
+async def _fail_internal(
+    delivery: Any, exc: Exception, *, now: datetime, stats: DispatchStats
+) -> None:
+    """Una entrega rota no detiene a las demás ni tumba el job."""
+    logger.exception("entrega_fallo: delivery_id=%s", delivery._mapping["id"])
+    attempts = delivery._mapping["attempts"] + 1
+    status = "failed" if attempts < MAX_ATTEMPTS else "dead"
+    await _finish(
+        delivery._mapping["id"],
+        status=status,
+        attempts=attempts,
+        last_error=f"error interno: {type(exc).__name__}",
+        scheduled_at=now + RETRY_BACKOFF[min(attempts, len(RETRY_BACKOFF)) - 1],
+    )
+    stats.bump(status)
+
+
 async def dispatch_due(
     *,
     provider: EmailProvider,
@@ -225,18 +365,81 @@ async def dispatch_due(
             try:
                 await _dispatch_one(delivery, provider=provider, now=now, stats=stats)
             except Exception as exc:
-                # Una entrega rota no detiene a las demás ni tumba el job.
-                logger.exception("entrega_fallo: delivery_id=%s", delivery._mapping["id"])
-                attempts = delivery._mapping["attempts"] + 1
-                status = "failed" if attempts < MAX_ATTEMPTS else "dead"
-                await _finish(
-                    delivery._mapping["id"],
-                    status=status,
-                    attempts=attempts,
-                    last_error=f"error interno: {type(exc).__name__}",
-                    scheduled_at=now + RETRY_BACKOFF[min(attempts, len(RETRY_BACKOFF)) - 1],
-                )
-                stats.bump(status)
+                await _fail_internal(delivery, exc, now=now, stats=stats)
         if len(claimed) < batch_size:
             break
     return stats
+
+
+async def dispatch_delivery(
+    delivery_id: UUID,
+    *,
+    secrets: dict[str, str] | None = None,
+    provider: EmailProvider | None = None,
+    now: datetime | None = None,
+) -> str | None:
+    """Manda YA una entrega recién creada: el paso 2 de §5.1, para correr en un
+    `BackgroundTasks` DESPUÉS del commit de la operación que la creó.
+
+    **La garantía la da el job, esto solo da la velocidad.** Si la máquina se
+    apaga a mitad (dev tiene `min_machines_running=0`) o el proveedor falla, la
+    entrega queda `pending`/`failed` y el barrido de la noche la retoma. Por eso
+    nunca levanta: una excepción acá no tiene a quién llegar — la respuesta ya
+    salió.
+
+    `secrets` viaja solo en memoria (hoy, el enlace de la invitación). Devuelve
+    el estado en que quedó la entrega, o None si ya la había tomado otro.
+    """
+    now = now or datetime.now(UTC)
+    stats = DispatchStats()
+    delivery = None
+    try:
+        async with AsyncSessionLocal() as db, db.begin():
+            delivery = await repository.claim_delivery(db, delivery_id=delivery_id)
+        if delivery is None:
+            return None
+        await _dispatch_one(
+            delivery,
+            provider=provider or providers.get_default_provider(),
+            now=now,
+            stats=stats,
+            secrets=secrets,
+        )
+    except Exception as exc:
+        if delivery is None:
+            logger.exception("envio_inmediato_fallo: delivery_id=%s", delivery_id)
+            return None
+        try:
+            await _fail_internal(delivery, exc, now=now, stats=stats)
+        except Exception:
+            # Ni siquiera se pudo registrar: queda `sending` y el job la
+            # devuelve a `failed` pasada una hora (`release_stuck_sending`).
+            logger.exception("envio_inmediato_sin_registro: delivery_id=%s", delivery_id)
+            return None
+    return next(iter(stats.by_status), None)
+
+
+async def send_after_commit(
+    db: AsyncSession,
+    background: BackgroundTasks,
+    delivery_id: UUID,
+    *,
+    secrets: dict[str, str] | None = None,
+) -> None:
+    """Commit EXPLÍCITO de la operación y, después, el envío en segundo plano
+    (§5.1 paso 2; docs/NOTIFICACIONES.md §16).
+
+    El commit no es redundante con la dependencia: en FastAPI 0.141 la salida
+    de una dependencia con `yield` (el `session.begin()` de `get_db`, que es
+    quien commitea) corre DESPUÉS de las tareas de fondo — las dos viven en el
+    mismo `AsyncExitStack` del request, y la respuesta ejecuta sus
+    `background` adentro. Sin esto, `dispatch_delivery` busca desde otra
+    conexión una entrega que todavía no existe para nadie más, no manda nada,
+    y el correo espera al job de la noche. Lo cazó
+    `test_invitation_goes_out_through_our_mail_right_after_commit`.
+
+    Llamarlo al FINAL del endpoint: commitear no parte la operación porque ya
+    se escribió todo; lo único que queda es serializar la respuesta.
+    """
+    await db.commit()
+    background.add_task(dispatch_delivery, delivery_id, secrets=secrets)

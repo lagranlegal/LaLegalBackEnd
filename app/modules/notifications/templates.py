@@ -429,10 +429,80 @@ def render_customer(event_type: str, payload: dict[str, Any], branding: Branding
     )
 
 
+# ------------------------------------------------ de la plataforma (P1) ----
+
+#: Lo único que puede llevar el enlace de un correo de invitación. Es la forma
+#: que arma `identity/auth_admin.py::_app_link`: la página de la app canjea el
+#: `token_hash` por POST (`verifyOtp`). Cualquier otra cosa —el `action_link`
+#: de GoTrue (`/auth/v1/verify?token=…`) o un `#access_token=`— es un token que
+#: se quema con un GET, y los escáneres de correo hacen GET sobre cada enlace
+#: apenas llega (bug reproducido el 03/09/2026).
+_SAFE_INVITE_PATH = "/auth/callback?token_hash="
+
+
+def _check_invite_link(link: str) -> str:
+    if _SAFE_INVITE_PATH not in link or "/auth/v1/verify" in link or "#" in link:
+        raise ValueError(
+            "El enlace de la invitación no es el de la app (/auth/callback?token_hash=…): "
+            "un correo nunca lleva un token canjeable por GET."
+        )
+    return link
+
+
+def render_user_invitation(payload: dict[str, Any], branding: Branding) -> RenderedEmail:
+    """P1 · Invitación de usuario (docs/NOTIFICACIONES.md §2.6, §8, §16).
+
+    **El remitente es Prendo, sin «(vía …)» y sin `Reply-To`** (§8): la
+    contraparte de alguien que va a ser usuario de Prendo es Prendo. El nombre
+    de la empresa va en el asunto y en el cuerpo porque es lo que la persona
+    reconoce — «me invitaron a la compraventa donde trabajo» —, pero ni su
+    teléfono ni su `footer_note`: el correo no es de la empresa.
+
+    Solo lee `invitee_name` e `invite_link`. El enlace NO viene del payload
+    guardado: lo pone el despachador en memoria al enviar (§16), porque es una
+    credencial que vence en minutos.
+    """
+    link = _check_invite_link(str(payload["invite_link"]))
+    first = _first_name({"first_name": payload.get("invitee_name")})
+    company = branding.company_name
+    greeting = f"Hola, {first}:" if first else "Hola:"
+    subject = f"Invitación a {company} en {PLATFORM_NAME}"
+    paragraphs = [
+        f"{company} lo invitó a usar {PLATFORM_NAME}, el sistema con el que lleva sus "
+        "contratos, su inventario y su caja.",
+        "Para activar su cuenta, abra el enlace y cree su contraseña:",
+    ]
+    after = [
+        "El enlace sirve una sola vez y vence en poco tiempo. Si ya no funciona, pídale "
+        f"a quien lo invitó en {company} que le genere uno nuevo.",
+        "Si no esperaba esta invitación, ignore este correo: sin contraseña nadie puede "
+        "entrar a la cuenta.",
+    ]
+    footer = [f"{PLATFORM_NAME} · prendo.com.co"]
+    button = (
+        '<p style="margin:16px 0 20px 0">'
+        f'<a href="{_esc(link)}" style="display:inline-block;background:#18181b;'
+        "color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:6px;"
+        'font-weight:bold">Crear mi contraseña</a></p>'
+        '<p style="margin:0 0 12px 0;font-size:12px;color:#52525b">'
+        f"Si el botón no abre, copie esta dirección en el navegador:<br>{_esc(link)}</p>"
+    )
+    blocks = [_p(greeting), *[_p(x) for x in paragraphs], button, *[_p(x) for x in after]]
+    return RenderedEmail(
+        from_name=PLATFORM_NAME,
+        subject=subject,
+        html=_layout(title=f"Lo invitaron a {company}", blocks_html=blocks, footer_lines=footer),
+        text="\n\n".join([greeting, *paragraphs, link, *after, *footer]),
+        reply_to=None,
+    )
+
+
 def render(event_type: str, payload: dict[str, Any], branding: Branding) -> RenderedEmail:
     et = catalog.get(event_type)
     if et.family == "digest":
         return render_digest(event_type, payload, branding)
     if et.audience == "customer":
         return render_customer(event_type, payload, branding)
+    if event_type == "user_invitation":
+        return render_user_invitation(payload, branding)
     raise ValueError(f"El evento {event_type!r} todavía no tiene plantilla (fase posterior).")

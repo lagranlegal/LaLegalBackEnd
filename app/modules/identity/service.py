@@ -72,7 +72,10 @@ async def invite_user(
     full_name: str,
     invited_by: UUID,
     send_email: bool = True,
-) -> InvitedUserOut:
+) -> tuple[InvitedUserOut, integration.InvitationEmail | None]:
+    """Devuelve también el correo a mandar después del commit (§16): el router
+    lo agenda en un `BackgroundTasks`. El enlace que lleva es una credencial y
+    no pasa por la respuesta."""
     role = await repository.get_role(db, company_id=company_id, role_id=role_id)
     if role is None:
         raise NotFoundError("El rol indicado no existe en esta empresa.")
@@ -108,7 +111,7 @@ async def invite_user(
             code="USER_ALREADY_EXISTS",
         )
 
-    user_id, link = await integration.invite_user(
+    result = await integration.invite_user(
         db,
         company_id=company_id,
         role_id=role_id,
@@ -117,9 +120,14 @@ async def invite_user(
         invited_by=invited_by,
         send_email=send_email,
     )
-    row = await repository.get_user(db, company_id=company_id, user_id=user_id)
+    row = await repository.get_user(db, company_id=company_id, user_id=result.user_id)
     assert row is not None
-    return InvitedUserOut(**_row_to_user(row).model_dump(), invite_link=link)
+    out = InvitedUserOut(
+        **_row_to_user(row).model_dump(),
+        invite_link=result.admin_link,
+        invite_delivery=result.delivery,
+    )
+    return out, result.email
 
 
 async def _role_has_admin_permission(db: AsyncSession, role_id: UUID) -> bool:

@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, decode_cursor
@@ -21,6 +21,7 @@ from app.modules.identity.schemas import (
     UpdateUserRoleIn,
     UserOut,
 )
+from app.modules.notifications import dispatcher as notifications_dispatcher
 
 router = APIRouter(prefix="/api/v1/identity", tags=["identity"])
 
@@ -81,8 +82,9 @@ async def invite_user(
     body: InviteUserIn,
     user: Annotated[CurrentUser, Depends(_manage_users)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    background: BackgroundTasks,
 ) -> InvitedUserOut:
-    return await service.invite_user(
+    out, email = await service.invite_user(
         db,
         company_id=user.company_id,
         role_id=body.role_id,
@@ -91,6 +93,11 @@ async def invite_user(
         invited_by=user.id,
         send_email=body.send_email,
     )
+    if email is not None:
+        await notifications_dispatcher.send_after_commit(
+            db, background, email.delivery_id, secrets={"invite_link": email.link}
+        )
+    return out
 
 
 @router.patch("/users/{user_id}/role", response_model=UserOut)

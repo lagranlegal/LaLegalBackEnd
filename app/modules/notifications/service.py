@@ -45,6 +45,9 @@ class RecordOutcome:
     created: bool
     event_id: UUID | None
     deliveries: dict[str, int]
+    #: Las entregas que nacieron `pending`: las que un productor transaccional
+    #: puede mandar ya, después del commit (§5.1), sin esperar al job.
+    pending_ids: tuple[UUID, ...] = ()
 
 
 def is_stale(*, target_date: date | None, today: date, stale_after_days: int) -> bool:
@@ -68,12 +71,18 @@ async def record_event(
     entity_id: UUID | None = None,
     target_date: date | None = None,
     deliver: bool = True,
+    recipient_email: str | None = None,
+    recipient_user_id: UUID | None = None,
 ) -> RecordOutcome:
     """Registra el hecho y planifica sus entregas en la MISMA transacción.
 
     `deliver=False` registra el hecho sin entregas: es el resumen diario vacío
     (§12.2-2) o el que ya va dentro del semanal. Queda la fila —y con ella el
     latido de "¿corrió anoche?" (§5.3)— pero no sale correo.
+
+    `recipient_email`/`recipient_user_id` solo para `audience='platform'`: ahí
+    el destinatario no sale de un permiso ni de un cliente, lo trae el
+    productor (la invitación sabe a quién invitó).
     """
     et = catalog.get(event_type)
     event_id = await repository.insert_event(
@@ -97,9 +106,10 @@ async def record_event(
         return RecordOutcome(created=True, event_id=event_id, deliveries={})
 
     counts: dict[str, int] = {}
+    pending: list[UUID] = []
 
     async def _add(to: str | None, status: str, user_id: UUID | None, error: str | None) -> None:
-        await repository.insert_delivery(
+        delivery_id = await repository.insert_delivery(
             db,
             company_id=company_id,
             event_id=event_id,
@@ -109,6 +119,8 @@ async def record_event(
             last_error=error,
         )
         counts[status] = counts.get(status, 0) + 1
+        if delivery_id is not None and status == "pending":
+            pending.append(delivery_id)
 
     stale = is_stale(target_date=target_date, today=today, stale_after_days=prefs.stale_after_days)
 
@@ -149,8 +161,15 @@ async def record_event(
             await _add(email, "pending", None, None)
         return RecordOutcome(created=True, event_id=event_id, deliveries=counts)
 
-    # audience='platform' (P1): fase 2.
-    return RecordOutcome(created=True, event_id=event_id, deliveries={})
+    # audience='platform' (P1, §16): un destinatario, el que trae el productor.
+    # Sin rezago (no tiene fecha objetivo), sin límites de la Ley 2300 (no es un
+    # deudor) y sin base legal que cruzar: es la cuenta que esa persona va a usar.
+    if not recipient_email:
+        return RecordOutcome(created=True, event_id=event_id, deliveries={})
+    await _add(recipient_email, "pending", recipient_user_id, None)
+    return RecordOutcome(
+        created=True, event_id=event_id, deliveries=counts, pending_ids=tuple(pending)
+    )
 
 
 # ------------------------------------------------------------ preferencias ----

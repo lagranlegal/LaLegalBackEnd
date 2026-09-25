@@ -165,8 +165,10 @@ async def insert_delivery(
     recipient_user_id: UUID | None,
     status: str,
     last_error: str | None = None,
-) -> None:
-    await db.execute(
+) -> UUID | None:
+    """Devuelve el id de la entrega, o None si ya existía (mismo evento, canal
+    y dirección)."""
+    result = await db.execute(
         text(
             """
             insert into public.notification_delivery
@@ -174,6 +176,7 @@ async def insert_delivery(
             values (:company_id, :event_id, 'email', :to_address, :recipient_user_id, :status,
                     :last_error)
             on conflict do nothing
+            returning id
             """
         ),
         {
@@ -185,6 +188,7 @@ async def insert_delivery(
             "last_error": last_error,
         },
     )
+    return result.scalar_one_or_none()
 
 
 async def last_event_day(
@@ -374,7 +378,8 @@ async def claim_due_deliveries(
             set status = 'sending'
             from due
             where d.id = due.id
-            returning d.id, d.company_id, d.event_id, d.to_address, d.attempts
+            returning d.id, d.company_id, d.event_id, d.to_address, d.recipient_user_id,
+                      d.attempts
             """
         ),
         {
@@ -384,6 +389,45 @@ async def claim_due_deliveries(
         },
     )
     return list(result.all())
+
+
+async def claim_delivery(db: AsyncSession, *, delivery_id: UUID) -> Row[Any] | None:
+    """Toma UNA entrega por id para el envío inmediato de un transaccional
+    (§5.1). Mismo candado que `claim_due_deliveries`: si el job ya la tomó (o
+    ya salió), no vuelve nada y no se manda dos veces. No mira `scheduled_at`:
+    recién creada, su hora es ahora."""
+    result = await db.execute(
+        text(
+            """
+            with one as (
+              select id from public.notification_delivery
+              where id = :id and status in ('pending', 'failed')
+              for update skip locked
+            )
+            update public.notification_delivery d
+            set status = 'sending'
+            from one
+            where d.id = one.id
+            returning d.id, d.company_id, d.event_id, d.to_address, d.recipient_user_id,
+                      d.attempts
+            """
+        ),
+        {"id": str(delivery_id)},
+    )
+    return result.first()
+
+
+async def get_app_user(db: AsyncSession, *, company_id: UUID, user_id: UUID) -> Row[Any] | None:
+    """El destinatario de una invitación, para saber si todavía hace falta
+    (§16): si ya no está `invited`, la invitación no aplica."""
+    result = await db.execute(
+        text(
+            "select id, full_name, email, status from public.app_user "
+            "where company_id = :cid and id = :id"
+        ),
+        {"cid": str(company_id), "id": str(user_id)},
+    )
+    return result.first()
 
 
 async def release_stuck_sending(db: AsyncSession, *, older_than: datetime) -> int:

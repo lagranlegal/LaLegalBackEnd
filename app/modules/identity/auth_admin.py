@@ -1,9 +1,11 @@
 """Cliente delgado sobre la Admin API de Supabase Auth.
 
-Solo se usa para invitar usuarios (`POST /auth/v1/invite`): crea el
-`auth.users` y dispara el correo de invitación. Funciona con signups
-públicos desactivados porque es una acción admin (service_role), no
-self-service.
+Se usa para invitar usuarios: crea el `auth.users` y, según el caso, dispara
+el correo de Supabase (`POST /auth/v1/invite`) o solo emite el enlace
+(`POST /auth/v1/admin/generate_link`) para que lo entregue otro — el admin
+por WhatsApp, o desde la fase 2 de avisos nuestro propio correo
+(docs/NOTIFICACIONES.md §16). Funciona con signups públicos desactivados
+porque es una acción admin (service_role), no self-service.
 """
 
 from dataclasses import dataclass
@@ -92,10 +94,18 @@ class Invitation:
 
     `link` solo viene cuando se pidió SIN correo: es el enlace que el admin
     le pasa a la persona por otro medio.
+
+    `hashed_token` e `invited_at` también, y por separado: el correo propio
+    (§16) arma su enlace SOLO a partir del token —`link` puede ser el
+    `action_link` de GoTrue cuando falta `FRONTEND_URL`, y ese no puede ir en
+    un correo— y la llave del evento usa `invited_at` para distinguir una
+    invitación de la siguiente a la misma persona.
     """
 
     user_id: UUID
     link: str | None
+    hashed_token: str | None = None
+    invited_at: str | None = None
 
 
 def _app_link(hashed_token: str, verification_type: str) -> str | None:
@@ -138,6 +148,52 @@ def _app_link(hashed_token: str, verification_type: str) -> str | None:
         return None
     base = settings.frontend_url.rstrip("/")
     return f"{base}/auth/callback?token_hash={hashed_token}&type={verification_type}"
+
+
+def invitation_email_link(hashed_token: str) -> str | None:
+    """El enlace que va DENTRO del correo de invitación (§16).
+
+    La misma forma que «Generar enlace» (`_app_link`), con una diferencia a
+    propósito: sin `FRONTEND_URL` devuelve `None` en vez de caer al
+    `action_link`. Para un enlace que el admin pega a mano, uno frágil es
+    mejor que ninguno; para un correo no, porque los escáneres de buzón (Gmail,
+    Outlook Safe Links, antivirus) hacen GET sobre cada enlace apenas llega y
+    lo quemarían antes que la persona. Quien llama cae entonces al correo de
+    Supabase, que es el comportamiento de antes.
+    """
+    return _app_link(hashed_token, "invite")
+
+
+async def auth_user_exists(user_id: UUID | str) -> bool:
+    """¿La cuenta de acceso sigue existiendo en Supabase Auth?
+
+    Lo pregunta el job antes de pedir un enlace nuevo para una invitación que
+    no salió (§16). No es paranoia: `generate_link` con `type=invite` sobre un
+    correo cuya cuenta se borró desde el panel **no falla — crea otra cuenta**,
+    con otro id, que no corresponde a ningún `app_user` y deja ese correo
+    bloqueado para invitaciones futuras (`EMAIL_ALREADY_REGISTERED`).
+
+    `GET /auth/v1/admin/users/{id}`: 200 con el usuario, o 404 con
+    `error_code: "user_not_found"` (respuestas reales, GoTrue v2.195.0). Un 5xx
+    NO es "no existe": sube como `AuthAdminError` para que se reintente.
+    """
+    settings = get_settings()
+    headers = {
+        "apikey": settings.supabase_service_role_key,
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(
+            f"{settings.supabase_url}/auth/v1/admin/users/{user_id}", headers=headers
+        )
+    if response.status_code == 404 or _tiene_error_code(response, "user_not_found"):
+        return False
+    if response.status_code >= 400:
+        raise AuthAdminError(
+            "No se pudo consultar la cuenta en Supabase Auth.",
+            details={"status_code": response.status_code, "body": response.text},
+        )
+    return True
 
 
 async def invite_user(email: str, full_name: str, *, send_email: bool = True) -> Invitation:
@@ -237,7 +293,12 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
     # frágil sigue siendo mejor que ninguno — la alternativa es dejar al admin
     # sin forma de dar de alta a nadie.
     link = (_app_link(hashed_token, "invite") if hashed_token else None) or body.get("action_link")
-    return Invitation(user_id=UUID(body["id"]), link=link)
+    return Invitation(
+        user_id=UUID(body["id"]),
+        link=link,
+        hashed_token=hashed_token,
+        invited_at=body.get("invited_at"),
+    )
 
 
 async def generate_recovery_link(email: str) -> str:

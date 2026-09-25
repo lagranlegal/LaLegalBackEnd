@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
@@ -19,8 +20,9 @@ class InviteUserIn(BaseModel):
     role_id: UUID
     #: `False` entrega un enlace en la respuesta en vez de mandar el correo.
     #: Sirve cuando el correo no llega, cae en spam, o la persona está al lado
-    #: del admin — y además no consume la cuota de envíos de Supabase, que es
-    #: baja a propósito en el servicio incluido.
+    #: del admin. `True` manda el correo de Prendo (docs/NOTIFICACIONES.md §16),
+    #: o el de Supabase si la plataforma no tiene proveedor — ver
+    #: `InvitedUserOut.invite_delivery`.
     send_email: bool = True
 
 
@@ -32,6 +34,12 @@ class InvitedUserOut(UserOut):
     """
 
     invite_link: str | None = None
+    #: Por dónde le llega el enlace a la persona: `link` (lo entrega el admin,
+    #: viene en `invite_link`), `email` (correo de Prendo, sale apenas responde
+    #: este request) o `email_supabase` (correo de Supabase: la plataforma no
+    #: tiene proveedor propio configurado). Es lo que el front puede mostrar
+    #: para que «no me llegó» tenga dónde buscarse.
+    invite_delivery: Literal["link", "email", "email_supabase"] = "link"
 
 
 class RecoveryLinkOut(BaseModel):

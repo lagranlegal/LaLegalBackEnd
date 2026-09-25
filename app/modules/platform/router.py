@@ -1,13 +1,14 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, decode_cursor, decode_time_cursor
 from app.core.db import get_db
 from app.core.security import TokenClaims, require_super_admin
 from app.modules.audit.schemas import AuditLogOut
+from app.modules.notifications import dispatcher as notifications_dispatcher
 from app.modules.platform import service
 from app.modules.platform.schemas import (
     CompanyCreatedOut,
@@ -26,8 +27,9 @@ async def create_company(
     body: CompanyCreateIn,
     _claims: Annotated[TokenClaims, Depends(require_super_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    background: BackgroundTasks,
 ) -> CompanyCreatedOut:
-    return await service.create_company_defaults(
+    out, email = await service.create_company_defaults(
         db,
         name=body.name,
         plan_code=body.plan_code,
@@ -36,6 +38,12 @@ async def create_company(
         first_admin_full_name=body.first_admin_full_name,
         send_email=body.send_email,
     )
+    if email is not None:
+        # Correo del primer admin: después del commit (§5.1, NOTIFICACIONES §16).
+        await notifications_dispatcher.send_after_commit(
+            db, background, email.delivery_id, secrets={"invite_link": email.link}
+        )
+    return out
 
 
 @router.get("/companies", response_model=CursorPage[CompanyOut])

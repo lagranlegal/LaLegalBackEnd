@@ -12,6 +12,7 @@ from app.modules.audit import repository as audit_repo
 from app.modules.audit.schemas import AuditLogOut
 from app.modules.identity import integration as identity_integration
 from app.modules.identity import repository as identity_repo
+from app.modules.identity.integration import InvitationEmail
 from app.modules.platform import integration as platform_integration
 from app.modules.platform import repository
 from app.modules.platform.schemas import (
@@ -131,7 +132,9 @@ async def create_company_defaults(
     first_admin_email: str,
     first_admin_full_name: str,
     send_email: bool = False,
-) -> CompanyCreatedOut:
+) -> tuple[CompanyCreatedOut, InvitationEmail | None]:
+    """Devuelve también el correo del primer admin a mandar después del
+    commit, si se pidió por correo (docs/NOTIFICACIONES.md §16)."""
     plan_id = await repository.get_plan_id_by_code(db, code=plan_code)
     if plan_id is None:
         raise NotFoundError("El plan indicado no existe o está inactivo.")
@@ -165,7 +168,7 @@ async def create_company_defaults(
             admin_role_id = role_id
     assert admin_role_id is not None
 
-    _, invite_link = await identity_integration.invite_user(
+    invitation = await identity_integration.invite_user(
         db,
         company_id=company_id,
         role_id=admin_role_id,
@@ -200,10 +203,11 @@ async def create_company_defaults(
 
     row = await repository.get_company(db, company_id=company_id)
     assert row is not None
-    return CompanyCreatedOut(
+    out = CompanyCreatedOut(
         **_row_to_company(row).model_dump(),
-        admin_invite_link=invite_link,
+        admin_invite_link=invitation.admin_link,
     )
+    return out, invitation.email
 
 
 async def list_companies(
