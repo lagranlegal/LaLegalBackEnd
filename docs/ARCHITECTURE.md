@@ -114,6 +114,25 @@ No falla: simplemente no encuentra nada y el trabajo queda para el job de la noc
 - **Autorización** = "¿su rol tiene el permiso X?" — `require_permission("modulo.accion")`, RBAC dinámico por empresa, cache TTL 60s por rol. Deny-by-default: un endpoint sin `Depends(require_permission(...))` es un bug, no un endpoint público.
 - **Super-admin de plataforma** (gestiona empresas/suscripciones, fuera del modelo de tenant) = un caso aparte: no tiene fila en `app_user`, se identifica por el claim `app_metadata.platform_role == "super_admin"` que se fija manualmente en Supabase Auth (una sola vez, fuera de la app). Ver `require_super_admin` en `security.py`.
 
+### Endpoints públicos de negocio: solo con un token firmado que dice a quién (25/09/2026)
+
+El primero es el **enlace de baja** de los correos al cliente (`GET`/`POST /api/v1/public/unsubscribe/{token}`,
+`NOTIFICACIONES.md` §17). Quien lo abre es un cliente de la compraventa, no un usuario de Prendo: no hay JWT, ni
+tenant en el request, ni RLS que aplicar. Las reglas, para el próximo que haga falta (confirmar un correo, §9.3):
+
+- **La autorización es el token**, firmado con HMAC (`NOTIFICATIONS_LINK_SECRET`), y dice exactamente sobre qué fila
+  actúa (empresa + cliente). La sesión es la de plataforma (`get_db`, sin RLS), así que **toda** consulta va filtrada
+  por la empresa y el cliente del token — nunca por algo que traiga el request.
+- **Sin secreto, nada vale.** Un HMAC con clave vacía lo firma cualquiera; `read_token` devuelve `None` si falta.
+- **El GET nunca escribe.** Los escáneres de correo y las vistas previas abren cada enlace (03/09/2026). La acción es
+  un `POST` que dispara una persona desde una página del front.
+- **Un solo código de error** para todo lo que no sirve (`UNSUBSCRIBE_LINK_INVALID`, 404): a quien fabrica tokens no
+  se le explica en qué se equivocó.
+- **La excepción se escribe** en `tests/unit/test_endpoint_guards.py::SIN_PERMISO_A_PROPOSITO`, con su porqué. Un
+  endpoint sin guard que no esté ahí sigue siendo un bug de revisión.
+- **Prefijo `/api/v1/public/`**, para que se vea en el path —y en cualquier regla de proxy o de logs— que no lleva
+  sesión.
+
 ### El Custom Access Token Hook y el estado `invited`
 
 Los claims `company_id`/`role_id` NO los pone el backend: los emite el **Custom Access Token Hook** (`public.custom_access_token_hook`, migración 00003) cuando Supabase Auth firma el token. `get_verified_claims` rechaza con 401 cualquier JWT que llegue sin ellos.

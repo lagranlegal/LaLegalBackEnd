@@ -1,5 +1,7 @@
 # NOTIFICACIONES.md — Avisos por correo al cliente y a la empresa (spec)
 
+> **Estado (25/09/2026): FASES 1, 2 y 3 IMPLEMENTADAS en `dev`, sin desplegar.** La 3 —base legal del cliente, casilla del mostrador, enlace de baja— en **§17**; la 2 en §16. Ningún aviso al cliente está encendido.
+>
 > **Estado (24/09/2026): FASE 1 IMPLEMENTADA en `dev`, sin desplegar** — maquinaria, catálogo completo, resumen diario/semanal a la empresa y límites de la Ley 2300 como parámetros. Qué quedó, qué no y dónde el código contradijo este documento: **§15**. El párrafo que sigue describe el punto de partida y se deja como estaba.
 >
 > **Estado original: DISEÑADO, sin una línea de código.** El backend no tenía ningún módulo de correo: cero dependencias (`pyproject.toml` no menciona ninguna librería de email), cero plantillas, cero cola, cero tabla. Todo el correo que sale de la plataforma lo manda **Supabase Auth** con su SMTP compartido, que responde `429 INVITE_RATE_LIMITED` a las pocas invitaciones (`app/modules/identity/auth_admin.py:70`). Se va a migrar a **Resend** sobre `prendo.com.co`.
@@ -864,3 +866,106 @@ sigue como antes (correo de Supabase). No hay interruptor por empresa que encend
 - **El front no muestra `invite_delivery`.** El diálogo de invitar sigue sin decir por dónde salió.
 - **`RUNBOOK_USUARIOS.md` (raíz) quedó desactualizado** en sus filas de «No llega el correo» / `INVITE_RATE_LIMITED`: con proveedor, el correo ya no depende del SMTP de Supabase. No lo toqué (está fuera del repo y lo consolida Mateo).
 - **Webhook de Resend** (`delivered`/`bounced`): sigue en la fase 3. Una invitación a una dirección mal escrita queda `sent` y nadie se entera — el admin lo notará porque la persona no aparece.
+
+---
+
+## 17. Fase 3 — lo implementado (25/09/2026)
+
+**Migración `00059_customer_email_basis.sql`** (aplicada y probada solo en local). Commits: `da76b63` en
+`backend-starter`; `2f022dd` y `35b1280` en `frontend-starter`. **Ningún aviso al cliente se encendió**: siguen
+`default_enabled = false` por catálogo y el interruptor por empresa sigue apagado (§12.3). Lo que cambió es que, el
+día que alguien encienda uno, ya hay con qué decidir a quién se le puede escribir.
+
+### 17.1 · Qué quedó
+
+| Pieza | Cómo quedó |
+|---|---|
+| **Columnas** | `customer.email_basis` (`contract` \| `consent` \| null), `email_basis_at`, `email_consent_at`, `email_consent_source` (`counter` \| `contract_form` \| `import`), `email_opt_out_at`, `email_invalid_at`. Tres `check` que el esquema garantiza solo: base ⇔ fecha; `consent` exige cuándo y dónde; una fecha de autorización no puede colgar de otra base. Y `notification_delivery.legal_basis` (§17.2-2) |
+| **Backfill** | `contract` + `email_basis_at = now()` en los clientes con correo no vacío, sin base y con al menos un contrato **no terminal** (`paid`, `auctioned`, `superseded` son terminales, los de `rules.TERMINAL_STATUSES`). Nadie queda en `consent`: nadie autorizó nada todavía (§9.2-g). Verificado con un escenario sembrado en local antes de aplicarla: de 4 clientes (correo + mora, correo + pagado, sin correo + vigente, correo en blanco + vigente) tocó exactamente al primero |
+| **Medido en LOCAL** | 1.146 clientes (casi todos basura de tests), 3 con correo, **ninguno con contrato vivo** → el backfill no tocó ninguno: **1.146 sin base, 0 `contract`, 0 `consent`**. En dev **no se midió** (prohibido tocarla en esta fase); por §1 y §10, a lo sumo 2 clientes tendrían `contract` — los 2 con correo, si su contrato sigue vivo |
+| **La matriz** | `service.customer_gate(contacto, finalidad)` es **el único lugar** donde se cruza la base con `purpose` (§9.2-c): sin dirección → `unroutable`; baja → `suppressed`; rebote → `suppressed`; base que el mapa no acepta → `suppressed`; si no, sale, y la base queda en la entrega. El mapa sigue siendo `catalog.PURPOSE_ACCEPTED_BASES` (§9.2-d) y el test de «abogado estricto» lo cambia en memoria sin tocar nada más |
+| **Al planificar Y al enviar** | `record_event` usa el `gate` al crear la entrega, y el despachador lo **vuelve a evaluar** en `_prepare`, antes de los límites de la Ley 2300: una baja por el enlace o una casilla desmarcada en el medio surten efecto ya. Además, si el correo del cliente **cambió** desde que se planificó, la entrega queda `suppressed` (§17.2-7) |
+| **Casilla del mostrador** | `email_consent` en `POST`/`PATCH /customers`: `true` → `consent` + fecha + `counter`, **conservando la fecha original** si ya la tenía; `false` → retira, y la base cae a `contract` si hay contrato vivo y correo, o a ninguna. `email_opt_out` en el `PATCH`: la baja pedida en persona, y levantarla. Todo en el `audit_log` de `create_customer`/`update_customer`, con antes y después |
+| **`contract` lo escriben** | `customers.integration.ensure_contract_basis`, llamada en la MISMA transacción por `create_contract`, `import_contract` y `extend_loan`, y por el `PATCH` del cliente cuando se le registra un correo y ya tenía un contrato vivo. Solo si tiene correo y **ninguna** base: nunca pisa `consent` |
+| **Enlace de baja** | Token sin estado: `base64url(v1 ‖ company_id ‖ customer_id).base64url(HMAC-SHA256[:16])`, firmado con `NOTIFICATIONS_LINK_SECRET` (nuevo). No vence, no se guarda en ninguna fila. El correo lleva `{FRONTEND_URL}/baja/{token}` — **la página, nunca la API** — en el HTML y en el texto plano |
+| **La baja** | `GET /api/v1/public/unsubscribe/{token}` **solo lee** (`{company_name, email_hint, unsubscribed_at}`, correo enmascarado `j•••@gmail.com`). `POST` al mismo path escribe `email_opt_out_at`, idempotente (repetirlo devuelve la fecha original y no audita otra vez), y audita `email_opt_out` con `user_id` NULL y `source: "link"`. Token malo, cliente o empresa inexistente, o plataforma sin secreto → `404 UNSUBSCRIBE_LINK_INVALID`, un solo código para todo |
+| **Plantilla** | Todo correo al cliente lleva «¿No quiere recibir más avisos de <Empresa> por correo? Darse de baja». **Sin enlace no se redacta**: `templates._check_unsubscribe_url` exige `/baja/` y rechaza `/api/` o `#`, igual que el candado del enlace de la invitación (§16.1). El despachador, si no puede armarlo (falta el secreto o `FRONTEND_URL`), deja la entrega `dead` con el motivo |
+| **Correo del cliente** | `CustomerCreateIn.email` sigue `EmailStr`. `CustomerUpdateIn.email` pasó a `str` con `format: email` en el OpenAPI y se valida en el servicio con el **mismo** `EmailStr` y el **mismo** `422 VALIDATION_ERROR` (`email` en `loc`), salvo el valor **idéntico** al guardado (§17.2-1). Un correo nuevo limpia `email_invalid_at` |
+| **Front** | Casilla y baja en el formulario del cliente; la base, en la ficha; la página pública `/baja/$token` (abrirla no da de baja: el botón hace el `POST`). Detalle en `frontend-starter/docs/IMPLEMENTATION.md` |
+
+### 17.2 · Discrepancias: dónde el código contradijo este documento (y ganó)
+
+1. **§11 (fila 3) y §13-1 piden «el `EmailStr` que falta». Ya no faltaba:** lo puso F21-19 el 23/09/2026 (commit
+   `989d19a`, `QA_AUDITORIA.md`), después de escrito este documento. Lo que sí faltaba era su borde: **un correo
+   guardado antes de la validación congelaba la ficha**, porque el formulario lo reenvía tal cual y el `EmailStr`
+   del `PATCH` lo rechazaba — no se podía corregir ni el teléfono. Resuelto aceptando el valor **idéntico** al
+   guardado y validando cualquier otro (backend y front, la misma regla). **Cuántos hay:** en local, 0 de 3; en dev,
+   0 de 2 según la medición de solo lectura de F21-19 (23/09) — no se volvió a medir. La regla es para prod, que
+   nadie midió; con 0 casos conocidos no hacía falta un script de limpieza.
+2. **§9.2-a se amplió con dos columnas.** `email_basis_at`: la base `contract` no tenía ninguna fecha que dijera
+   desde cuándo rige, y §9.2-a exige «poder mostrarlo seis meses después». Y `notification_delivery.legal_basis`:
+   una columna del **cliente** dice la base de hoy, no la del día del envío — si mañana pasa de `contract` a
+   `consent`, la anterior se pierde. La de la entrega se escribe al planificar y se refresca al enviar.
+3. **§9.2-a: «de ahí en adelante lo pone `create_contract`».** También `import_contract`, `extend_loan` y el
+   `PATCH` del cliente que le registra un correo teniendo un contrato vivo. Sin lo último, el caso normal de §1c —el
+   correo llega después del contrato— dejaba al cliente sin base para siempre.
+4. **§9.2-f: la casilla va «al crear el contrato».** Quedó en el **formulario del cliente** (origen `counter`). La
+   pantalla de crear contrato elige un cliente existente (`CustomerPicker`) y no tiene formulario de cliente; meterle
+   uno era rediseñar esa pantalla. `contract_form` existe como valor permitido y hoy nadie lo escribe. Lo mismo para
+   el *«¿quiere recibir avisos de su cuota por correo?»* de §1c: **no se construyó**.
+5. **Retirar la autorización no estaba definido.** Quedó así: la base cae a `contract` si hay contrato vivo y
+   correo, o a ninguna; `email_consent_at`/`_source` vuelven a null (el `check` lo exige: una fecha de autorización
+   no puede colgar de otra base), y el historial queda en `audit_log`. **La baja es otra cosa**: no toca la base, la
+   tapa — levantarla devuelve lo que había.
+6. **§9.2-e: «el enlace escribe `email_opt_out_at`».** No: el enlace abre una **página** y la escribe el `POST` de
+   su botón. Regla dura del proyecto desde el 03/09/2026; la página del front además espera el clic, por la lección
+   de `/auth/callback` (§16.3).
+7. **Un caso que el diseño no preveía: el correo cambió entre planificar y enviar.** La entrega guarda la dirección
+   del día que se planificó. Mandarla a la vieja puede ser mandarla a otra persona (§9.3); mandarla a la nueva es
+   mandarla a una dirección sobre la que nadie decidió. → `suppressed` con el motivo. La comparación ignora
+   mayúsculas.
+8. **§15.2-7 quedó superada.** «Un aviso al cliente encendido hoy nace `suppressed`» era porque no existía la base;
+   ahora un cliente con base `contract` recibe el de servicio. El test de §14 (evento encendido ⇒ dos entregas) se
+   actualizó: la del cliente con base nace `pending`, y el caso «tiene correo y ninguna base» tiene su propio test.
+9. **La salida nueva tiene un modo de falla nuevo, a propósito.** Sin `NOTIFICATIONS_LINK_SECRET` o sin
+   `FRONTEND_URL`, los correos al cliente quedan `dead` («sin enlace de baja no sale»). Es el mismo criterio de
+   §9.2-e —un correo sin salida es el que termina en spam, y esa marca la paga `prendo.com.co` para todos— y el de la
+   invitación sin enlace seguro (§16.1). Hoy no afecta nada: no hay avisos al cliente encendidos.
+10. **El pie viejo decía «si no desea recibir estos avisos, avísele a <Empresa>».** Se reemplazó por el enlace: era
+    exactamente el «no encuentra cómo salir» que §9.2-e quería evitar.
+11. **`email_basis_at` del backfill es la hora de la migración**, no la del contrato: es cuándo se escribió de verdad,
+    y fabricar una fecha anterior es lo mismo que §9.2-g prohíbe para `consent`.
+
+### 17.3 · Operación — lo que hace falta para desplegarla
+
+- **`NOTIFICATIONS_LINK_SECRET`** nuevo, largo y aleatorio, **distinto por ambiente**, en la app del API (el endpoint
+  público lo necesita para validar) **y** en la Machine del job (el despachador lo necesita para firmar).
+  `FRONTEND_URL` también en las dos. Cambiar el secreto invalida los enlaces de los correos ya enviados: rotarlo solo
+  si se filtró. `.env.example` lo documenta.
+- La migración es **aditiva**: el código viejo no lee estas columnas. Se puede aplicar antes del deploy — con la
+  salvedad de siempre: `db push` aplica todo lo pendiente junto.
+- **El front tiene que estar desplegado antes de encender cualquier aviso al cliente**: el enlace del correo apunta a
+  `/baja/{token}`, y si esa ruta no existe el cliente cae en el 404 de la app.
+
+### 17.4 · Lo que NO quedó, y lo dudoso
+
+- **La captura al crear el contrato (§1c, §9.2-f)** — ver §17.2-4.
+- **La lista «clientes sin correo» (§1c)** — no se construyó.
+- **Webhook de Resend:** `email_invalid_at` existe y el `gate` lo respeta, pero **nadie lo escribe todavía**.
+- **Cabeceras `List-Unsubscribe` / `List-Unsubscribe-Post` (RFC 8058)** no se agregaron. Gmail y Yahoo las exigen a
+  los remitentes masivos; hoy el volumen no llega. El `POST` ya ignora el cuerpo, así que puede ser su destino — pero
+  la cabecera tendría que apuntar a la **API** (un POST sin página), y eso pide decidir la URL pública del backend.
+- **El texto de la casilla es de producto, no legal.** Dice qué cubre y que se puede retirar; si la Ley 1581 exige
+  otra redacción para que la autorización sea «previa, expresa e informada», es la consulta de §9.2-h y §9.3. Cambiarlo
+  es texto del front, sin migración.
+- **Volver a suscribirse solo en el mostrador.** La página de baja no ofrece deshacer. Sería otro `POST`, tan seguro
+  como el de la baja; se dejó fuera por alcance, no por riesgo. Hoy la persona lo pide en la compraventa y se
+  desmarca la casilla.
+- **El endpoint público no tiene límite de tasa.** El token no se puede adivinar (128 bits de firma), así que el
+  riesgo es de carga, no de acceso. Ningún endpoint del proyecto lo tiene hoy.
+- **El correo enmascarado muestra el dominio completo.** Suficiente para reconocerse; a quien tenga el enlace
+  reenviado le dice el proveedor de correo de la persona, no más.
+- **Verificado en vivo con un correo real: pendiente**, como en §15 y §16 — exige la key de Resend y el secreto en Fly.
+  Verificado en local: la página de baja a 360 y 1280 px contra el backend y la base locales, tres `GET` sin tocar la
+  baja, el `POST` con su `audit_log`.
+
