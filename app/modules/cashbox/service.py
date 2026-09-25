@@ -420,7 +420,17 @@ async def reopen_session(
         raise NotFoundError("La sesión de caja no existe en esta empresa.")
     m = row._mapping
     if m["status"] != "closed":
-        raise ConflictError("Solo se puede reabrir una sesión cerrada.")
+        # Código propio, no el `CONFLICT` genérico (F21-34): el caso típico es
+        # un doble clic o una segunda pestaña sin refrescar, y el front
+        # necesita el código para decir "ya está abierta" en vez de "algo
+        # falló". `session_id` + `status` van en `details` para que no tenga
+        # que adivinar a qué turno se refiere.
+        raise ConflictError(
+            "Esta sesión de caja ya está abierta: no hay nada que reabrir. "
+            "Registra lo que falte directamente en el turno abierto.",
+            details={"session_id": str(session_id), "status": str(m["status"])},
+            code="CASH_SESSION_NOT_CLOSED",
+        )
 
     if await repository.get_open_session_for_register(db, register_id=m["register_id"]) is not None:
         raise ConflictError(

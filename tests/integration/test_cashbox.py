@@ -301,6 +301,49 @@ async def test_reopen_session_is_audited(client: TestClient, cashbox_tenant: dic
     assert audit is not None
 
 
+async def test_reabrir_una_sesion_que_ya_esta_abierta_tiene_codigo_propio(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """Reabrir una sesión que YA está abierta es un rechazo con nombre, no un
+    `CONFLICT` genérico.
+
+    El caso real no es exótico: el cajero reabre, la pantalla tarda, y reabre
+    otra vez (o lo hace desde una segunda pestaña que no se refrescó). Con el
+    `CONFLICT` a secas el front no tiene cómo decir qué pasó — y un 409
+    genérico en una acción de caja se lee como "algo se rompió", no como "ya
+    está hecho". Se mira el CÓDIGO, no el status: el status era 409 también
+    antes del arreglo.
+    """
+    headers = _headers(cashbox_tenant["token"])
+    opened = client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "0.00"}
+    ).json()
+    client.post(
+        f"/api/v1/cashbox/sessions/{opened['id']}/close",
+        headers=headers,
+        json={"counted_cash": "0.00"},
+    )
+    primera = client.post(
+        f"/api/v1/cashbox/sessions/{opened['id']}/reopen",
+        headers=headers,
+        json={"reason": "faltó registrar un gasto"},
+    )
+    assert primera.status_code == 200, primera.text
+
+    segunda = client.post(
+        f"/api/v1/cashbox/sessions/{opened['id']}/reopen",
+        headers=headers,
+        json={"reason": "doble clic"},
+    )
+    assert segunda.status_code == 409
+    body = segunda.json()
+    assert body["code"] == "CASH_SESSION_NOT_CLOSED"
+    # El `details` lleva la sesión y su estado para que el front no tenga que
+    # adivinar a qué turno se refiere.
+    assert body["details"]["session_id"] == opened["id"]
+    assert body["details"]["status"] == "open"
+
+
 def test_expense_without_open_session_is_409(client: TestClient, cashbox_tenant: dict) -> None:
     headers = _headers(cashbox_tenant["token"])
     category = client.post(
