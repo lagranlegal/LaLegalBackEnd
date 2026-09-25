@@ -45,6 +45,101 @@
 
 ---
 
+## Dos defectos anotados el 24/09 — cerrados el 25/09/2026
+
+Los dos venían anotados sin número: uno en la medición de F21-14 (abajo, «Movimientos contra cuentas `bank`
+fuera del INNER JOIN») y otro suelto. Toman los dos números libres siguientes: **F21-33 ya estaba tomado**
+(la devolución que le paga de más al cliente), así que son F21-34 y F21-35.
+
+### ✅ F21-35 · MEDIO — El desglose de cierres perdía lo cobrado por banco con la caja cerrada
+
+**La causa no era el tipo de cuenta, era la hora.** `closings_breakdown` hacía `INNER JOIN` con
+`cash_session` (`app/modules/reports/repository.py:165` antes del arreglo — no `:156` como decía la
+medición de F21-14: la cita ya había envejecido). Y el `session_id` de un movimiento que no es de una cuenta
+`cash` no significa nada: `resolve_account_for_movement` le cuelga **la sesión que haya abierta, o `NULL`
+si no hay** (`app/modules/cashbox/integration.py:250`; los traslados y la liquidación hacen lo mismo en
+`accounts/service.py:241` y `:411`). Resultado: la misma venta por transferencia contaba en «Ventas» a las
+10 a. m. y desaparecía del reporte para siempre si se hacía después del cierre.
+
+**La medición que decidió el arreglo** (dev remota, `BEGIN TRANSACTION READ ONLY`, solo agregados, todas
+las empresas):
+
+| Movimientos contra cuentas que no son `cash` | n | Monto |
+|---|---|---|
+| `bank` con sesión cerrada — **ya adentro** del desglose | 12 | $6.512.222 |
+| `settlement` con sesión cerrada — **ya adentro** | 5 | $5.500.000 |
+| `bank` con sesión todavía abierta — entrarán al cerrar | 10 | $5.431.000 |
+| `bank` **sin sesión — afuera** | **2** | **$5.060.000** |
+
+Los dos de afuera: un **aporte del dueño** de $5.000.000 (13/09, día **sin** turno) y un **desembolso de
+préstamo por transferencia** de $60.000 (10/09, día que sí tuvo turno cerrado — se registró antes de abrir o
+después de cerrar). Entre los de adentro hay una venta por banco de $750.000 y $3.222.222 prestados por
+transferencia: **el desglose nunca fue "del cajón"**, ya mezclaba cuentas.
+
+**Qué se decidió y por qué.** La pregunta del encargo era legítima: el banco no se arquea, así que quizá un
+movimiento de banco no pertenece a un desglose de *cierre de caja*. La medición la contestó:
+
+- **Excluir los no-`cash`** habría sido coherente, pero sacaba 17 movimientos ($12.012.222) que hoy se ven,
+  incluida la venta por banco de «Ventas» y lo prestado por transferencia de «Capital desembolsado». Esos KPI
+  se alejarían del **estado de resultados**, que sale de documentos y ya cuenta esa venta sin mirar turnos.
+- **Mostrarlos aparte** no resolvía nada: el mismo concepto (un préstamo por transferencia) caería en el KPI
+  o en la sección aparte según la hora, que es exactamente el defecto.
+- **Incluirlos por su fecha** (lo elegido): un movimiento sin sesión de una cuenta que **no** es `cash` cae en
+  el día de la empresa en que se registró (`created_at` en su zona) — la fecha que habría tenido su turno.
+  `LEFT JOIN` + `cs.status = 'closed' or (m.session_id is null and a.type <> 'cash')`.
+- **Los `adjustment` sin sesión del cajón siguen afuera** (26 en dev, $20.813.100): son la apertura y el
+  arqueo, nacen sin sesión a propósito, y F21-14 ya los reporta desde el acta. Sumarlos acá los contaría dos
+  veces en la misma pantalla.
+
+**Y no crea una cuarta definición de «ingreso»** (F21-12, F21-13): `aggregate.ts` no se tocó y ningún concepto
+cambia de lado. Lo único que cambia es qué movimientos llegan.
+
+**El arreglo propuesto también se midió antes de darlo por bueno**, con la consulta nueva contra la vieja
+sobre los mismos datos: de 79 movimientos / $41.609.222 a **81 / $46.669.222**. La diferencia son
+exactamente los dos de arriba (`bank · loan_disbursed` +1 / +$60.000, `bank · owner_contribution` +1 /
++$5.000.000), **cero ajustes** y **cero conceptos de ingreso**. En pantalla: +$60.000 en «Capital
+desembolsado» y +$5.000.000 en «Entradas» del flujo (que ya incluye capital, por diseño).
+
+**Test** `test_desglose_incluye_lo_cobrado_por_banco_con_la_caja_cerrada` (`tests/integration/test_reports.py`),
+visto fallar con el código viejo (`assert 0 == 1`): abre contando distinto (ajuste de apertura), cierra con
+faltante (ajuste de arqueo), vende por transferencia con la caja cerrada. Verifica que la venta llega en su
+día, que ninguno de los dos ajustes llega, y que el rango filtra por esa misma fecha.
+
+**Dudoso, sin tocar:**
+- Una transferencia registrada **hoy antes de abrir** aparece en el desglose de hoy aunque el día no haya
+  cerrado. Es verdad (la plata entró) y coincide con el estado de resultados; lo del cajón de hoy sigue
+  esperando el cierre, como siempre.
+- Un rango **sin ningún cierre** pero con líneas de banco sigue mostrando «No hay cierres de caja en este
+  rango» en el front (`ReportesPage.tsx`). Es un período entero sin abrir caja; cambiar esa rama es cambiar
+  qué es la pantalla.
+
+### ✅ F21-34 · BAJO — Reabrir una sesión ya abierta respondía un `CONFLICT` genérico
+
+`reopen_session` (`app/modules/cashbox/service.py:423`, antes del arreglo) hacía
+`raise ConflictError("Solo se puede reabrir una sesión cerrada.")` sin `code=`, así que viajaba como
+`CONFLICT`. Y la pantalla de Caja respondía a **todo** error de reabrir con «No se pudo reabrir la caja.
+Intenta de nuevo.» — mandaba a repetir algo que ya estaba hecho. El botón solo aparece con la caja de hoy
+cerrada, pero el caso es real: un doble clic, o una segunda pestaña sin refrescar.
+
+- **Código nuevo: `CASH_SESSION_NOT_CLOSED` (409)**, simétrico de `CASH_SESSION_NOT_OPEN`. No se reusó
+  `CASH_SESSION_ALREADY_OPEN`: al reabrir, ese significa **otra** sesión abierta, y pide otra acción
+  (cerrarla primero).
+- Mensaje: *«Esta sesión de caja ya está abierta: no hay nada que reabrir. Registra lo que falte directamente
+  en el turno abierto.»* `details: {session_id, status}`.
+- Catálogo `API_GUIDE.md` §15 y la fila del endpoint actualizados; `test_error_catalog.py` lo habría exigido
+  igual (falló en la primera corrida completa, antes de documentarlo).
+- **Front:** `CASH_SESSION_NOT_CLOSED` en `lib/api/errors.ts`, `reopenSessionErrorMessage` deja pasar el
+  mensaje del backend, y ante ese código se refresca el estado de la caja.
+- **Tests, mirando el código:** `test_reabrir_una_sesion_que_ya_esta_abierta_tiene_codigo_propio`
+  (`tests/integration/test_cashbox.py`), visto fallar con `'CONFLICT' == 'CASH_SESSION_NOT_CLOSED'`; en el
+  front, 5 casos en `tests/error-codes-contract.test.ts` con el sobre copiado de la respuesta real de ese
+  test, los 5 vistos fallar.
+
+**Estado: 547 tests backend en verde, 0 saltados**; `ruff`, `format` y `mypy` limpios. Front: 260 tests,
+`typecheck` y `lint` limpios, `build` ok. **Falta desplegar** los dos.
+
+---
+
 ## Tanda de defectos abiertos — 23/09/2026 (once cerrados, uno nuevo de plata)
 
 Se atacó la serie F20-xx / F21-xx que quedaba abierta, repartida en tres frentes en paralelo: los
@@ -265,7 +360,8 @@ pero **no sirven para estimar producción**.
   **Y el INNER JOIN se traga algo más:** un movimiento contra una cuenta **`bank`** no exige sesión (correcto
   — lo exige el tipo de cuenta), nace con `session_id = NULL` y **queda fuera del reporte para siempre**.
   Medido: 2 movimientos, $5.060.000. Arreglar eso exige rediseñar la ventana del reporte («sesiones
-  cerradas» → «período») y es su propio ítem.
+  cerradas» → «período») y es su propio ítem. **→ Cerrado el 25/09/2026 como F21-35** (arriba): no hizo
+  falta rediseñar la ventana, solo fechar por su día lo que no tiene turno.
 - **F21-15 → cero casos.** Una sola anulación en toda la base, vendida y anulada **el mismo mes**; 0 de 5
   devoluciones cruzaron de mes. El escenario nunca ocurrió. Y la parte difícil no es el filtro SQL: la opción
   barata (bloquear la anulación tardía, reusando el patrón de `SALE_HAS_RETURNS`) **depende de una definición
@@ -1211,7 +1307,7 @@ memoria para contar sesiones. Cero backend.
 - **«Cierres sin motivo»** no se agregó: el backend rechaza cerrar con diferencia y sin
   `difference_reason` (`service.py:355`), así que el número sería siempre 0.
 - **Movimientos contra cuentas `bank` fuera del INNER JOIN** (medido: 2 movimientos, $5.060.000) — sigue
-  abierto como ítem propio, ver la medición de arriba.
+  abierto como ítem propio, ver la medición de arriba. **→ Cerrado el 25/09/2026 como F21-35.**
 
 ### F21-15 · MEDIO — Un mes ya cerrado cambia hacia atrás
 
