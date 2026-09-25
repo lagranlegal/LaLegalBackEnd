@@ -97,6 +97,16 @@ Regla dura (CLAUDE.md): **un módulo no importa el `service` de otro módulo.** 
 
 `repository.py` no sabe nada de reglas de negocio — solo ejecuta SQL y devuelve filas. Toda decisión ("¿puede quitarse este permiso?", "¿hay que auditar esto?") vive en `service.py`.
 
+### Trabajo DESPUÉS del commit: `BackgroundTasks` no alcanza solo (24/09/2026)
+
+Desde la fase 2 de avisos (`NOTIFICACIONES.md` §16) hay endpoints que, después de escribir, tienen que hacer algo **fuera** de la transacción: mandar el correo de una invitación. La regla es la de `NOTIFICACIONES.md` §5.1 —la fila en la transacción, la llamada HTTP afuera— y la herramienta obvia es `BackgroundTasks`. **Pero en FastAPI 0.141 las tareas de fondo corren ANTES del commit.** La salida de una dependencia con `yield` (el `session.begin()` de `get_db`, que es quien commitea) y la respuesta con sus `background` viven en el mismo `AsyncExitStack` del request, y la respuesta se ejecuta adentro. Una tarea de fondo que abre otra conexión busca filas que todavía no existen para nadie.
+
+No falla: simplemente no encuentra nada y el trabajo queda para el job de la noche. Por eso se descubrió con un test y no en producción (`test_invitation_goes_out_through_our_mail_right_after_commit`, que se vio fallar sin el arreglo).
+
+**Regla:** un endpoint que agenda trabajo post-commit llama `notifications.dispatcher.send_after_commit(db, background, …)` como **última** acción: hace `await db.commit()` explícito y recién ahí agenda la tarea. Commitear al final no parte la operación —ya se escribió todo— y el `session.begin()` de la dependencia sale limpio con la transacción ya cerrada (verificado). Se descartó cambiar el alcance de `get_db` a `Depends(scope="function")`: tocaría la dependencia de TODOS los endpoints para arreglar dos.
+
+**Excepción consciente a la regla de capas:** los routers de `identity` y `platform` importan `notifications.dispatcher`, no una `integration`. Ponerlo en `notifications.integration` cerraba un ciclo de imports (`notifications.integration → dispatcher → identity.integration → notifications.integration`), porque el despachador necesita a `identity` para pedir un enlace nuevo cuando reintenta una invitación.
+
 ## 5. Autenticación y autorización
 
 - **Autenticación** = "¿este JWT es válido?" — `app/core/security.py::decode_token` + `get_verified_claims`. No toca la base de datos.
@@ -250,7 +260,7 @@ Regla del proyecto desde entonces: ninguna regla de negocio con fecha usa `date.
 1. `contracts.service.recompute_all_statuses(db)` — recorre los contratos no terminales de TODAS las empresas y recalcula su estado (`app/modules/contracts/rules.py::compute_status`) contra el "hoy" de cada empresa. Ya existía desde el paso 5 pero nadie lo invocaba; el job es lo que lo vuelve real.
 2. `platform.service.expire_overdue_subscriptions(db)` — marca `expired` las suscripciones cuyo `expires_at` ya pasó (según el "hoy" de esa empresa) y audita el cambio. Esto es lo que de verdad bloquea acceso: `security.get_current_user` rechaza con `402 SUBSCRIPTION_EXPIRED` en cuanto `subscription.status` deja de ser `active` — sin este job, una suscripción vencida seguiría dando acceso indefinidamente porque el chequeo en cada request compara contra el `status` persistido, no recalcula `expires_at` al vuelo.
 3. `notifications.digest.build_all_digests(now=...)` — el resumen a la empresa (`docs/NOTIFICACIONES.md` §2.4, §15). **Va después del paso 1 a propósito:** "entró en mora" y "listo para remate" se leen del estado que ese paso acaba de persistir. Una transacción **por empresa**: la falla de una se registra y no revierte las demás. Registra el resumen diario de cada empresa activa **salga o no** — así *"¿corrió anoche?"* se contesta desde la base: `select max(occurred_on) from notification_event`.
-4. `notifications.dispatcher.dispatch_due(provider=...)` — manda las entregas pendientes, fuera de toda transacción de negocio. **Sin `RESEND_API_KEY` no falla:** las entregas quedan `skipped_no_provider`. Toma su propio reloj después del paso 3 (las entregas recién creadas nacen con `scheduled_at = now()` de la base).
+4. `notifications.dispatcher.dispatch_due(provider=...)` — manda las entregas pendientes, fuera de toda transacción de negocio. **Sin `RESEND_API_KEY` no falla:** las entregas quedan `skipped_no_provider`. Desde la fase 2 también reintenta las **invitaciones** que no salieron en el request: para esas pide a Supabase un enlace nuevo (el token nunca se guarda) — `NOTIFICACIONES.md` §16. Toma su propio reloj después del paso 3 (las entregas recién creadas nacen con `scheduled_at = now()` de la base).
 
 > **La máquina del job desapareció entre el 27/08 y el 08/09/2026, y nadie se enteró.** La encontró la auditoría de QA: `fly machines list` devolvía una sola máquina, la del process group `app`. La causa más probable es la limpieza de infraestructura del 27/08, que borró «una máquina huérfana, fuera del process group, sin deploys desde el 17/08» — que es **exactamente** el perfil de esta máquina, porque estar fuera del fleet de `fly deploy` es justo su diseño.
 >

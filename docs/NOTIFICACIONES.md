@@ -196,7 +196,7 @@ La excepción al resumen diario. Cuatro actos, y el criterio para que estén ac�
 
 | # | Evento | Estado hoy |
 |---|---|---|
-| P1 | **Invitación de usuario** | **Ya existe**, lo manda Supabase Auth. Es lo primero que se migra a Resend, porque es lo que se está rompiendo con `INVITE_RATE_LIMITED` |
+| P1 | **Invitación de usuario** | ~~Lo manda Supabase Auth~~ **Migrada a Resend en la fase 2 (24/09/2026, §16).** Supabase queda de respaldo si la plataforma no tiene proveedor |
 | P2 | **Enlace de acceso** (`generate_recovery_link`) | **Se queda como está: se pasa a mano, por WhatsApp.** Y no es pereza — ver §9.3 |
 
 ---
@@ -782,7 +782,85 @@ nuevas en `reports/integration.py`. El job nocturno tiene ahora cuatro pasos (AR
 
 - Ningún evento al cliente tiene **productor** salvo `auction_ready_customer` (§14 lo pide probado encendido y apagado): C1–C7 y R1–R4 están en catálogo y plantilla, sin disparo.
 - Webhook de Resend (`delivered`/`bounced`, `customer.email_invalid_at`), `resend_notification`, enlace de baja, `email_basis` y `EmailStr` del cliente: fase 3.
-- `BackgroundTasks` para los transaccionales (§5.1): no hay transaccionales todavía.
-- Pantalla del front y la etiqueta nueva de auditoría: no hace falta etiqueta, se reusó la acción `update_settings`.
+- `BackgroundTasks` para los transaccionales (§5.1): no hay transaccionales todavía. → Lo estrenó la invitación en la fase 2, y el diseño no sobrevivió intacto: §16.2-1.
+- ~~Pantalla del front~~ **Ya existe** (corregido el 24/09/2026): `/configuracion/notificaciones`, commit `5146ee1` de `frontend-starter`. La etiqueta nueva de auditoría no hace falta: se reusó la acción `update_settings`.
 - **Verificado en vivo** (§14, último punto): pendiente — exige la key en Fly y un correo real recibido en Gmail y Outlook.
 - **Por verificar antes de encender al cliente:** que los horarios y el «uno por semana» sean los de la Ley 2300 (son mi lectura de la ley, no un concepto); y el tope diario del plan de Resend (§10).
+
+---
+
+## 16. Fase 2 — lo implementado (24/09/2026)
+
+**Sin migración.** Todo cupo en `00058`: el tipo `user_invitation` ya estaba en el catálogo (`audience='platform'`),
+`notification_delivery.recipient_user_id` ya existía y los estados alcanzaban. Commit `fbf7b8a`.
+
+**Código:** `identity/auth_admin.py` (el `Invitation` trae `hashed_token` e `invited_at`; `invitation_email_link`;
+`auth_user_exists`), `identity/integration.py` (la decisión de canal y `fresh_invitation_link`),
+`notifications/integration.py` (nuevo), `notifications/dispatcher.py` (`dispatch_delivery`, `send_after_commit` y el
+paso propio de la invitación), `templates.render_user_invitation`, `preferences.event_enabled`, y los routers de
+`identity` y `platform`. Tests: `tests/integration/test_invitation_email.py` (13) y
+`tests/unit/test_user_invitation_mail.py` (15).
+
+### 16.1 · Qué quedó
+
+**El flujo, con `send_email: true` (el default de `POST /identity/invitations`):**
+
+```
+request ── ¿hay RESEND_API_KEY y FRONTEND_URL? ──no──► POST /auth/v1/invite  (correo de Supabase, como antes)
+                   │ sí
+                   ▼
+      POST /auth/v1/admin/generate_link  (type=invite, SIN correo → id, hashed_token, invited_at)
+      ┌─ transacción de la invitación ───────────────────────────────────────────┐
+      │ app_user (invited) + audit_log (delivery: "email")                       │
+      │ notification_event (user_invitation, payload {}) + delivery (pending)    │
+      └─ COMMIT explícito (§16.2-1) ─────────────────────────────────────────────┘
+                   ▼
+      BackgroundTasks → dispatch_delivery(id, enlace EN MEMORIA) → Resend → sent | failed
+                   ▼  (si no salió)
+      job nocturno → ¿sigue invited? → ¿existe la cuenta en Auth? → generate_link NUEVO → Resend
+```
+
+| Pieza | Cómo quedó |
+|---|---|
+| **El enlace del correo** | `{FRONTEND_URL}/auth/callback?token_hash=<hashed_token>&type=invite` — **la misma forma** que ya entrega «Generar enlace» (`auth_admin._app_link`). `/auth/callback` lo canjea con `verifyOtp({token_hash, type})`, un POST. Nunca el `action_link` de GoTrue (`/auth/v1/verify?token=…`), que es el GET de un solo uso que los escáneres queman (03/09/2026). **La plantilla lo hace cumplir**: si el enlace no es `/auth/callback?token_hash=…`, o trae `/auth/v1/verify` o un `#`, no redacta (`ValueError` → `dead`). Es el último punto por donde pasa todo correo, así que el candado vale aunque un productor futuro se equivoque |
+| **El token no se guarda nunca** | Ni en `payload` (va vacío), ni en `last_error`, ni en `audit_log`. El envío inmediato lo recibe en memoria. Un test busca el token en todas las columnas de la entrega y del evento |
+| **El job como red** | Si el envío inmediato no ocurrió (máquina apagada, §5.1) o falló, la entrega queda `pending`/`failed` y el barrido la toma. Como no hay token guardado —y aunque lo hubiera, `otp_expiry` es de 1 h en la config local de Supabase—, el despachador pide uno **nuevo** para la misma cuenta. Antes comprueba dos cosas, en este orden: que el `app_user` siga `invited` (si ya entró por «Generar enlace» o lo desactivaron → `suppressed`, sin llamar a Supabase) y que la cuenta de Auth exista (`GET /auth/v1/admin/users/{id}`; si no → `dead`, §16.2-9) |
+| **Regenerar con `invite`, no con `recovery`** | Verificado contra GoTrue v2.195.0 local: regenerar un tipo invalida **solo** los tokens anteriores de ese tipo (`invite` nuevo ⇒ el `invite` viejo da 403 `otp_expired`; un `recovery` generado en medio no afecta al `invite`, y viceversa). «Generar enlace» usa `recovery` para rescatar a un invitado: si el job regenerara `recovery`, **mataría el enlace que el admin quizá ya mandó por WhatsApp** mientras el correo esperaba. P2 no se toca (§2.6) |
+| **Resultados de Supabase al regenerar** | 422 `email_exists` (la persona ya puso contraseña pero todavía no hizo un request que la pase a `active`) → `suppressed`. 429 o 5xx → reintentable, **con el mismo contador y backoff** que un fallo de Resend (+1 h/+6 h/+24 h, `dead` al cuarto). Sin `FRONTEND_URL` → `dead` |
+| **Sin proveedor (decisión)** | **La invitación vuelve al correo de Supabase de siempre**, y se decide ANTES de llamar a Supabase: la llamada misma cambia (`/invite` manda correo, `generate_link` no). Descubrirlo después dejaría una cuenta creada con un enlace que nadie recibe. Lo mismo sin `FRONTEND_URL`: no hay enlace seguro que armar, y un `action_link` en un correo es peor que el correo de Supabase (que al menos es el comportamiento conocido). Queda dicho en tres lugares: `invite_delivery: "email_supabase"` en la respuesta, `delivery: "email_supabase"` en el `audit_log`, y **ningún** evento en `notification_event` (§16.2-7) |
+| **Por qué no `skipped_no_provider`, como el resumen** | Porque las consecuencias no se parecen. Un resumen que no sale es un correo de menos; una invitación que no sale es **una persona que no puede entrar**, y el admin, que ya vio «invitado», no tiene cómo saberlo. Volver a Supabase conserva el límite de siempre (`INVITE_RATE_LIMITED`), pero ese sí es ruidoso: el admin ve el 429 en el momento |
+| **El interruptor de la empresa** | **No gobierna los eventos de plataforma.** `preferences.event_enabled` y `event_setting` devuelven el `default_enabled` del catálogo para `audience='platform'`, ignorando `enabled` y cualquier override en el jsonb (§16.2-5). Una sola línea de verdad, que usan `record_event`, el despachador y el `GET /notifications/settings` (`effective: true`) |
+| **Idempotencia** | `dedupe_key = invitation:<user_id>:<invited_at>`. El usuario solo no alcanza: una segunda invitación a la misma persona (hoy la bloquea `USER_ALREADY_INVITED`, pero «reenviar invitación» es la evolución obvia) es un hecho **nuevo**, y `on conflict do nothing` se la tragaría en silencio. `invited_at` lo pone GoTrue en cada invitación (respuesta real de `generate_link`), así que la misma invitación da la misma llave y la siguiente otra. Sin `invited_at`, cae a `invitation:<user_id>` |
+| **Idempotency-Key de Resend** | `delivery-<id>` en el envío inmediato; **`delivery-<id>-a<intento>` cuando el enlace se regeneró** (§16.2-4) |
+| **Remitente y plantilla** | `"Prendo" <notificaciones@prendo.com.co>`, sin `(vía …)` y sin `Reply-To` (§8: la contraparte de un usuario es Prendo). Asunto `Invitación a <Empresa> en Prendo`. Cuerpo en *usted*, como el resto: saludo con el nombre de pila, qué es, botón «Crear mi contraseña», el enlace en texto plano, «sirve una sola vez y vence en poco tiempo; si ya no funciona, pídale a quien lo invitó en <Empresa> uno nuevo», y «si no esperaba esta invitación, ignórelo». **Solo** el nombre de la empresa y el del invitado: ni teléfono ni `footer_note` del inquilino, ni rol, ni quién invitó. Texto + HTML, todo valor escapado |
+| **Alta de empresa** | `POST /platform/companies` con `send_email: true` pasa por la misma `identity.integration.invite_user`, así que hereda todo. El default sigue siendo `false` (el enlace vuelve en `admin_invite_link`) |
+| **«Generar enlace» (P2)** | Sin cambios: `send_email: false` no crea evento ni correo, y `POST /users/{id}/recovery-link` no se tocó |
+| **Respuesta** | `InvitedUserOut.invite_delivery`: `link` \| `email` \| `email_supabase`. Aditivo; el front puede usarlo para decirle al admin por dónde buscar si «no llegó» |
+
+**Operación — lo que hace falta en Fly para que esto se encienda:** `RESEND_API_KEY` **y** `FRONTEND_URL` como secretos
+**de la app del API** (no solo del job): el envío inmediato corre en el proceso web. Sin cualquiera de las dos, todo
+sigue como antes (correo de Supabase). No hay interruptor por empresa que encender.
+
+### 16.2 · Discrepancias: dónde el código contradijo este documento (y ganó)
+
+1. **§5.1 «el envío va en un `BackgroundTasks`, después del commit» no es cierto por defecto.** En FastAPI 0.141 la salida de la dependencia con `yield` —el `session.begin()` de `get_db`, que es quien commitea— corre **después** de las tareas de fondo: las dos viven en el mismo `AsyncExitStack` del request (`fastapi/routing.py`, `request_response`). El despachador, en otra conexión, no veía la entrega, no mandaba nada, y el correo esperaba al job. **Silencioso**: el test lo cazó (se vio fallar sin el arreglo). Arreglo: `dispatcher.send_after_commit` hace `db.commit()` explícito y recién ahí agenda. Descartado: cambiar `get_db` a `Depends(scope="function")`, que toca todos los endpoints para arreglar dos. Anotado en `ARCHITECTURE.md` §4 como regla para el próximo productor transaccional.
+2. **§4.1 dice que los eventos de plataforma «se escriben con la sesión de bypass».** La invitación desde `identity` se escribe con la sesión **tenant** (RLS encima): su `company_id` es la del admin que invita, y `tenant_isolation` la deja pasar. Solo el alta de empresa escribe con bypass. Es mejor así: un bug no puede escribir la invitación en otra empresa.
+3. **§4.1 «el payload lleva lo mínimo para redactar»: acá no puede.** Lo único imprescindible para redactar una invitación es el enlace, y el enlace es una credencial que vence. El payload va **vacío**; el nombre se lee de `app_user` al enviar y el enlace llega en memoria o se regenera.
+4. **§15.1 «`Idempotency-Key` de Resend = la entrega» no sirve para la invitación reintentada.** Con el enlace regenerado el cuerpo es otro, y Resend responde **409 `invalid_idempotent_request`** si una llave se reusa con otro payload dentro de 24 h (documentación de Resend, «Idempotency keys») — la invitación iría a `dead`. La llave es por intento. **El costo, dicho:** si un envío sí salió pero el proceso murió antes de registrarlo (`sending` colgado), el reintento manda un segundo correo con otro enlace, y el primero queda muerto (regenerar `invite` mata el anterior). La persona recibe dos; el último sirve, y el primero, al abrirlo, dice «Este enlace ya se usó».
+5. **§15.2-5 «el interruptor de empresa gobierna TODO».** Para la plataforma, no: ver §16.1. El argumento de §15.2-5 —el deploy no puede empezar a escribirle solo a 7 empresas— no aplica, porque la invitación no la dispara el deploy: la dispara un admin, invitando.
+6. **§15.1 «sin key → `skipped_no_provider` y el job sigue».** Para la invitación la decisión es previa (Supabase manda el correo). Queda un único caso donde una invitación termina `skipped_no_provider`: la key se quitó **entre** la invitación y el reintento del job. En ese caso el despachador **no** regenera el enlace (mataría el anterior para no mandar ninguno) y la invitación queda muda; el admin la rescata con «Generar enlace». Caso de borde, aceptado.
+7. **§4.1 «el hecho se escribe SIEMPRE, incluso sin por dónde avisar» — no en el respaldo por Supabase.** En este sistema un evento sin entregas significa «apagado» (§4.3). Registrar la invitación que mandó Supabase como un evento sin entrega diría lo contrario de lo que pasó. El rastro de ese caso es el `audit_log` (`delivery: "email_supabase"`), que ya existía.
+8. **§6.1 no tenía llave para la plataforma.** Quedó `invitation:<user_id>:<invited_at>` (§16.1).
+9. **Un hallazgo que el diseño no preveía: `generate_link` con `type=invite` sobre una cuenta borrada desde el panel de Supabase no falla — crea otra**, con otro id, huérfana (ningún `app_user` la referencia) y que bloquea ese correo para invitaciones futuras (`EMAIL_ALREADY_REGISTERED`). Por eso el job pregunta primero `GET /auth/v1/admin/users/{id}` (404 `user_not_found`, respuesta real) y, si no existe, deja la entrega `dead` con el motivo (`AUTH_ACCOUNT_MISSING`), sin llamar a `generate_link`.
+10. **§8 «correos de la plataforma: remitente Prendo, sin nombre de inquilino»** — el remitente sí; el **asunto y el cuerpo** llevan el nombre de la empresa. Es lo único que la persona reconoce («me invitaron a la compraventa donde trabajo»); un correo de «Prendo» a secas, de una marca que nunca oyó, es exactamente el que §8 dice que se lee como phishing.
+
+### 16.3 · Lo que NO quedó, y lo dudoso
+
+- **Riesgo residual del enlace, en el FRONT (no se tocó: hay otro agente ahí).** `AuthCallbackPage` canjea el `token_hash` **al montar** (`useEffect` → `verifyOtp`), sin que la persona toque nada. El POST protege contra lo que hace GET y no ejecuta JavaScript (vista previa de WhatsApp/Telegram, la mayoría de escáneres). **No protege contra un escáner que abra la página en un navegador real y ejecute el JS** — lo que hacen algunos sandboxes corporativos (Outlook Safe Links con «detonación», antivirus de gateway). Ese escáner quemaría el enlace igual que el `action_link`. **No verificado** si alguno de los buzones reales de los clientes hace eso. La mitigación es del front: pedir un clic («Continuar») antes de `verifyOtp`. Queda anotado para quien consolide.
+- **El respaldo por Supabase conserva los dos problemas de siempre**: su plantilla lleva el `action_link` (quemable) y depende de la lista de Redirect URLs (`RUNBOOK_USUARIOS.md` §3). Solo aplica sin `RESEND_API_KEY`/`FRONTEND_URL`.
+- **Verificado en vivo: pendiente.** Exige los dos secretos en Fly y un correo real recibido en Gmail y Outlook (§14). No se desplegó nada.
+- **Suposición no verificada: que `generate_link` no tenga su propio límite en el proyecto hosted.** En local, varias llamadas seguidas respondieron sin 429; el límite conocido (`INVITE_RATE_LIMITED`) es el del envío de correo. Si el hosted limitara también `generate_link`, el 429 sigue saliendo como `INVITE_RATE_LIMITED` en el request (mismo contrato que antes) y como reintento en el job.
+- **Suposición no verificada: la duración real del token en dev/prod.** `otp_expiry = 3600` es la config LOCAL (`supabase/config.toml`); no miré la del proyecto hosted. El correo no promete una duración («vence en poco tiempo») por eso mismo.
+- **El front no muestra `invite_delivery`.** El diálogo de invitar sigue sin decir por dónde salió.
+- **`RUNBOOK_USUARIOS.md` (raíz) quedó desactualizado** en sus filas de «No llega el correo» / `INVITE_RATE_LIMITED`: con proveedor, el correo ya no depende del SMTP de Supabase. No lo toqué (está fuera del repo y lo consolida Mateo).
+- **Webhook de Resend** (`delivered`/`bounced`): sigue en la fase 3. Una invitación a una dirección mal escrita queda `sent` y nadie se entera — el admin lo notará porque la persona no aparece.

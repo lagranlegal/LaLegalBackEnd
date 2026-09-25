@@ -43,7 +43,7 @@ Este backend **no tiene login propio**. El front habla directo con Supabase Auth
 2. El front guarda el `access_token` y lo manda como `Authorization: Bearer <access_token>` a **este** backend.
 3. **Altas son solo por invitación** (signups públicos desactivados). El flujo es: un admin invita (`POST /api/v1/identity/invitations`, ver §4) → la persona recibe un enlace → pone su contraseña → puede hacer login normalmente. La primera vez que ese usuario le pega a cualquier endpoint del backend con un token válido, su estado pasa de `invited` a `active` automáticamente (no hace falta un endpoint de "aceptar invitación").
 
-   **El enlace apunta a la app, no a Supabase** (03/09/2026): `{FRONTEND_URL}/auth/callback?token_hash=<hashed_token>&type=invite|recovery`, y el front lo canjea con `verifyOtp` — un **POST**. Antes se entregaba el `action_link` de GoTrue, que es un GET de un solo uso: cualquier generador de vista previa (WhatsApp, Telegram, Slack) o escáner de correo lo quemaba con solo pedir la URL, y la persona llegaba a un enlace muerto. Ver `RUNBOOK_USUARIOS.md` en la raíz del proyecto. El correo de invitación de Supabase (`send_email: true`) sigue usando su propia plantilla y **no** tiene esta protección todavía.
+   **El enlace apunta a la app, no a Supabase** (03/09/2026): `{FRONTEND_URL}/auth/callback?token_hash=<hashed_token>&type=invite|recovery`, y el front lo canjea con `verifyOtp` — un **POST**. Antes se entregaba el `action_link` de GoTrue, que es un GET de un solo uso: cualquier generador de vista previa (WhatsApp, Telegram, Slack) o escáner de correo lo quemaba con solo pedir la URL, y la persona llegaba a un enlace muerto. Ver `RUNBOOK_USUARIOS.md` en la raíz del proyecto. **Desde la fase 2 de avisos (24/09/2026) el correo de invitación también lleva este enlace**: lo manda Prendo por Resend, no Supabase (`NOTIFICACIONES.md` §16). El correo de Supabase, con su propia plantilla y **sin** esta protección, queda solo como respaldo cuando la plataforma no tiene `RESEND_API_KEY` o `FRONTEND_URL` (`invite_delivery: "email_supabase"`).
 4. **Refresh**: `POST {SUPABASE_URL}/auth/v1/token?grant_type=refresh_token` con el `refresh_token` — maneja el front, este backend ni se entera.
 5. Un JWT trae (además de lo estándar `sub`, `exp`, `aud`) los claims `company_id` y `role_id` **solo si** el usuario tiene una fila activa en `app_user` de una empresa activa (los inyecta el Custom Access Token Hook en Supabase). Si el backend responde `401 UNAUTHORIZED` con un token que por lo demás es válido, casi siempre es por esto — revisar que el usuario esté `active` y su empresa también.
 6. **`GET /api/v1/me`** — llamarlo justo después del login, antes de renderizar nada. Cualquier usuario autenticado (sin exigir un permiso específico — es información sobre sí mismo):
@@ -103,7 +103,7 @@ Authorization: Bearer <token con app_metadata.platform_role=super_admin>
   "plan_code": "full", "plan_name": "Completo", "subscription_expires_at": "2027-01-01"
 }
 ```
-El admin invitado recibe un correo de Supabase Auth; hasta que no active su cuenta, aparece en `GET /api/v1/identity/users` con `status: "invited"`.
+Con `send_email: false` (el default) el enlace del primer admin vuelve en `admin_invite_link` y lo entrega el super-admin. Con `send_email: true` sale el correo de invitación de Prendo, igual que al invitar desde `identity` (§4) — o el de Supabase si la plataforma no tiene proveedor. Hasta que no active su cuenta, aparece en `GET /api/v1/identity/users` con `status: "invited"`.
 
 `CompanyOut` (creación, detalle y listado) siempre trae `plan_code`/`plan_name`/`subscription_expires_at` de la suscripción `active` actual — `null` los tres si la empresa no tiene ninguna suscripción activa (recién creada sin insertarla nunca, o vencida). `PlanOut` trae `modules: {"pawn": bool, "store": bool}` además de `{id, name, code, price, active}`.
 
@@ -114,7 +114,7 @@ Todo tenant-scoped: solo ve/afecta datos de la empresa del usuario autenticado (
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
 | `GET` | `/api/v1/identity/users` | `identity.manage_users` | Lista usuarios de la empresa (paginado). |
-| `POST` | `/api/v1/identity/invitations` | `identity.manage_users` | Invita un usuario nuevo. Body `{email, full_name, role_id}` → 201 con el usuario en `status: "invited"`. |
+| `POST` | `/api/v1/identity/invitations` | `identity.manage_users` | Invita un usuario nuevo. Body `{email, full_name, role_id, send_email?}` → 201 con el usuario en `status: "invited"`, más `invite_link` e `invite_delivery` (ver abajo). Errores: `USER_ALREADY_INVITED` / `USER_ALREADY_EXISTS` (409), `EMAIL_ALREADY_REGISTERED` (409), `INVITE_RATE_LIMITED` (429, solo en el respaldo por Supabase), `AUTH_ADMIN_ERROR` (502). |
 | `POST` | `/api/v1/identity/users/{id}/recovery-link` | `identity.manage_users` | **Enlace para volver a poner la contraseña, sin mandar correo.** Mismo mecanismo que `send_email: false` al invitar (`generate_link`, `type=recovery`): no consume cuota y el admin lo entrega a mano. Devuelve `{user_id, email, recovery_link}`. **Es una credencial de un solo uso** — quien la tenga puede cambiar esa contraseña y entrar como esa persona; queda auditado quién la generó y para quién, y el enlace NO se guarda en el `audit_log`. Rechaza usuarios inactivos (`409`): darles el enlace sería deshacer la desactivación por la puerta de atrás. |
 | `PATCH` | `/api/v1/identity/users/{id}/role` | `identity.manage_users` | Reasigna de rol. Body `{role_id}`. |
 | `POST` | `/api/v1/identity/users/{id}/deactivate` | `identity.manage_users` | → 204. |
@@ -125,6 +125,16 @@ Todo tenant-scoped: solo ve/afecta datos de la empresa del usuario autenticado (
 | `GET` | `/api/v1/identity/roles/{id}/permissions` | `identity.manage_roles` | Lista códigos de permiso asignados. |
 | `PUT` | `/api/v1/identity/roles/{id}/permissions` | `identity.manage_roles` | Reemplaza el set completo. Body `{permission_codes: string[]}`. |
 | `GET` | `/api/v1/identity/permissions` | `identity.manage_roles` | Catálogo global de permisos (referencia para armar UI de matriz). |
+
+**Por dónde sale la invitación (`invite_delivery`), desde el 24/09/2026** — `NOTIFICACIONES.md` §16:
+
+| `send_email` | Plataforma | `invite_delivery` | Qué pasa |
+|---|---|---|---|
+| `false` | — | `link` | «Generar enlace»: vuelve en `invite_link` y lo entrega el admin. No sale correo. Sin cambios. |
+| `true` (default) | con `RESEND_API_KEY` y `FRONTEND_URL` | `email` | A Supabase se le pide el enlace **sin** correo; el correo lo manda Prendo apenas termina el request (después del commit), con remitente `"Prendo" <notificaciones@prendo.com.co>` y el enlace `{FRONTEND_URL}/auth/callback?token_hash=…&type=invite`. `invite_link` va `null`. Si el envío falla, el job nocturno lo reintenta con un enlace nuevo. Ya **no** consume la cuota del SMTP de Supabase, así que `INVITE_RATE_LIMITED` deja de aparecer por esta vía. La entrega se ve en `GET /notifications/deliveries` (`event_type=user_invitation`). |
+| `true` | sin alguna de las dos | `email_supabase` | Respaldo: el correo de Supabase de siempre, con su límite (`INVITE_RATE_LIMITED`) y sin la protección contra escáneres. La invitación no queda muda. |
+
+El interruptor de avisos de la empresa (`enabled` en `/notifications/settings`) **no** afecta la invitación: es un correo de la plataforma, no de la empresa.
 
 **Salvaguarda del último admin** (aplica a `PATCH .../role`, `.../deactivate` y `PUT .../permissions`): si la operación dejaría a la empresa sin ningún usuario activo con el permiso `identity.manage_roles`, el backend la rechaza con `409 LAST_ADMIN_SAFEGUARD` en vez de ejecutarla. El front debería mostrar esto como un error explícito, no reintentar.
 
@@ -433,11 +443,11 @@ Reglas: origen ≠ destino; **ninguna de las dos puede ser `settlement`** (no se
 
 ## 13-ter. Módulo `notifications` (avisos por correo — fase 1)
 
-> Diseño y decisiones: [`NOTIFICACIONES.md`](NOTIFICACIONES.md) (lo implementado, en su §15). Migración `00058`. Los correos los produce y manda el **job nocturno**, no estos endpoints: acá solo se configuran y se consultan.
+> Diseño y decisiones: [`NOTIFICACIONES.md`](NOTIFICACIONES.md) (lo implementado, en su §15 y §16). Migración `00058`. Los correos los produce y manda el **job nocturno**, no estos endpoints: acá solo se configuran y se consultan. **La excepción es la invitación de usuario** (fase 2): la produce `POST /identity/invitations` y sale apenas termina ese request; el job solo la reintenta.
 
 | Método | Ruta | Permiso | Notas |
 |---|---|---|---|
-| `GET` | `/api/v1/notifications/settings` | `company.configure` | Preferencias de la empresa. `{enabled, provider_configured, events[], thresholds{discount_amount, cash_difference_amount}, customer_contact_limits{enabled, max_per_week, max_per_day, weekday_hours[2], saturday_hours[2], sundays_and_holidays}, stale_after_days, digest_recipients[{user_id, full_name, email}]}`. Cada `events[]` trae `{code, audience, purpose, family, description, default_enabled, enabled, overridden, effective}`: `enabled` es el valor del evento para la empresa y `effective` le suma el interruptor general. |
+| `GET` | `/api/v1/notifications/settings` | `company.configure` | Preferencias de la empresa. `{enabled, provider_configured, events[], thresholds{discount_amount, cash_difference_amount}, customer_contact_limits{enabled, max_per_week, max_per_day, weekday_hours[2], saturday_hours[2], sundays_and_holidays}, stale_after_days, digest_recipients[{user_id, full_name, email}]}`. Cada `events[]` trae `{code, audience, purpose, family, description, default_enabled, enabled, overridden, effective}`: `enabled` es el valor del evento para la empresa y `effective` le suma el interruptor general — salvo `user_invitation` (`audience: "platform"`), que siempre sale `enabled: true, effective: true`: no depende de la empresa y no se puede apagar (`NOTIFICATION_EVENT_NOT_CONFIGURABLE`). |
 | `PATCH` | `/api/v1/notifications/settings` | `company.configure` | Parcial: lo que no viene no cambia. Body `{enabled?, events?: {code: true\|false\|null}, thresholds?: {discount_amount?, cash_difference_amount?}, customer_contact_limits?: {…}, stale_after_days?}`. `null` en un evento borra el override y vuelve al default del catálogo. Horas como `"HH:MM"`, inicio < fin (si no, 422). Responde lo mismo que el `GET`. **Auditado** (`update_settings`, módulo `notifications`, con antes y después). Errores: `NOTIFICATION_EVENT_UNKNOWN`, `NOTIFICATION_EVENT_NOT_CONFIGURABLE`. |
 | `GET` | `/api/v1/notifications/deliveries` | `company.configure` | Entregas, **las más nuevas primero** (cursor `(created_at, id)`). `?status=&event_type=&limit=&cursor=`. Cada una: `{id, event_id, event_type, audience, occurred_on, channel, to_address, recipient_user_id, status, attempts, last_error, provider_id, scheduled_at, sent_at, created_at, updated_at}`. Incluye las que **no** salieron: son la mayoría y son información. |
 
@@ -478,7 +488,7 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `AUTH_ACCOUNT_MISSING` | 409 | La fila de `app_user` existe pero su cuenta de Supabase Auth fue borrada desde el panel. Es un dato descuadrado, no una falla: el mensaje explica cómo repararlo. |
 | `TEMPLATE_IS_EMPTY` | 409 | Se intentó **activar** una plantilla sin contenido. Guardarla vacía es legítimo (un borrador a medias); activarla imprimiría los documentos sin su cuerpo — encabezado, título y pie, y nada más. |
 | `TEMPLATE_IS_ACTIVE` | 409 | Se intentó borrar la plantilla de documento activa. Hay que activar otra o desactivarla primero: quitar el documento en uso debe ser un paso explícito. |
-| `INVITE_RATE_LIMITED` | 429 | Se agotó la cuota de correos del SMTP incluido de Supabase. No es una falla: se espera, o se usa «Generar enlace», que no consume cuota. |
+| `INVITE_RATE_LIMITED` | 429 | Se agotó la cuota de correos del SMTP incluido de Supabase. No es una falla: se espera, o se usa «Generar enlace», que no consume cuota. **Desde el 24/09/2026 solo aparece en el respaldo** (`invite_delivery: "email_supabase"`, la plataforma sin `RESEND_API_KEY`): con proveedor propio la invitación ya no pasa por el SMTP de Supabase (`NOTIFICACIONES.md` §16). |
 | `AUTH_ADMIN_ERROR` | 502 | Fallo genérico de la API Admin de Supabase Auth al invitar o generar un enlace. Los casos conocidos ya tienen su propio 409 arriba; este es lo que queda. |
 | `CASH_SESSION_NOT_OPEN` | 409 · **404** | Se intentó desembolsar/cobrar/registrar un gasto sin una sesión de caja abierta. **Excepción deliberada:** en `GET /cashbox/sessions/current` viaja con **404**, porque ahí "no hay caja abierta" no es un rechazo sino el estado consultado. El front distingue por el `code`, nunca por el status — cuando ese endpoint devolvía `NOT_FOUND` a secas, la franja global decía "No se pudo consultar el estado de la caja" y toda la rama de "Caja cerrada" era código muerto (03/09/2026). |
 | `CASH_SESSION_ALREADY_OPEN` | 409 | Se intentó abrir una sesión (o reabrir una) habiendo ya otra abierta para esa caja. |
