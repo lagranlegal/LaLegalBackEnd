@@ -39,6 +39,7 @@ from app.modules.customers import integration as customers_integration
 from app.modules.customers import repository as customers_repo
 from app.modules.identity import repository as identity_repo
 from app.modules.inventory import integration as inventory_integration
+from app.modules.notifications import integration as notifications_integration
 from app.modules.platform import integration as platform_integration
 
 _MAX_LEVEL = 3
@@ -160,12 +161,19 @@ async def create_contract(
     created_by: UUID,
     role_id: UUID,
     idempotency_key: str,
-) -> ContractOut:
+) -> tuple[ContractOut, UUID | None]:
+    """Devuelve el contrato y la entrega del aviso C1 que nació `pending` (o
+    None), para que el router la mande después del commit (NOTIFICACIONES §18).
+    Un reintento con la misma llave devuelve el contrato que ya existía y
+    ningún aviso: el aviso de ese contrato ya se registró la primera vez."""
     existing = await repository.find_contract_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     if existing is not None:
-        return await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"])
+        return (
+            await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"]),
+            None,
+        )
 
     customer = await customers_repo.get_customer(
         db, company_id=company_id, customer_id=body.customer_id
@@ -330,8 +338,25 @@ async def create_contract(
     await customers_integration.ensure_contract_basis(
         db, company_id=company_id, customer_id=body.customer_id
     )
+    # C1 (NOTIFICACIONES §2.1). Monto sí, prenda no (§9.1). La próxima cuota
+    # es `add_months(interest_paid_until, 1)` (§2.2), y hoy el ancla es la
+    # fecha del contrato: la misma cuenta que hace la máquina de estados.
+    notice = await notifications_integration.record_customer_notice(
+        db,
+        company_id=company_id,
+        customer_id=body.customer_id,
+        event_type="contract_created",
+        dedupe_key=f"contract:{contract_id}",
+        entity_type="contract",
+        entity_id=contract_id,
+        payload={
+            "contract_number": number,
+            "principal": str(body.principal),
+            "next_due_date": rules.add_months(start_date, 1).isoformat(),
+        },
+    )
 
-    return await get_contract(db, company_id=company_id, contract_id=contract_id)
+    return await get_contract(db, company_id=company_id, contract_id=contract_id), notice
 
 
 async def import_contract(
@@ -478,6 +503,12 @@ async def import_contract(
     await customers_integration.ensure_contract_basis(
         db, company_id=company_id, customer_id=body.customer_id
     )
+    # SIN aviso C1, a propósito (NOTIFICACIONES §3 y §18.1-5): importar es
+    # cargar datos históricos. El préstamo se entregó en otro sistema, el
+    # cliente ya tenía su papel, y una migración de 200 contratos serían 200
+    # correos sobre nada. La base `contract` de arriba sí se escribe: el
+    # contrato está vivo y los avisos que vengan (abonos, paz y salvo) sí son
+    # hechos nuevos.
 
     return await get_contract(db, company_id=company_id, contract_id=contract_id)
 
@@ -639,12 +670,15 @@ async def create_payment(
     body: PaymentCreateIn,
     user: CurrentUser,
     idempotency_key: str,
-) -> PaymentOut:
+) -> tuple[PaymentOut, UUID | None]:
+    """Devuelve el abono y la entrega de su aviso (C2, o C3 si lo saldó) que
+    nació `pending`, o None. Un reintento con la misma llave: el mismo abono y
+    ningún aviso nuevo (NOTIFICACIONES §18.1-2)."""
     existing = await repository.find_payment_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     if existing is not None:
-        return _row_to_payment(existing)
+        return _row_to_payment(existing), None
 
     contract_row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
     if contract_row is None:
@@ -845,11 +879,35 @@ async def create_payment(
             },
         )
 
+    # C2 o C3 (NOTIFICACIONES §2.1, §18.1-3): UN abono, UN aviso — la llave es
+    # el abono en los dos casos. El que salda el contrato manda el paz y salvo,
+    # con lo pagado y el recibo adentro; no además el comprobante. `total` es
+    # lo que el cliente pagó de verdad (neto del descuento), el mismo número
+    # del recibo.
+    notice = await notifications_integration.record_customer_notice(
+        db,
+        company_id=company_id,
+        customer_id=m["customer_id"],
+        event_type="contract_paid_off" if is_full_payoff else "payment_registered",
+        instead_of="payment_registered" if is_full_payoff else None,
+        dedupe_key=f"payment:{payment_id}",
+        entity_type="contract_payment",
+        entity_id=payment_id,
+        payload={
+            "contract_number": m["number"],
+            "receipt_number": receipt_number,
+            "amount": str(total),
+            "interest_paid_until": new_interest_paid_until.isoformat(),
+            "capital_balance": str(new_capital_balance),
+            **({"paid_on": today.isoformat()} if is_full_payoff else {}),
+        },
+    )
+
     row = await repository.find_payment_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     assert row is not None
-    return _row_to_payment(row)
+    return _row_to_payment(row), notice
 
 
 async def list_payments(
@@ -1081,8 +1139,11 @@ async def extend_loan(
     body: ContractExtendIn,
     user: CurrentUser,
     idempotency_key: str,
-) -> ContractOut:
+) -> tuple[ContractOut, UUID | None]:
     """Amplía el préstamo: el contrato viejo se SUCEDE, no se modifica.
+
+    Devuelve el sucesor y la entrega del aviso C4 que nació `pending`, o None
+    (NOTIFICACIONES §18).
 
     Por qué no puede ser un `UPDATE` del capital (docs/RECARGOS.md §1): el
     interés se cobra en meses completos anclados a `interest_paid_until` y
@@ -1105,7 +1166,10 @@ async def extend_loan(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     if existing is not None:
-        return await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"])
+        return (
+            await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"]),
+            None,
+        )
 
     if body.amount <= 0:
         raise AppError("El monto a entregar debe ser mayor a cero.")
@@ -1329,4 +1393,27 @@ async def extend_loan(
     await customers_integration.ensure_contract_basis(
         db, company_id=company_id, customer_id=viejo["customer_id"]
     )
-    return await get_contract(db, company_id=company_id, contract_id=nuevo_id)
+    # C4 (NOTIFICACIONES §2.1). Nombra los DOS contratos —con el viejo ya no se
+    # recibe un abono (`CONTRACT_SUPERSEDED`)— y la fecha de cobro. Que esa
+    # fecha "no cambió" es cierto solo con `keep_anchor` (00053): los contratos
+    # firmados bajo las políticas viejas arrancan el ancla hoy, y el correo no
+    # puede prometer lo que no pasó. La llave es el SUCESOR, que es el
+    # documento de la ampliación (ahí apuntan la caja y la auditoría).
+    notice = await notifications_integration.record_customer_notice(
+        db,
+        company_id=company_id,
+        customer_id=viejo["customer_id"],
+        event_type="loan_extended",
+        dedupe_key=f"extend:{nuevo_id}",
+        entity_type="contract",
+        entity_id=nuevo_id,
+        payload={
+            "contract_number": viejo["number"],
+            "new_contract_number": number,
+            "extension_amount": str(body.amount),
+            "capital_balance": str(nuevo_capital),
+            "next_due_date": rules.add_months(interest_paid_until, 1).isoformat(),
+            "anchor_kept": policy == "keep_anchor",
+        },
+    )
+    return await get_contract(db, company_id=company_id, contract_id=nuevo_id), notice

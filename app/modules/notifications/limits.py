@@ -67,8 +67,29 @@ def next_allowed_moment(local: datetime, limits: ContactLimits) -> datetime:
     return candidate
 
 
-def exceeds_cap(*, sent_last_day: int, sent_last_week: int, limits: ContactLimits) -> bool:
-    """¿Mandar uno más superaría el tope? Cuenta lo YA enviado a ese destinatario."""
+def exceeds_cap(
+    *,
+    sent_last_day: int,
+    sent_last_week: int,
+    limits: ContactLimits,
+    transactional: bool = False,
+) -> bool:
+    """¿Mandar uno más superaría el tope? Cuenta lo YA enviado a ese destinatario.
+
+    Dos topes que no son la misma regla (docs/NOTIFICACIONES.md §18.1-1):
+
+    - **El diario** (§3) es de producto, contra el cliente de 13 contratos que
+      recibiría 16 correos en un día. Cuenta TODO aviso al cliente, también los
+      comprobantes.
+    - **El semanal** es el de la Ley 2300, que limita los contactos de
+      COBRANZA. Un comprobante (`transactional`) no es cobranza: no lo frena —
+      salvo `transactional_in_weekly_cap`, que es la respuesta del abogado
+      puesta como parámetro. Quien cuenta `sent_last_week` tiene que contar
+      con el mismo criterio (`repository.count_sent_to`)."""
     if not limits.enabled:
         return False
-    return sent_last_week >= limits.max_per_week or sent_last_day >= limits.max_per_day
+    if sent_last_day >= limits.max_per_day:
+        return True
+    if transactional and not limits.transactional_in_weekly_cap:
+        return False
+    return sent_last_week >= limits.max_per_week

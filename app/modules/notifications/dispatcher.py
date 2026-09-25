@@ -16,7 +16,9 @@ Orden de decisión por entrega, y el porqué del orden:
    enlace de baja: sin él, un correo al cliente no sale (`dead`).
 2. **Límites al cliente** (Ley 2300, §12.3), solo `audience='customer'`:
    fuera de horario → se corre al próximo momento hábil (sigue `pending`);
-   tope semanal/diario alcanzado → `throttled`.
+   tope semanal/diario alcanzado → `throttled`. El semanal es de cobranza:
+   un comprobante (familia `transactional`) ni lo consume ni lo gasta, salvo
+   `transactional_in_weekly_cap` (§18.1-1). La hora y el diario, para todos.
 3. **Sin proveedor** → `skipped_no_provider`. El job NO falla: registra.
 4. **Envío**, FUERA de toda transacción (§5.1). Éxito → `sent`; falla
    reintentable → `failed` con backoff +1 h / +6 h / +24 h, y al cuarto
@@ -185,14 +187,24 @@ async def _prepare(
             next_ok = limits.next_allowed_moment(local_now, contact_limits)
             if next_ok > local_now:
                 return _Prepared(None, reschedule_to=next_ok.astimezone(UTC))
+            # §18.1-1: el tope semanal es de cobranza. Un comprobante no lo
+            # consume ni lo gasta; el diario (§3) cuenta todo.
+            weekly_cobranza_only = not contact_limits.transactional_in_weekly_cap
             sent_week = await repository.count_sent_to(
-                db, company_id=c["id"], to_address=d["to_address"], since=now - timedelta(days=7)
+                db,
+                company_id=c["id"],
+                to_address=d["to_address"],
+                since=now - timedelta(days=7),
+                exclude_transactional=weekly_cobranza_only,
             )
             sent_day = await repository.count_sent_to(
                 db, company_id=c["id"], to_address=d["to_address"], since=now - timedelta(days=1)
             )
             if limits.exceeds_cap(
-                sent_last_day=sent_day, sent_last_week=sent_week, limits=contact_limits
+                sent_last_day=sent_day,
+                sent_last_week=sent_week,
+                limits=contact_limits,
+                transactional=catalog.get(e["event_type"]).family == "transactional",
             ):
                 return _Prepared(None, "throttled", "Tope de contactos al cliente alcanzado.")
 

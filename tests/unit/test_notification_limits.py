@@ -65,3 +65,15 @@ def test_weekly_and_daily_caps() -> None:
     three_a_week = ContactLimits(max_per_week=5, max_per_day=3)
     assert exceeds_cap(sent_last_day=3, sent_last_week=3, limits=three_a_week)
     assert not exceeds_cap(sent_last_day=2, sent_last_week=4, limits=three_a_week)
+
+
+def test_a_receipt_is_not_stopped_by_the_weekly_cap_but_is_by_the_daily_one() -> None:
+    """§18.1-1: el semanal es el de la Ley 2300, de cobranza; el diario (§3) es
+    de producto y cuenta todo."""
+    assert not exceeds_cap(sent_last_day=1, sent_last_week=5, limits=DEFAULT, transactional=True)
+    assert exceeds_cap(sent_last_day=3, sent_last_week=0, limits=DEFAULT, transactional=True)
+    # La respuesta del abogado, como parámetro: el comprobante vuelve a contar.
+    strict = ContactLimits(transactional_in_weekly_cap=True)
+    assert exceeds_cap(sent_last_day=0, sent_last_week=1, limits=strict, transactional=True)
+    # Y un recordatorio sigue frenado por el semanal, como siempre.
+    assert exceeds_cap(sent_last_day=0, sent_last_week=1, limits=DEFAULT, transactional=False)

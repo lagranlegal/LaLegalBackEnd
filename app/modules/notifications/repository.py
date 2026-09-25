@@ -465,24 +465,41 @@ async def get_event(db: AsyncSession, *, event_id: UUID) -> Row[Any] | None:
 
 
 async def count_sent_to(
-    db: AsyncSession, *, company_id: UUID, to_address: str, since: datetime
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    to_address: str,
+    since: datetime,
+    exclude_transactional: bool = False,
 ) -> int:
     """Correos que YA salieron a esa dirección desde `since` — el insumo del
     tope de la Ley 2300. Por empresa: cada compraventa es un acreedor distinto
-    (§12.2-6) y responde por sus propios contactos."""
+    (§12.2-6) y responde por sus propios contactos.
+
+    `exclude_transactional`: para el tope SEMANAL, un comprobante no gasta el
+    cupo de la cobranza (§18.1-1) — la misma premisa que lo exime del tope, del
+    otro lado de la cuenta. La familia sale del catálogo en la base
+    (`notification_event_type`), no de una lista escrita acá."""
     result = await db.execute(
         text(
             """
             select count(*) from public.notification_delivery d
             join public.notification_event e on e.id = d.event_id
+            join public.notification_event_type t on t.code = e.event_type
             where d.company_id = :cid and d.channel = 'email'
               and lower(d.to_address) = lower(:to_address)
               and e.audience = 'customer'
               and d.sent_at >= :since
               and d.status in ('sent', 'delivered')
+              and (not :exclude_transactional or t.family <> 'transactional')
             """
         ),
-        {"cid": str(company_id), "to_address": to_address, "since": since},
+        {
+            "cid": str(company_id),
+            "to_address": to_address,
+            "since": since,
+            "exclude_transactional": exclude_transactional,
+        },
     )
     return int(result.scalar_one())
 

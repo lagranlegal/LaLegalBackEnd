@@ -591,28 +591,69 @@ def _customer_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]
             f"Saldo de capital: {money(p['capital_balance'])}.",
         ]
     if event_type == "contract_paid_off":
+        # El abono que salda el contrato manda ESTE correo y no además el
+        # comprobante (§18.1-3): por eso dice lo pagado y el recibo.
+        paid = (
+            [f"Recibimos {money(p['amount'])} (recibo #{p['receipt_number']})."]
+            if "amount" in p
+            else []
+        )
         return f"Paz y salvo del contrato #{n}", [
+            *paid,
             f"Su contrato #{n} quedó saldado el {long_date(p['paid_on'])}. No nos debe nada.",
             "Guarde este correo como constancia.",
         ]
     if event_type == "loan_extended":
-        return f"Su préstamo fue ampliado: nuevo contrato #{p['new_contract_number']}", [
-            f"Su contrato #{n} fue reemplazado por el #{p['new_contract_number']}, "
+        new = p["new_contract_number"]
+        # "No cambió" solo si de verdad no cambió: con las políticas viejas
+        # (anteriores a 00053) el sucesor arranca el ancla el día del recargo.
+        due = (
+            f"Su fecha de cobro no cambió: la próxima cuota vence el "
+            f"{long_date(p['next_due_date'])}."
+            if p.get("anchor_kept")
+            else f"Su próxima cuota vence el {long_date(p['next_due_date'])}."
+        )
+        return f"Su préstamo fue ampliado: nuevo contrato #{new}", [
+            f"Le entregamos {money(p['extension_amount'])} más sobre su préstamo.",
+            f"Su contrato #{n} fue reemplazado por el #{new}, "
             f"con un capital de {money(p['capital_balance'])}.",
-            "Sus abonos de ahora en adelante van al contrato nuevo. La fecha de cobro no cambió.",
+            f"Sus abonos de ahora en adelante van al contrato #{new}.",
+            due,
         ]
     if event_type == "credit_note_issued":
+        origin = (
+            f"Por la devolución de su compra #{p['sale_number']} se"
+            if p.get("sale_number") is not None
+            else "Se"
+        )
         return "Tiene un saldo a favor", [
-            f"Se emitió la nota crédito #{p['credit_note_number']} por {money(p['amount'])}.",
+            f"{origin} emitió la nota crédito #{p['credit_note_number']} por {money(p['amount'])}.",
+            "Puede usarla como parte de pago en su próxima compra.",
         ]
     if event_type == "sale_receipt":
         return f"Comprobante de su compra #{p['sale_number']}", [
             f"Gracias por su compra #{p['sale_number']} por {money(p['total'])}.",
         ]
     if event_type == "sale_reversed":
-        return f"Su compra #{p['sale_number']} fue anulada o devuelta", [
-            f"Registramos la anulación o devolución de su compra #{p['sale_number']} "
-            f"por {money(p['amount'])}.",
+        sale = p["sale_number"]
+        if p.get("kind") == "void":
+            return f"Su compra #{sale} fue anulada", [
+                f"Registramos la anulación de su compra #{sale} por {money(p['amount'])}.",
+            ]
+        if p.get("kind") == "return":
+            if p.get("credit_note_number") is not None:
+                settled = (
+                    f"Se liquidó con la nota crédito #{p['credit_note_number']} por "
+                    f"{money(p['amount'])}."
+                )
+            else:
+                settled = f"Le devolvimos {money(p['amount'])}."
+            return f"Devolución de su compra #{sale}", [
+                f"Registramos la devolución #{p['return_number']} de su compra #{sale}.",
+                settled,
+            ]
+        return f"Su compra #{sale} fue anulada o devuelta", [
+            f"Registramos la anulación o devolución de su compra #{sale} por {money(p['amount'])}.",
         ]
     if event_type == "installment_due_soon":
         contracts = p.get("contracts") or []

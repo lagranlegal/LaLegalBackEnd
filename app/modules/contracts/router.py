@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.idempotency import require_idempotency_key
@@ -20,6 +20,7 @@ from app.modules.contracts.schemas import (
     PaymentQuoteOut,
     SettlementInfoOut,
 )
+from app.modules.notifications import dispatcher as notifications_dispatcher
 
 router = APIRouter(prefix="/api/v1/contracts", tags=["contracts"])
 
@@ -46,8 +47,9 @@ async def create_contract(
     user: Annotated[CurrentUser, Depends(_create)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    background: BackgroundTasks,
 ) -> ContractOut:
-    return await service.create_contract(
+    out, notice = await service.create_contract(
         db,
         company_id=user.company_id,
         body=body,
@@ -55,6 +57,10 @@ async def create_contract(
         role_id=user.role_id,
         idempotency_key=idempotency_key,
     )
+    # Al FINAL: commit explícito y el aviso en segundo plano (§16.2-1).
+    if notice is not None:
+        await notifications_dispatcher.send_after_commit(db, background, notice)
+    return out
 
 
 @router.post("/import", response_model=ContractOut, status_code=201)
@@ -137,8 +143,9 @@ async def create_payment(
     user: Annotated[CurrentUser, Depends(_pay)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    background: BackgroundTasks,
 ) -> PaymentOut:
-    return await service.create_payment(
+    out, notice = await service.create_payment(
         db,
         company_id=user.company_id,
         contract_id=contract_id,
@@ -146,6 +153,9 @@ async def create_payment(
         user=user,
         idempotency_key=idempotency_key,
     )
+    if notice is not None:
+        await notifications_dispatcher.send_after_commit(db, background, notice)
+    return out
 
 
 @router.get("/{contract_id}/payments", response_model=CursorPage[PaymentOut])
@@ -205,11 +215,12 @@ async def extend_loan(
     user: Annotated[CurrentUser, Depends(_extend)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    background: BackgroundTasks,
 ) -> ContractOut:
     """Amplía el préstamo ("recargo"). Devuelve el contrato SUCESOR, con un
     número nuevo — el viejo queda `superseded` y hay que imprimir y firmar
     el nuevo (docs/RECARGOS.md)."""
-    return await service.extend_loan(
+    out, notice = await service.extend_loan(
         db,
         company_id=user.company_id,
         contract_id=contract_id,
@@ -217,6 +228,9 @@ async def extend_loan(
         user=user,
         idempotency_key=idempotency_key,
     )
+    if notice is not None:
+        await notifications_dispatcher.send_after_commit(db, background, notice)
+    return out
 
 
 @router.post("/{contract_id}/auction", response_model=ContractOut)

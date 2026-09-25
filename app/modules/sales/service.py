@@ -23,6 +23,7 @@ from app.modules.identity import repository as identity_repo
 from app.modules.inventory import repository as inventory_repo
 from app.modules.inventory import units
 from app.modules.inventory.units import UNIT_ABBREVIATIONS
+from app.modules.notifications import integration as notifications_integration
 from app.modules.platform import integration as platform_integration
 from app.modules.sales import repository
 from app.modules.sales.schemas import (
@@ -90,7 +91,10 @@ async def create_sale(
     body: SaleCreateIn,
     user: CurrentUser,
     idempotency_key: str,
-) -> SaleOut:
+) -> tuple[SaleOut, UUID | None]:
+    """Devuelve la venta y la entrega del comprobante C6 que nació `pending`,
+    o None (sin cliente no hay aviso; un reintento tampoco genera otro —
+    NOTIFICACIONES §18)."""
     existing = await repository.find_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
@@ -101,8 +105,11 @@ async def create_sale(
         redeemed = await _get_credit_note_redemption_amount(
             db, company_id=company_id, sale_id=existing._mapping["id"]
         )
-        return _row_to_sale(
-            existing, [_row_to_line(r) for r in lines], credit_note_redeemed_amount=redeemed
+        return (
+            _row_to_sale(
+                existing, [_row_to_line(r) for r in lines], credit_note_redeemed_amount=redeemed
+            ),
+            None,
         )
 
     items = []
@@ -321,11 +328,28 @@ async def create_sale(
             },
         )
 
+    # C6 (NOTIFICACIONES §2.1): solo con cliente. El total, nunca los
+    # artículos (§9.1): «compró una cadena de oro» es lo que no puede leer un
+    # tercero si el correo está mal escrito.
+    notice = await notifications_integration.record_customer_notice(
+        db,
+        company_id=company_id,
+        customer_id=body.customer_id,
+        event_type="sale_receipt",
+        dedupe_key=f"sale:{sale_id}",
+        entity_type="sale",
+        entity_id=sale_id,
+        payload={"sale_number": number, "total": str(total)},
+    )
+
     row = await repository.get_sale(db, company_id=company_id, sale_id=sale_id)
     assert row is not None
     lines = await repository.list_sale_lines(db, company_id=company_id, sale_id=sale_id)
     redeemed = redeemed_amount if body.credit_note_id is not None else None
-    return _row_to_sale(row, [_row_to_line(r) for r in lines], credit_note_redeemed_amount=redeemed)
+    return (
+        _row_to_sale(row, [_row_to_line(r) for r in lines], credit_note_redeemed_amount=redeemed),
+        notice,
+    )
 
 
 async def get_sale(db: AsyncSession, *, company_id: UUID, sale_id: UUID) -> SaleOut:
@@ -397,7 +421,10 @@ async def list_sales(
 
 async def void_sale(
     db: AsyncSession, *, company_id: UUID, sale_id: UUID, reason: str, actor_id: UUID
-) -> SaleOut:
+) -> tuple[SaleOut, UUID | None]:
+    """Devuelve la venta anulada y la entrega del aviso C7 que nació `pending`,
+    o None (NOTIFICACIONES §18). Anular dos veces es `409` (la venta ya no
+    está `completed`), así que el reintento no llega al aviso."""
     row = await repository.get_sale_for_update(db, company_id=company_id, sale_id=sale_id)
     if row is None:
         raise NotFoundError("La venta no existe en esta empresa.")
@@ -479,7 +506,11 @@ async def void_sale(
     await repository.void_sale(
         db, company_id=company_id, sale_id=sale_id, void_reason=reason, voided_by=actor_id
     )
-    if row._mapping["total"] > 0:
+    # Lo que la caja le devuelve al cliente: el contra-movimiento Y el monto
+    # del aviso C7 salen de esta MISMA variable, para que el correo no pueda
+    # decir un número distinto del que salió del cajón.
+    refunded = row._mapping["total"]
+    if refunded > 0:
         # cash_movement.amount exige > 0 — una venta 100% descontada no tuvo
         # efectivo real de por medio, así que anularla tampoco genera un
         # contra-movimiento (no hay nada que devolver).
@@ -490,7 +521,7 @@ async def void_sale(
             module="store",
             direction="out",
             concept="sale",
-            amount=row._mapping["total"],
+            amount=refunded,
             payment_method=row._mapping["payment_method"],
             reference_type="sale",
             reference_id=sale_id,
@@ -508,8 +539,25 @@ async def void_sale(
         before={"status": "completed"},
         after={"status": "voided", "reason": reason},
     )
+    # C7 (NOTIFICACIONES §2.1). El monto es `refunded`, el del contra-movimiento
+    # de arriba. El motivo NO va: es una nota interna («error de digitación»,
+    # «cobro doble»).
+    notice = await notifications_integration.record_customer_notice(
+        db,
+        company_id=company_id,
+        customer_id=row._mapping["customer_id"],
+        event_type="sale_reversed",
+        dedupe_key=f"sale_void:{sale_id}",
+        entity_type="sale",
+        entity_id=sale_id,
+        payload={
+            "kind": "void",
+            "sale_number": row._mapping["number"],
+            "amount": str(refunded),
+        },
+    )
 
-    return await get_sale(db, company_id=company_id, sale_id=sale_id)
+    return await get_sale(db, company_id=company_id, sale_id=sale_id), notice
 
 
 # =========================================================================
@@ -545,12 +593,17 @@ async def create_return(
     body: SaleReturnCreateIn,
     user: CurrentUser,
     idempotency_key: str,
-) -> SaleReturnOut:
+) -> tuple[SaleReturnOut, UUID | None]:
+    """Devuelve la devolución y la entrega de su aviso (C7, o C5 si se liquidó
+    en nota crédito) que nació `pending`, o None (NOTIFICACIONES §18)."""
     existing = await repository.find_return_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     if existing is not None:
-        return await get_return(db, company_id=company_id, return_id=existing._mapping["id"])
+        return (
+            await get_return(db, company_id=company_id, return_id=existing._mapping["id"]),
+            None,
+        )
 
     sale = await repository.get_sale_for_update(db, company_id=company_id, sale_id=sale_id)
     if sale is None:
@@ -792,7 +845,8 @@ async def create_return(
             notes=f"Devolución de la venta #{sale._mapping['number']}",
             account_id=resolved.account_id,
         )
-    else:
+    credit_note_number: int | None = None
+    if body.settlement_method != "cash":
         assert customer_id is not None  # validado arriba
         credit_note_id = uuid4()
         credit_note_number = await repository.next_credit_note_number(db, company_id=company_id)
@@ -823,8 +877,33 @@ async def create_return(
             "time_limit_warning": past_window,
         },
     )
+    # C7, o C5 si se liquidó en nota (NOTIFICACIONES §2.1, §18.1-3): UNA
+    # devolución, UN aviso, con la devolución como llave. El monto es
+    # `total_amount`: el NETO que se le pagó o se le acreditó (F21-33,
+    # `return_line_amounts_sql`), el mismo que salió de la caja o quedó en la
+    # nota. La plantilla lo formatea; no lo recalcula.
+    notice = await notifications_integration.record_customer_notice(
+        db,
+        company_id=company_id,
+        customer_id=customer_id,
+        event_type="credit_note_issued" if credit_note_number is not None else "sale_reversed",
+        instead_of="sale_reversed" if credit_note_number is not None else None,
+        dedupe_key=f"return:{return_id}",
+        entity_type="sale_return",
+        entity_id=return_id,
+        payload={
+            "kind": "return",
+            "sale_number": sale._mapping["number"],
+            "return_number": number,
+            "amount": str(total_amount),
+            "settlement_method": body.settlement_method,
+            **(
+                {"credit_note_number": credit_note_number} if credit_note_number is not None else {}
+            ),
+        },
+    )
 
-    return await get_return(db, company_id=company_id, return_id=return_id)
+    return await get_return(db, company_id=company_id, return_id=return_id), notice
 
 
 async def get_return(db: AsyncSession, *, company_id: UUID, return_id: UUID) -> SaleReturnOut:

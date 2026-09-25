@@ -207,7 +207,11 @@ async def record_event(
             await _add(gate.email, "skipped_stale", None, None)
         else:
             await _add(gate.email, "pending", None, None, gate.basis)
-        return RecordOutcome(created=True, event_id=event_id, deliveries=counts)
+        # Los transaccionales (fases 4 y 6) se mandan ya, después del commit
+        # (§5.1): quien los produce necesita saber qué entrega nació `pending`.
+        return RecordOutcome(
+            created=True, event_id=event_id, deliveries=counts, pending_ids=tuple(pending)
+        )
 
     # audience='platform' (P1, §16): un destinatario, el que trae el productor.
     # Sin rezago (no tiene fecha objetivo), sin límites de la Ley 2300 (no es un
@@ -232,6 +236,7 @@ def _limits_out(prefs: NotificationPrefs) -> ContactLimitsOut:
         weekday_hours=tuple(d["weekday_hours"]),
         saturday_hours=tuple(d["saturday_hours"]),
         sundays_and_holidays=d["sundays_and_holidays"],
+        transactional_in_weekly_cap=d["transactional_in_weekly_cap"],
     )
 
 

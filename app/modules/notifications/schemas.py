@@ -51,6 +51,10 @@ class ContactLimitsOut(BaseModel):
     weekday_hours: tuple[str, str]
     saturday_hours: tuple[str, str]
     sundays_and_holidays: bool
+    #: Si los comprobantes (C1–C7) cuentan para el tope SEMANAL. `false` por
+    #: defecto: el tope semanal es de cobranza (NOTIFICACIONES §18.1-1). La
+    #: ventana horaria y el tope diario los alcanzan igual.
+    transactional_in_weekly_cap: bool
 
 
 class DigestRecipientOut(BaseModel):
@@ -99,6 +103,7 @@ class ContactLimitsIn(BaseModel):
     weekday_hours: tuple[str, str] | None = None
     saturday_hours: tuple[str, str] | None = None
     sundays_and_holidays: bool | None = None
+    transactional_in_weekly_cap: bool | None = None
 
     @field_validator("weekday_hours", "saturday_hours")
     @classmethod

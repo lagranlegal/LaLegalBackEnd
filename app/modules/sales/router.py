@@ -2,12 +2,13 @@ from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.idempotency import require_idempotency_key
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
+from app.modules.notifications import dispatcher as notifications_dispatcher
 from app.modules.sales import service
 from app.modules.sales.schemas import (
     CreditNoteOut,
@@ -33,10 +34,15 @@ async def create_sale(
     user: Annotated[CurrentUser, Depends(_create)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    background: BackgroundTasks,
 ) -> SaleOut:
-    return await service.create_sale(
+    out, notice = await service.create_sale(
         db, company_id=user.company_id, body=body, user=user, idempotency_key=idempotency_key
     )
+    # Al FINAL: commit explícito y el aviso en segundo plano (NOTIFICACIONES §16.2-1).
+    if notice is not None:
+        await notifications_dispatcher.send_after_commit(db, background, notice)
+    return out
 
 
 @router.get("", response_model=CursorPage[SaleOut])
@@ -81,10 +87,14 @@ async def void_sale(
     body: VoidSaleIn,
     user: Annotated[CurrentUser, Depends(_void)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    background: BackgroundTasks,
 ) -> SaleOut:
-    return await service.void_sale(
+    out, notice = await service.void_sale(
         db, company_id=user.company_id, sale_id=sale_id, reason=body.reason, actor_id=user.id
     )
+    if notice is not None:
+        await notifications_dispatcher.send_after_commit(db, background, notice)
+    return out
 
 
 @router.post("/{sale_id}/returns", response_model=SaleReturnOut, status_code=201)
@@ -94,8 +104,9 @@ async def create_return(
     user: Annotated[CurrentUser, Depends(_return)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    background: BackgroundTasks,
 ) -> SaleReturnOut:
-    return await service.create_return(
+    out, notice = await service.create_return(
         db,
         company_id=user.company_id,
         sale_id=sale_id,
@@ -103,6 +114,9 @@ async def create_return(
         user=user,
         idempotency_key=idempotency_key,
     )
+    if notice is not None:
+        await notifications_dispatcher.send_after_commit(db, background, notice)
+    return out
 
 
 @router.get("/{sale_id}/returns", response_model=list[SaleReturnOut])

@@ -182,3 +182,91 @@ def test_digest_render_lists_ready_contracts_and_flags_thresholds() -> None:
     # En el HTML el monto va en su propia celda, alineado a la derecha.
     assert 'align="right"' in rendered.html
     assert ">$20.000</td>" in rendered.html
+
+
+# ------------------------------------ transaccionales al cliente (fases 4 y 6) ----
+
+
+def _render(event_type: str, **payload: object) -> str:
+    return templates.render(
+        event_type, {"unsubscribe_url": UNSUB, "first_name": "Juana", **payload}, BRAND
+    ).text
+
+
+def test_paid_off_says_what_was_paid_because_it_replaces_the_receipt() -> None:
+    """§18.1-3: el abono que salda el contrato manda el paz y salvo y NO además
+    el comprobante. Si el paz y salvo no dijera lo pagado, ese abono sería el
+    único sin comprobante."""
+    text = _render(
+        "contract_paid_off",
+        contract_number=7,
+        paid_on="2030-09-03",
+        amount="1050000.00",
+        receipt_number=31,
+    )
+    assert "Recibimos $1.050.000 (recibo #31)." in text
+    assert "quedó saldado el 3 de septiembre de 2030. No nos debe nada." in text
+
+
+def test_extension_only_promises_the_date_did_not_move_when_it_did_not() -> None:
+    """00053: con `keep_anchor` la fecha de cobro no se mueve. Con las
+    políticas viejas SÍ se mueve, y el correo no puede prometer lo contrario."""
+    base = {
+        "contract_number": 7,
+        "new_contract_number": 9,
+        "extension_amount": "300000.00",
+        "capital_balance": "1300000.00",
+        "next_due_date": "2030-10-01",
+    }
+    kept = _render("loan_extended", anchor_kept=True, **base)
+    moved = _render("loan_extended", anchor_kept=False, **base)
+    for text in (kept, moved):
+        assert "#7 fue reemplazado por el #9" in text
+        assert "$300.000" in text and "$1.300.000" in text
+        assert "1 de octubre de 2030" in text
+    assert "no cambió" in kept
+    assert "no cambió" not in moved
+
+
+def test_reversal_tells_void_from_return_and_how_it_was_settled() -> None:
+    void = _render("sale_reversed", kind="void", sale_number=12, amount="1000000.00")
+    cash = _render(
+        "sale_reversed",
+        kind="return",
+        sale_number=12,
+        return_number=3,
+        amount="450000.00",
+        settlement_method="cash",
+    )
+    note = _render(
+        "sale_reversed",
+        kind="return",
+        sale_number=12,
+        return_number=3,
+        amount="450000.00",
+        settlement_method="credit_note",
+        credit_note_number=5,
+    )
+    assert "anulación de su compra #12 por $1.000.000" in void
+    assert "devolución #3 de su compra #12" in cash and "Le devolvimos $450.000." in cash
+    assert "nota crédito #5 por $450.000" in note and "Le devolvimos" not in note
+
+
+def test_credit_note_names_the_sale_it_came_from() -> None:
+    text = _render("credit_note_issued", credit_note_number=5, amount="450000.00", sale_number=12)
+    assert "Por la devolución de su compra #12 se emitió la nota crédito #5 por $450.000." in text
+
+
+def test_no_transactional_leaks_a_reason_or_an_item() -> None:
+    """El motivo de una anulación es una nota interna; las líneas de la venta
+    son los artículos. Aunque un productor los metiera, la plantilla no los lee."""
+    text = _render(
+        "sale_reversed",
+        kind="void",
+        sale_number=12,
+        amount="1000000.00",
+        reason="Cobro doble del cajero",
+        lines=[{"description": "Cadena de oro"}],
+    )
+    assert "Cobro doble" not in text
+    assert "Cadena" not in text

@@ -55,6 +55,15 @@ class ContactLimits:
     saturday_start: time = time(8, 0)
     saturday_end: time = time(15, 0)
     sundays_and_holidays: bool = False
+    #: ¿Un comprobante (C1–C7) cuenta como contacto para el tope SEMANAL? Nace
+    #: en `False` (docs/NOTIFICACIONES.md §18.1-1): la Ley 2300 limita los
+    #: contactos de COBRANZA, y un comprobante de algo que el cliente acaba de
+    #: hacer en el mostrador no es cobranza. Con el tope aplicado, el segundo
+    #: abono de la semana quedaba `throttled` y el cliente sin su comprobante.
+    #: Si un abogado dice que sí cuenta, se pone en `True` y vuelve el
+    #: comportamiento anterior — sin código. **No toca la ventana horaria ni el
+    #: tope diario**: esos siguen valiendo para todo aviso al cliente.
+    transactional_in_weekly_cap: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +73,7 @@ class ContactLimits:
             "weekday_hours": [_fmt(self.weekday_start), _fmt(self.weekday_end)],
             "saturday_hours": [_fmt(self.saturday_start), _fmt(self.saturday_end)],
             "sundays_and_holidays": self.sundays_and_holidays,
+            "transactional_in_weekly_cap": self.transactional_in_weekly_cap,
         }
 
 
@@ -152,6 +162,9 @@ def parse_limits(raw: Any) -> ContactLimits:
         saturday_start=saturday[0],
         saturday_end=saturday[1],
         sundays_and_holidays=bool(d.get("sundays_and_holidays", base.sundays_and_holidays)),
+        transactional_in_weekly_cap=bool(
+            d.get("transactional_in_weekly_cap", base.transactional_in_weekly_cap)
+        ),
     )
 
 
