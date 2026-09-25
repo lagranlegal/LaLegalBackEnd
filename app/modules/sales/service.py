@@ -35,6 +35,7 @@ from app.modules.sales.schemas import (
     SaleReturnLineOut,
     SaleReturnOut,
 )
+from app.modules.sales.settlement import split_return_settlement
 
 
 def _row_to_sale(
@@ -505,7 +506,10 @@ async def void_sale(
     #    descubre la primera vez; anular mal descuadra el cajón en silencio.
     # 3. **La salida legítima ya existe:** una devolución liquidada en nota
     #    crédito le reconoce al cliente el total de la venta como saldo, sin
-    #    sacar del cajón plata que nunca entró. El mensaje la nombra.
+    #    sacar del cajón plata que nunca entró. El mensaje la nombra. Desde
+    #    F21-37 también sirve liquidada en efectivo: la parte de la nota
+    #    vuelve como nota nueva y solo sale del cajón lo cobrado en plata
+    #    (`sales/settlement.py`). El mensaje no cambió: sigue siendo cierto.
     #
     # Va DESPUÉS de la guarda de devoluciones (una venta con las dos cosas
     # recibe el mensaje de las devoluciones, que es el que ya existía) y
@@ -642,8 +646,8 @@ async def create_return(
     user: CurrentUser,
     idempotency_key: str,
 ) -> tuple[SaleReturnOut, UUID | None]:
-    """Devuelve la devolución y la entrega de su aviso (C7, o C5 si se liquidó
-    en nota crédito) que nació `pending`, o None (NOTIFICACIONES §18)."""
+    """Devuelve la devolución y la entrega de su aviso (C7, o C5 si emitió
+    una nota crédito) que nació `pending`, o None (NOTIFICACIONES §18)."""
     existing = await repository.find_return_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
@@ -868,7 +872,41 @@ async def create_return(
         db, company_id=company_id, return_id=return_id
     )
 
+    # --- Cómo se liquida: la parte de la nota vuelve como nota (F21-37) --
+    # Una nota crédito no es plata: lo que la venta pagó con ella nunca
+    # entró al cajón, así que tampoco puede salir de él. Liquidada en
+    # efectivo, la devolución se PARTE: lo pagado con nota vuelve como una
+    # nota nueva, y solo lo pagado en plata sale del cajón. Liquidada en
+    # nota, las dos partes van a la nota (la plata vuelve «por el medio
+    # elegido», que es la nota) — como antes.
+    #
+    # El reparto es proporcional a cómo se pagó la venta y se calcula sobre
+    # el ACUMULADO devuelto, con el redondeo telescópico de F21-33: la regla
+    # y su porqué están en `sales/settlement.py`.
+    #
+    # Lo devuelto ANTES de esta devolución es lo devuelto de la venta menos
+    # ella: la venta está tomada `FOR UPDATE` y el número de la devolución
+    # salió después, así que es la última en el orden de
+    # `return_line_amounts_sql`. Y lo redimido son TODAS las notas de la
+    # venta, sumadas — los mismos laterales que el detalle y el listado.
     if body.settlement_method == "cash":
+        totals = (
+            await repository.get_sale_return_totals(db, company_id=company_id, sale_id=sale_id)
+        )._mapping
+        note_part, money_part = split_return_settlement(
+            sale_total=sale._mapping["total"],
+            redeemed=totals["credit_note_redeemed_amount"] or Decimal("0"),
+            returned_before=totals["returned_amount"] - total_amount,
+            amount=total_amount,
+        )
+    else:
+        note_part, money_part = total_amount, Decimal("0.00")
+
+    # `> 0` en las dos ramas: `cash_movement.amount` y `credit_note.amount`
+    # exigen > 0. Con la nota pagando toda la venta, la parte en plata es 0 y
+    # la devolución no toca el cajón (ni exige sesión abierta), igual que la
+    # venta que cubrió la nota no la exigió al cobrar.
+    if money_part > 0:
         # `account_id=None`: cae en la cuenta `cash` default, que exige
         # sesión abierta — la de HOY, no la de la venta original.
         resolved = await cashbox_integration.resolve_account_for_movement(
@@ -885,7 +923,7 @@ async def create_return(
             module="store",
             direction="out",
             concept="sale_return",
-            amount=total_amount,
+            amount=money_part,
             payment_method="cash",
             reference_type="sale_return",
             reference_id=return_id,
@@ -894,8 +932,14 @@ async def create_return(
             account_id=resolved.account_id,
         )
     credit_note_number: int | None = None
-    if body.settlement_method != "cash":
-        assert customer_id is not None  # validado arriba
+    if note_part > 0:
+        # Una nota NUEVA ligada a esta devolución, no la vieja reabierta: la
+        # redención es inmutable (trigger de 00043), la venta pudo redimir
+        # más de una nota, y `credit_note.sale_return_id` ya es el modelo
+        # «una devolución emite a lo sumo una nota». El cliente existe: la
+        # nota crédito lo exige (validado arriba) y una venta que redimió una
+        # nota lo tuvo por fuerza (`create_sale` exige que sea el titular).
+        assert customer_id is not None
         credit_note_id = uuid4()
         credit_note_number = await repository.next_credit_note_number(db, company_id=company_id)
         await repository.insert_credit_note(
@@ -905,7 +949,7 @@ async def create_return(
             number=credit_note_number,
             customer_id=customer_id,
             sale_return_id=return_id,
-            amount=total_amount,
+            amount=note_part,
             notes=body.notes,
             created_by=user.id,
         )
@@ -922,14 +966,21 @@ async def create_return(
             "sale_id": str(sale_id),
             "settlement_method": body.settlement_method,
             "total_amount": str(total_amount),
+            "refunded_amount": str(money_part),
+            "credit_note_amount": str(note_part),
             "time_limit_warning": past_window,
         },
     )
-    # C7, o C5 si se liquidó en nota (NOTIFICACIONES §2.1, §18.1-3): UNA
-    # devolución, UN aviso, con la devolución como llave. El monto es
-    # `total_amount`: el NETO que se le pagó o se le acreditó (F21-33,
-    # `return_line_amounts_sql`), el mismo que salió de la caja o quedó en la
-    # nota. La plantilla lo formatea; no lo recalcula.
+    # C7, o C5 si nació una nota (NOTIFICACIONES §2.1, §18.1-3): UNA
+    # devolución, UN aviso, con la devolución como llave. `amount` es
+    # `total_amount`: el NETO devuelto (F21-33, `return_line_amounts_sql`).
+    # Y como desde F21-37 una misma devolución puede liquidarse en las dos
+    # cosas, el payload trae además el reparto —`refunded_amount` (lo que
+    # salió del cajón) y `credit_note_amount` (lo que quedó en la nota)—, los
+    # mismos números del movimiento y de la nota. Con una nota de por medio
+    # manda el aviso de la nota (el más específico: lleva su número), y las
+    # dos plantillas dicen los dos montos (NOTIFICACIONES §18.5). La
+    # plantilla los formatea; no los recalcula.
     notice = await notifications_integration.record_customer_notice(
         db,
         company_id=company_id,
@@ -944,6 +995,8 @@ async def create_return(
             "sale_number": sale._mapping["number"],
             "return_number": number,
             "amount": str(total_amount),
+            "refunded_amount": str(money_part),
+            "credit_note_amount": str(note_part),
             "settlement_method": body.settlement_method,
             **(
                 {"credit_note_number": credit_note_number} if credit_note_number is not None else {}
@@ -968,6 +1021,19 @@ async def get_return(db: AsyncSession, *, company_id: UUID, return_id: UUID) -> 
         db, company_id=company_id, return_id=return_id
     )
     credit_note_id = credit_note._mapping["id"] if credit_note is not None else None
+    # El reparto (F21-37) se LEE de los documentos que la devolución dejó —el
+    # egreso de caja y la nota—, no se recalcula: así el recibo dice lo que
+    # pasó, también en las devoluciones de antes de la regla.
+    refunded_amount = await cashbox_integration.sum_reference_movements(
+        db,
+        company_id=company_id,
+        reference_type="sale_return",
+        reference_id=return_id,
+        direction="out",
+    )
+    credit_note_amount = (
+        Decimal(str(credit_note._mapping["amount"])) if credit_note is not None else Decimal("0.00")
+    )
 
     sale = await repository.get_sale(db, company_id=company_id, sale_id=m["sale_id"])
     assert sale is not None
@@ -988,6 +1054,9 @@ async def get_return(db: AsyncSession, *, company_id: UUID, return_id: UUID) -> 
         lines=[_row_to_return_line(r) for r in lines],
         credit_note_id=credit_note_id,
         total_amount=total_amount,
+        refunded_amount=refunded_amount,
+        credit_note_amount=credit_note_amount,
+        credit_note_number=credit_note._mapping["number"] if credit_note is not None else None,
         time_limit_warning=time_limit_warning,
     )
 

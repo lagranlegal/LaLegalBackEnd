@@ -45,6 +45,130 @@
 
 ---
 
+## ✅ F21-37 · ALTO (plata) — Una devolución sobre una venta pagada con nota crédito liquidaba la parte de la nota en plata (25/09/2026 · cerrado)
+
+**El gemelo de F21-36**, anotado sin número al final de ese hallazgo: lo mismo que hacía la anulación, pero en el
+carril de las devoluciones, donde no se puede rechazar (devolver es un derecho del cliente, anular no).
+
+**Qué hacía.** `sales.create_return` liquidaba `sum_sale_return_amount` entero por el `settlement_method`, sin mirar
+`credit_note_redemption`. Con la venta de siempre —**$800.000 = $500.000 de nota + $300.000 en efectivo**—:
+
+- **liquidada en efectivo:** `cash_movement` de salida por **$800.000**, con $300.000 entrados. El cliente convertía
+  la nota en efectivo y el cajón descuadraba por el monto de la nota. **Medido** en local con el test de abajo antes
+  del arreglo: `assert '800000.00' == '300000.00'`;
+- **liquidada en nota:** una nota de $800.000 — la parte en efectivo también se vuelve nota.
+
+**En dev:** 1 devolución histórica sobre una venta con nota, liquidada en nota (medido por Mateo). **No se reparan
+datos históricos.** Y con la regla elegida esa devolución **quedó bien**: ver el segundo punto de abajo.
+
+### La decisión: partir la liquidación (opción A, de Mateo)
+
+Lo pagado con nota vuelve como **nota crédito**; lo pagado en plata vuelve **por el medio elegido**. Las decisiones
+que eso dejó abiertas, cada una con su porqué (el código las repite en `app/modules/sales/settlement.py` y en
+`service.py::create_return`):
+
+**1. Una devolución PARCIAL se reparte PROPORCIONAL a cómo se pagó la venta, sobre el ACUMULADO.** Cada peso de la
+venta se pagó en la misma mezcla que la venta entera: nadie sabe si la cadena se pagó con la nota y el anillo en
+efectivo, y el sistema no debe inventarlo. Es el criterio que ya reparte el descuento de la cabecera entre las líneas
+(F21-33), y es el único con el que lo que el cliente conserva y lo que devuelve cargan la misma proporción.
+
+- **«Primero la nota» deja al cliente peor**, en TODA devolución parcial que no agota la venta: recibe nota —que solo
+  sirve en esta tienda— donde la proporcional le da plata. Devolver $300.000 de la venta de arriba: primero-la-nota
+  da $300.000 en nota y $0 en efectivo; la proporcional, **$187.500 en nota + $112.500 en efectivo**. Nunca al revés:
+  la plata acumulada proporcional (`plata × x / total`) es siempre ≥ `x − nota` porque `x ≤ total`.
+- **«Primero la plata» deja peor al negocio**: devuelve efectivo antes que nota, y en la práctica la nota termina
+  pagando lo que el cliente se queda.
+- Las tres coinciden al agotar la venta; solo difieren en el camino.
+
+**Redondeo: el mismo telescopio de F21-33.** La parte en nota de una devolución es
+`round(nota × devuelto_después / total) − round(nota × devuelto_antes / total)`; la parte en plata, el resto de la
+devolución. Lo devuelto en nota hasta cualquier punto es un único redondeo del acumulado, que **nunca pasa de lo
+redimido** (lo devuelto nunca pasa del `total`) y **cierra exacto** cuando la devolución agota la venta (F21-33 ya
+garantiza que el acumulado llega exacto al `total`). La plata, por diferencia, tampoco pasa de lo cobrado en plata.
+«Devuelto antes» es lo devuelto de la venta menos esta devolución: la venta está `FOR UPDATE` y el número de la
+devolución salió después, así que es la última en el orden de `return_line_amounts_sql`.
+
+Ejemplo real del test: 3 × $333.333,33 con $100.000 de descuento (total **$899.999,99**), pagada con **$500.000 de
+nota + $399.999,99 en efectivo**, devuelta de a una unidad en efectivo:
+
+| Devolución | Vale (F21-33) | En nota nueva | Del cajón |
+|---|---|---|---|
+| 1 | 300.000,00 | 166.666,67 | 133.333,33 |
+| 2 | 299.999,99 | 166.666,66 | 133.333,33 |
+| 3 (agota) | 300.000,00 | 166.666,67 | 133.333,33 |
+| **Total** | **899.999,99** | **500.000,00** = lo redimido | **399.999,99** = lo cobrado en plata |
+
+**2. Liquidada en nota, todo va a UNA nota por el total — como antes.** «Lo pagado en plata vuelve por el medio
+elegido», y el medio elegido es la nota. El segundo síntoma del hallazgo (la nota de $800.000) **no es un defecto bajo
+esta regla**: es el cliente eligiendo nota para su parte en plata. Por eso la devolución histórica de dev está bien y
+no hay nada que reparar. Lo que sí cambia es que el reparto se ve (abajo).
+
+**3. La parte en nota es una NOTA NUEVA ligada a la devolución, no la vieja reabierta.** `credit_note_redemption` es
+inmutable (trigger de 00043): reabrir exigiría una redención negativa, un modelo que no existe. La venta puede haber
+redimido **varias** notas (el esquema lo admite aunque la API hoy redima una), y reabrir obligaría a elegir cuál. Y el
+modelo ya existe tal cual: `credit_note.sale_return_id` con `unique (company_id, sale_return_id)` — una devolución
+emite a lo sumo una nota. **Sin migración.**
+
+**4. La parte en plata sale por el medio elegido** (`cash`, la cuenta `cash` por defecto y la sesión de hoy, como
+antes) y por el monto partido. Si la nota pagó toda la venta, la parte en plata es 0: **no toca el cajón ni exige
+caja abierta** — igual que la venta que cubrió la nota no la exigió al cobrar.
+
+**5. Varias notas o varios medios.** Lo redimido es la **suma de todas las redenciones** de la venta: el lateral
+`cnr` de `repository._SALE_RETURNS_LATERALS` pasó de `limit 1` a `sum(...)` (con un `limit 1`, una segunda nota se
+habría devuelto en plata). Eso también corrige el `credit_note_redeemed_amount` del detalle y del listado para ese caso.
+Varios medios de plata **no existen en el modelo**: una venta tiene un `payment_method` y un único `cash_movement` de
+entrada, así que la plata es `total − lo redimido`, venga de donde venga; cómo se repartió entre efectivo y
+transferencia no cambia cuánto se devuelve en plata, que sale por el medio elegido.
+
+**6. El aviso al cliente: uno solo, C5, con los dos montos** (`NOTIFICACIONES.md` §18.5).
+
+**7. La API deja ver el reparto** (aditivo): `SaleReturnOut.refunded_amount` + `credit_note_amount` =
+`total_amount`, y `credit_note_number`. Se **leen de los documentos** (el `cash_movement` de la devolución, vía
+`cashbox.integration.sum_reference_movements`, y la nota), no se recalculan: el recibo dice lo que pasó, también en
+las devoluciones de antes de la regla. La auditoría de `create_return` guarda los dos montos.
+
+**8. Los reportes no cambian.** `/profit`, `/series`, el estado de resultados y `returned_amount` salen de
+`return_line_amounts_sql`, que no se tocó: el total devuelto es el mismo, solo cambia cómo se liquida. Verificado en el
+test de las parciales (`returned_amount` = 899.999,99 y `/profit` con el ingreso neto del día en 0). El cierre de caja
+lee los `cash_movement`, que ahora nacen por la parte en plata.
+
+### Tests, cada uno visto fallar antes del arreglo
+
+| Test | Sin el arreglo |
+|---|---|
+| `test_devolucion_en_efectivo_de_venta_pagada_con_nota_parte_la_liquidacion` — el caso de $800.000 devuelta completa en efectivo: salen **exactamente $300.000** y nace una nota nueva de $500.000 ligada a la devolución; la vieja sigue en 0 | **falla**: `'800000.00' == '300000.00'` |
+| `test_devoluciones_parciales_sobre_venta_con_nota_cuadran_por_medio_al_centavo` — la tabla de arriba, con los totales por medio al centavo en cada paso, `returned_amount` y `/profit` | **falla**: `('300000.00', None) == ('133333.33', '166666.67')` |
+| `test_devolucion_de_venta_pagada_toda_con_nota_no_exige_caja` — nota por toda la venta, caja cerrada, devolución en efectivo | **falla**: `409 CASH_SESSION_NOT_OPEN` |
+| `test_devolucion_en_nota_de_venta_pagada_con_nota_emite_una_nota_por_el_total` | falla solo por los campos nuevos (el comportamiento no cambió, a propósito) |
+| `test_devolucion_sin_nota_se_liquida_como_antes` — **regresión**: sin nota, todo en plata, sin nota emitida | falla solo por los campos nuevos |
+| `tests/unit/test_return_settlement_split.py` (12) — la regla pura: sin nota, el caso del hallazgo, nota total, residuo, particiones en 1…101 devoluciones que cierran al centavo, centavos sueltos sin partes negativas | no existía el módulo |
+| `test_a_mixed_return_sends_ONE_notice_that_names_both_amounts` / `…_with_credit_note_off_still_names_both_amounts` (integración) y dos unitarios de plantilla | **fallan**: salía C7 diciendo «Le devolvimos $800.000» |
+
+Los tests de F21-33 (descuento, redondeo, `/profit`, `/series`) y los de F21-36 pasan sin tocarlos. Suite completa con
+Docker arriba: **680 passed** (659 + 21), 0 saltados. `ruff check` / `ruff format --check` / `mypy app` limpios.
+
+### Front
+
+`ReturnFormDialog` avisa, cuando la venta se pagó con nota, que esa parte vuelve como nota nueva, y el toast dice
+el reparto que devolvió el backend; el recibo (`SaleReceiptDialog`) muestra por devolución cuánto salió en efectivo y
+cuánto quedó en qué nota. Tipos regenerados contra el backend local. Detalle en
+`frontend-starter/docs/IMPLEMENTATION.md`.
+
+### Lo dudoso
+
+- **El mensaje de `SALE_PAID_WITH_CREDIT_NOTE`** (F21-36) sigue mandando a «una devolución liquidada en nota
+  crédito». Sigue siendo cierto, pero ya no es la única salida: liquidada en efectivo ahora también es correcta y le
+  devuelve al cliente su plata. No se cambió porque el front tiene el mensaje fijado en dos tests de contrato
+  (sacados de respuestas reales); cambiarlo es de producto.
+- **`sum_reference_movements` no tiene índice** por `(reference_type, reference_id)` en `cash_movement`: lee los
+  movimientos de la empresa. Se usa solo al leer las devoluciones de UNA venta (el recibo), no en listados. Si crece,
+  un índice aditivo lo resuelve; no se agregó para no abrir una migración por esto.
+- **Una devolución de valor 0** (venta 100% descontada): por lectura del código —no medido— antes llamaba a
+  `record_movement` o `insert_credit_note` con 0 y chocaba con su `CHECK amount > 0`; ahora no mueve nada ni emite nota
+  (y su aviso C7 diría «le devolvimos $0»). Cambio lateral, sin test propio.
+
+---
+
 ## ✅ F21-36 · ALTO (plata) — Anular una venta pagada con nota crédito devolvía en plata la parte de la nota (25/09/2026 · cerrado)
 
 **Encontrado de paso** al cablear el aviso C7 de la anulación (`NOTIFICACIONES.md` §18.4, donde quedó anotado
@@ -125,6 +249,7 @@ $300.000 efectivo), devuelta completa con `settlement_method: "cash"` → `201` 
 elegido sin mirar `credit_note_redemption`. Es otro defecto de plata, del carril de devoluciones; queda
 anotado **sin número** para que se decida aparte (¿rechazar efectivo por encima de lo cobrado en plata, o
 partir la liquidación: la parte de la nota en nota y el resto en efectivo?).
+**→ Cerrado el 25/09/2026 como F21-37** (arriba): se parte la liquidación.
 
 ---
 

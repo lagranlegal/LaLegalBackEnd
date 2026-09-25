@@ -135,6 +135,16 @@ class SaleReturnOut(BaseModel):
     #: líneas y la venta original — nunca guardado (mismo principio que el
     #: saldo de una nota crédito).
     total_amount: Decimal
+    #: El REPARTO de `total_amount` (F21-37) — las dos partes siempre lo suman:
+    #: `refunded_amount` es lo que salió en plata (leído del movimiento de
+    #: caja de la devolución, no recalculado) y `credit_note_amount` lo que
+    #: quedó en la nota crédito nueva (`credit_note_id`/`credit_note_number`).
+    #: Liquidada en efectivo, una venta pagada en parte con nota devuelve
+    #: esa parte como nota y el resto en efectivo; liquidada en nota, todo va
+    #: a la nota. Sin nota de por medio, es todo o nada como antes.
+    refunded_amount: Decimal
+    credit_note_amount: Decimal
+    credit_note_number: int | None
     #: Se registró pasado el `return_window_days` de la empresa —
     #: informativo, no cambia nada del resultado (advierte, no bloquea).
     time_limit_warning: bool

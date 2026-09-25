@@ -129,12 +129,16 @@ _SALE_RETURNS_LATERALS = f"""
         from {return_line_amounts_sql("ret.sale_id = s.id")} ra
     ) dev on true
     left join lateral (
-        -- Una venta redime a lo sumo una nota crédito: misma lectura que
-        -- `get_sale_credit_note_redemption`.
-        select cnr.amount
+        -- TODAS las notas que redimió la venta, sumadas (F21-37). Hoy la API
+        -- redime a lo sumo una (`SaleCreateIn.credit_note_id` es singular),
+        -- pero el esquema admite varias (`unique (company_id, sale_id,
+        -- credit_note_id)`), y el reparto de una devolución entre nota y plata
+        -- (`sales/settlement.py`) lee ESTE número: con un `limit 1` una
+        -- segunda nota se habría devuelto en plata. Sin redenciones, `sum` da
+        -- NULL — lo mismo que antes daba la ausencia de fila.
+        select sum(cnr.amount) as amount
         from public.credit_note_redemption cnr
         where cnr.company_id = :company_id and cnr.sale_id = s.id
-        limit 1
     ) cnr on true
 """
 

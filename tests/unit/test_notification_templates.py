@@ -270,3 +270,36 @@ def test_no_transactional_leaks_a_reason_or_an_item() -> None:
     )
     assert "Cobro doble" not in text
     assert "Cadena" not in text
+
+
+def test_a_mixed_return_names_the_note_and_the_cash_in_both_templates() -> None:
+    """F21-37: una devolución de 800.000 sobre una venta pagada con 500.000 de
+    nota se liquida con una nota nueva de 500.000 y 300.000 en efectivo. Sale
+    UN aviso (el de la nota, o el de devolución si la nota está apagada), y
+    cualquiera de los dos dice los dos montos — nunca los 800.000 como si
+    todo hubiera salido del cajón o todo fuera nota."""
+    mixed = {
+        "kind": "return",
+        "sale_number": 12,
+        "return_number": 3,
+        "amount": "800000.00",
+        "settlement_method": "cash",
+        "credit_note_number": 5,
+        "credit_note_amount": "500000.00",
+        "refunded_amount": "300000.00",
+    }
+    note = _render("credit_note_issued", **mixed)
+    reversal = _render("sale_reversed", **mixed)
+    for text in (note, reversal):
+        assert "nota crédito #5 por $500.000" in text
+        assert "$300.000" in text
+        assert "$800.000" not in text
+    assert "Le devolvimos $300.000 en efectivo" in reversal
+
+
+def test_a_note_only_return_keeps_its_old_wording() -> None:
+    """Los avisos ya registrados antes de F21-37 no traen los montos
+    partidos: la plantilla cae al `amount` de siempre."""
+    text = _render("credit_note_issued", credit_note_number=5, amount="450000.00", sale_number=12)
+    assert "nota crédito #5 por $450.000." in text
+    assert "efectivo" not in text

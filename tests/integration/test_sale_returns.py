@@ -1356,3 +1356,268 @@ async def test_una_devolucion_no_puede_repetir_la_linea_para_pasarse_de_lo_vendi
     assert ret.status_code == 400, ret.text
     # Lo que le queda a la REPETICIÓN, ya descontada la primera.
     assert ret.json()["details"]["available"] == "0.000"
+
+
+# --- F21-37: la devolución de una venta pagada con nota crédito ------------
+#
+# Regla (decisión de Mateo, opción A): lo pagado con nota vuelve como nota
+# crédito NUEVA ligada a la devolución; lo pagado en plata vuelve por el
+# medio elegido. Una devolución parcial se reparte PROPORCIONAL a cómo se
+# pagó la venta, sobre el acumulado devuelto (`sales/settlement.py`).
+
+
+def _venta_con_nota_y_descuento(
+    client: TestClient,
+    tenant: dict,
+    *,
+    note_id: str,
+    note_amount: str,
+    quantity: str,
+    unit_price: str,
+    discount: str,
+) -> dict:
+    response = client.post(
+        "/api/v1/sales",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(tenant["customer_id"]),
+            "payment_method": "cash",
+            "discount_amount": discount,
+            "discount_reason": "cliente frecuente",
+            "lines": [
+                {"item_id": str(tenant["item_id"]), "quantity": quantity, "unit_price": unit_price}
+            ],
+            "credit_note_id": note_id,
+            "credit_note_amount": note_amount,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def _cash_out_for_returns(company_id, return_ids: list[str]) -> Decimal:
+    """Todo lo que salió de la caja por estas devoluciones."""
+    async with AsyncSessionLocal() as session, session.begin():
+        total = (
+            await session.execute(
+                text(
+                    "select coalesce(sum(amount), 0) from public.cash_movement "
+                    "where company_id = :cid and reference_type = 'sale_return' "
+                    "and direction = 'out' and reference_id = any(cast(:ids as uuid[]))"
+                ),
+                {"cid": str(company_id), "ids": return_ids},
+            )
+        ).scalar_one()
+    return Decimal(str(total))
+
+
+async def test_devolucion_en_efectivo_de_venta_pagada_con_nota_parte_la_liquidacion(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """El caso del hallazgo: venta de 800.000 = 500.000 de nota + 300.000 en
+    efectivo, devuelta completa en efectivo. Sacaba 800.000 del cajón con
+    300.000 entrados; ahora salen exactamente 300.000 y nace una nota NUEVA
+    de 500.000 ligada a la devolución."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    old_note = _nota_credito_de(client, returns_tenant)
+    sale = _venta_con_nota(
+        client,
+        returns_tenant,
+        note_id=old_note["id"],
+        unit_price="800000.00",
+        note_amount="500000.00",
+    )
+
+    ret = _return(client, returns_tenant, sale, quantity="1", settlement="cash")
+    assert ret.status_code == 201, ret.text
+    body = ret.json()
+    # Primero los DOCUMENTOS: lo que salió del cajón y la nota que nació.
+    cash, note, audited = await _return_settlements(returns_tenant["company_id"], body["id"])
+    assert cash == "300000.00"
+    assert note == "500000.00"
+    assert audited == "800000.00"
+
+    # Y la respuesta deja ver el reparto.
+    assert body["total_amount"] == "800000.00"
+    assert body["refunded_amount"] == "300000.00"
+    assert body["credit_note_amount"] == "500000.00"
+    assert body["credit_note_id"] is not None
+    assert body["credit_note_id"] != old_note["id"]
+    assert body["credit_note_number"] is not None
+
+    new_note = client.get(
+        f"/api/v1/credit-notes/{body['credit_note_id']}",
+        headers=_headers(returns_tenant["full_token"]),
+    ).json()
+    assert new_note["sale_return_id"] == body["id"]
+    assert new_note["balance"] == "500000.00"
+    assert new_note["customer_id"] == str(returns_tenant["customer_id"])
+    # La nota vieja NO se reabre: sigue gastada (su redención es inmutable).
+    old_after = client.get(
+        f"/api/v1/credit-notes/{old_note['id']}", headers=_headers(returns_tenant["full_token"])
+    ).json()
+    assert old_after["balance"] == "0.00"
+
+    # El reparto se ve igual al releer (recibo) que al crear.
+    [again] = client.get(
+        f"/api/v1/sales/{sale['id']}/returns", headers=_headers(returns_tenant["full_token"])
+    ).json()
+    assert (again["refunded_amount"], again["credit_note_amount"]) == ("300000.00", "500000.00")
+    # Y lo devuelto de la venta —lo que leen los reportes— no cambió.
+    detalle = client.get(
+        f"/api/v1/sales/{sale['id']}", headers=_headers(returns_tenant["full_token"])
+    ).json()
+    assert detalle["returned_amount"] == "800000.00"
+
+
+async def test_devolucion_de_venta_pagada_toda_con_nota_no_exige_caja(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """Si la nota pagó todo, la parte en plata es 0: la devolución en
+    efectivo no toca el cajón (ni exige sesión abierta) y todo vuelve como
+    nota nueva."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    old_note = _nota_credito_de(client, returns_tenant)
+    sale = _venta_con_nota(
+        client,
+        returns_tenant,
+        note_id=old_note["id"],
+        unit_price="400000.00",
+        note_amount="400000.00",
+    )
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.cash_session set status = 'closed' where company_id = :cid"),
+            {"cid": str(returns_tenant["company_id"])},
+        )
+
+    ret = _return(client, returns_tenant, sale, quantity="1", settlement="cash")
+    assert ret.status_code == 201, ret.text
+    assert ret.json()["refunded_amount"] == "0.00"
+    assert ret.json()["credit_note_amount"] == "400000.00"
+    cash, note, _ = await _return_settlements(returns_tenant["company_id"], ret.json()["id"])
+    assert cash is None
+    assert note == "400000.00"
+
+
+async def test_devoluciones_parciales_sobre_venta_con_nota_cuadran_por_medio_al_centavo(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """3 × 333.333,33 con 100.000 de descuento (total 899.999,99), pagada con
+    500.000 de nota + 399.999,99 en efectivo, devuelta de a una unidad en
+    efectivo. Cada devolución se reparte proporcional sobre el acumulado; la
+    última se lleva el residuo, y los totales por medio son exactamente los
+    cobrados: 500.000,00 en notas nuevas y 399.999,99 fuera del cajón."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    old_note = _nota_credito_de(client, returns_tenant)
+    sale = _venta_con_nota_y_descuento(
+        client,
+        returns_tenant,
+        note_id=old_note["id"],
+        note_amount="500000.00",
+        quantity="3",
+        unit_price="333333.33",
+        discount="100000.00",
+    )
+    assert sale["total"] == "899999.99"
+
+    esperado = [
+        ("300000.00", "166666.67", "133333.33"),
+        ("299999.99", "166666.66", "133333.33"),
+        ("300000.00", "166666.67", "133333.33"),
+    ]
+    ids: list[str] = []
+    notas = Decimal("0")
+    for total, nota, plata in esperado:
+        ret = _return(client, returns_tenant, sale, quantity="1", settlement="cash")
+        assert ret.status_code == 201, ret.text
+        body = ret.json()
+        cash, note, _ = await _return_settlements(returns_tenant["company_id"], body["id"])
+        assert (cash, note) == (plata, nota)
+        assert (body["total_amount"], body["credit_note_amount"], body["refunded_amount"]) == (
+            total,
+            nota,
+            plata,
+        )
+        ids.append(body["id"])
+        notas += Decimal(note)
+        # En NINGÚN punto un medio devuelve más de lo que se cobró con él.
+        assert notas <= Decimal("500000.00")
+        assert await _cash_out_for_returns(returns_tenant["company_id"], ids) <= Decimal(
+            "399999.99"
+        )
+
+    assert notas == Decimal("500000.00")
+    assert await _cash_out_for_returns(returns_tenant["company_id"], ids) == Decimal("399999.99")
+
+    # Los reportes salen de `return_line_amounts_sql`: el total devuelto no
+    # cambió, solo cómo se liquidó.
+    detalle = client.get(
+        f"/api/v1/sales/{sale['id']}", headers=_headers(returns_tenant["full_token"])
+    ).json()
+    assert detalle["returned_amount"] == "899999.99"
+    hoy = client.get(
+        f"/api/v1/sales/{sale['id']}/returns", headers=_headers(returns_tenant["full_token"])
+    ).json()[0]["return_date"]
+    profit = client.get(
+        "/api/v1/reports/profit",
+        params={"from_date": hoy, "to_date": hoy},
+        headers=_headers(returns_tenant["full_token"]),
+    ).json()
+    # Del día: la venta de la nota (500.000, devuelta) y esta (899.999,99, devuelta).
+    assert profit["sales_returns"] == "1399999.99"
+    assert Decimal(profit["net_revenue"]) == 0
+
+
+async def test_devolucion_en_nota_de_venta_pagada_con_nota_emite_una_nota_por_el_total(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """Liquidada en nota crédito, la parte en plata vuelve «por el medio
+    elegido», que es la nota: una sola nota nueva por el total, sin tocar
+    caja. El reparto igual se ve: todo en nota, nada en plata."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    old_note = _nota_credito_de(client, returns_tenant)
+    sale = _venta_con_nota(
+        client,
+        returns_tenant,
+        note_id=old_note["id"],
+        unit_price="800000.00",
+        note_amount="500000.00",
+    )
+    ret = _return(client, returns_tenant, sale, quantity="1", settlement="credit_note")
+    assert ret.status_code == 201, ret.text
+    assert ret.json()["credit_note_amount"] == "800000.00"
+    assert ret.json()["refunded_amount"] == "0.00"
+    cash, note, _ = await _return_settlements(returns_tenant["company_id"], ret.json()["id"])
+    assert (cash, note) == (None, "800000.00")
+
+
+async def test_devolucion_sin_nota_se_liquida_como_antes(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """Regresión: una venta pagada sin nota devuelta en efectivo saca todo del
+    cajón y NO emite nota; el reparto nuevo lo dice (todo en plata)."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    sale = _make_sale(client, returns_tenant, quantity="2")
+    first = _return(client, returns_tenant, sale, quantity="1", settlement="cash")
+    second = _return(client, returns_tenant, sale, quantity="1", settlement="cash")
+    for ret in (first, second):
+        assert ret.status_code == 201, ret.text
+        body = ret.json()
+        assert body["total_amount"] == "500000.00"
+        assert body["refunded_amount"] == "500000.00"
+        assert body["credit_note_amount"] == "0.00"
+        assert body["credit_note_id"] is None
+        assert body["credit_note_number"] is None
+        cash, note, _ = await _return_settlements(returns_tenant["company_id"], body["id"])
+        assert (cash, note) == ("500000.00", None)

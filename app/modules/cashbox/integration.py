@@ -90,6 +90,37 @@ async def record_movement(
     return movement_id
 
 
+async def sum_reference_movements(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    reference_type: str,
+    reference_id: UUID,
+    direction: str,
+) -> Decimal:
+    """Cuánto movió la caja por un documento, en un sentido. Lo usa la
+    devolución (F21-37) para decir cuánto se le pagó al cliente en plata: se
+    LEE del movimiento que salió, no se recalcula — así el recibo dice lo que
+    pasó por el cajón, incluso en devoluciones anteriores a la regla."""
+    result = await db.execute(
+        text(
+            """
+            select coalesce(sum(amount), 0)::numeric(14, 2)
+            from public.cash_movement
+            where company_id = :company_id and reference_type = :reference_type
+              and reference_id = :reference_id and direction = :direction
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "reference_type": reference_type,
+            "reference_id": str(reference_id),
+            "direction": direction,
+        },
+    )
+    return Decimal(str(result.scalar_one()))
+
+
 async def _default_account_for(
     db: AsyncSession, *, company_id: UUID, payment_method: str
 ) -> UUID | None:

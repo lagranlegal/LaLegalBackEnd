@@ -576,6 +576,14 @@ def _first_name(payload: dict[str, Any]) -> str:
     return name.split()[0] if name else ""
 
 
+def _positive(amount: Any) -> str | None:
+    """El monto si es mayor que cero, o None. Los montos llegan como texto
+    (`"0.00"` es verdadero para Python): esto evita un «le devolvimos $0»."""
+    if amount is None:
+        return None
+    return str(amount) if Decimal(str(amount)) > 0 else None
+
+
 def _customer_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]:
     """(asunto sin el prefijo de la empresa, párrafos). Solo lee claves conocidas."""
     n = p.get("contract_number")
@@ -626,8 +634,16 @@ def _customer_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]
             if p.get("sale_number") is not None
             else "Se"
         )
+        # F21-37: una devolución puede liquidarse en nota Y en efectivo (la
+        # parte que se pagó con nota vuelve como nota; la de plata, en plata).
+        # Es UN aviso, y dice los dos montos: callar el efectivo dejaría al
+        # cliente sin constancia de la plata que recibió. Los avisos de antes
+        # no traen el reparto: la nota era por `amount`.
+        refunded = _positive(p.get("refunded_amount"))
         return "Tiene un saldo a favor", [
-            f"{origin} emitió la nota crédito #{p['credit_note_number']} por {money(p['amount'])}.",
+            f"{origin} emitió la nota crédito #{p['credit_note_number']} por "
+            f"{money(p.get('credit_note_amount') or p['amount'])}.",
+            *([f"Además le devolvimos {money(refunded)} en efectivo."] if refunded else []),
             "Puede usarla como parte de pago en su próxima compra.",
         ]
     if event_type == "sale_receipt":
@@ -641,10 +657,19 @@ def _customer_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]
                 f"Registramos la anulación de su compra #{sale} por {money(p['amount'])}.",
             ]
         if p.get("kind") == "return":
-            if p.get("credit_note_number") is not None:
+            refunded = _positive(p.get("refunded_amount"))
+            if p.get("credit_note_number") is not None and refunded:
+                # F21-37: liquidación mixta — el mismo hecho que el aviso de la
+                # nota, contado desde la devolución (si la empresa apagó C5).
+                settled = (
+                    f"Le devolvimos {money(refunded)} en efectivo, y el resto quedó en la "
+                    f"nota crédito #{p['credit_note_number']} por "
+                    f"{money(p['credit_note_amount'])}."
+                )
+            elif p.get("credit_note_number") is not None:
                 settled = (
                     f"Se liquidó con la nota crédito #{p['credit_note_number']} por "
-                    f"{money(p['amount'])}."
+                    f"{money(p.get('credit_note_amount') or p['amount'])}."
                 )
             else:
                 settled = f"Le devolvimos {money(p['amount'])}."

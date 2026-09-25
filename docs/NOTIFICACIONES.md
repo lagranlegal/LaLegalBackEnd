@@ -1076,8 +1076,8 @@ apagado el hecho **se registra igual** y sin entregas (§4.3) — test `test_off
 | `POST /contracts/{id}/extend-loan` | `loan_extended` (C4) | `extend:<id del sucesor>` | los dos números, `extension_amount`, `capital_balance`, `next_due_date`, `anchor_kept` |
 | `POST /sales` con `customer_id` | `sale_receipt` (C6) | `sale:<sale_id>` | número, `total` |
 | `POST /sales/{id}/void` | `sale_reversed` (C7) | `sale_void:<sale_id>` | `kind: void`, número, `amount` (el contra-movimiento) |
-| `POST /sales/{id}/returns`, en efectivo | `sale_reversed` (C7) | `return:<sale_return_id>` | `kind: return`, venta, devolución, `amount` (neto), `settlement_method` |
-| ídem, en nota crédito | `credit_note_issued` (C5) **en lugar de** C7 | `return:<sale_return_id>` | lo de C7 + `credit_note_number` |
+| `POST /sales/{id}/returns`, en efectivo | `sale_reversed` (C7) | `return:<sale_return_id>` | `kind: return`, venta, devolución, `amount` (neto), `settlement_method`, y desde F21-37 el reparto: `refunded_amount`, `credit_note_amount` |
+| ídem, si nace una nota (liquidada en nota, **o en efectivo sobre una venta pagada con nota**, §18.5) | `credit_note_issued` (C5) **en lugar de** C7 | `return:<sale_return_id>` | lo de C7 + `credit_note_number` |
 
 - **Ni prenda, ni artículos, ni cédula, ni el motivo** de una anulación (es una nota interna: *«cobro doble del
   cajero»*). El test de las cinco promesas busca la descripción de la prenda y el código del artículo en asunto, texto
@@ -1124,9 +1124,9 @@ apagado el hecho **se registra igual** y sin entregas (§4.3) — test `test_off
 - **✅ Cerrado el 25/09/2026 como F21-36 (`QA_AUDITORIA.md`).** Decisión de Mateo: se **rechaza** la anulación de
   una venta con redención de nota crédito (`409 SALE_PAID_WITH_CREDIT_NOTE`), como `SALE_HAS_RETURNS`; la salida es una
   devolución liquidada en nota crédito. El C7 no cambió: una anulación que pasa ya no tiene parte de nota, así que
-  `refunded = total` vuelve a ser cierto. **Queda abierto el gemelo:** una devolución liquidada en EFECTIVO sobre una
-  venta pagada con nota también saca en plata la parte de la nota (medido; ver el final de §F21-36). Lo que sigue es el
-  registro original del hallazgo.
+  `refunded = total` vuelve a ser cierto. **El gemelo** —una devolución liquidada en EFECTIVO sobre una venta pagada
+  con nota también sacaba en plata la parte de la nota— **se cerró como F21-37**, y su aviso está en §18.5. Lo que
+  sigue es el registro original del hallazgo.
   **Defecto encontrado de paso, NO arreglado (fuera de alcance, y es de dinero):** anular una venta pagada **en parte
   con nota crédito** devuelve en efectivo el total, incluida la parte que se pagó con la nota, y la nota queda
   redimida. Reproducido en local contra la API: venta de $800.000 = $500.000 de nota + $300.000 en efectivo → al anular,
@@ -1146,3 +1146,34 @@ apagado el hecho **se registra igual** y sin entregas (§4.3) — test `test_off
   el `GET`/`PATCH` y el front no lo manda, así que no rompe nada; el valor por defecto es el correcto.
 - **Webhook de Resend, `delivered`/`bounced`, y verificado en vivo con un correo real:** pendientes, como en §15–§17.
 - **R1–R4 (fase 5)** siguen sin productor.
+
+### 18.5 · La devolución de liquidación mixta: UN aviso con los dos montos (F21-37, 25/09/2026)
+
+Desde F21-37 una devolución en efectivo sobre una venta pagada (toda o en parte) con nota crédito **se parte**: lo
+pagado con nota vuelve como una **nota nueva** y solo lo pagado en plata sale del cajón (`QA_AUDITORIA.md` §F21-37,
+`sales/settlement.py`). La venta de $800.000 = $500.000 de nota + $300.000 en efectivo, devuelta completa, deja
+**$300.000 en efectivo y una nota nueva de $500.000**. Una misma devolución, dos formas de liquidarse. ¿Qué aviso sale?
+
+**Uno solo, el de la nota (C5), y dice los dos montos.** Es §18.1-3 aplicado sin cambios: el hecho es **una
+devolución**; que haya dejado una nota es una propiedad de ese hecho, no un segundo hecho. Así que:
+
+- **La llave sigue siendo `return:<id>`**, y el `unique` hace imposible un segundo aviso por el efectivo.
+- **Sale C5** porque es el más específico: es el único que le dice al cliente que tiene un saldo y con qué número.
+  Con C5 apagado y C7 encendido sale C7 (`choose_event`, sin cambios).
+- **Cualquiera de los dos dice los dos montos.** C5: *«Por la devolución de su compra #12 se emitió la nota crédito
+  #5 por $500.000. Además le devolvimos $300.000 en efectivo.»* C7: *«Le devolvimos $300.000 en efectivo, y el resto
+  quedó en la nota crédito #5 por $500.000.»* Callar el efectivo dejaría al cliente sin constancia de plata que
+  recibió; decir $800.000 —el total— haría creer que todo salió del cajón o que todo es nota.
+- **El payload trae el reparto** además de `amount` (el total neto, como siempre): `refunded_amount` (lo que salió
+  del cajón) y `credit_note_amount` (el monto de la nota nueva). Son las **mismas variables** que el `cash_movement` y
+  el `credit_note.amount` de la devolución, en la misma transacción: el correo no puede decir un número distinto del
+  documento, que es la regla de §18.1-4. La plantilla los formatea, no los calcula.
+- **Compatible hacia atrás:** los eventos registrados antes no traen el reparto, y la plantilla cae al `amount` de
+  siempre (test `test_a_note_only_return_keeps_its_old_wording`). Una devolución solo en efectivo o solo en nota
+  dice lo mismo que antes; un `refunded_amount` de `"0.00"` no produce un «le devolvimos $0».
+
+Tests: `test_a_mixed_return_sends_ONE_notice_that_names_both_amounts` y
+`test_a_mixed_return_with_credit_note_off_still_names_both_amounts` (`tests/integration/test_customer_notices.py`,
+contra la API real: un evento con `dedupe_key = return:<id>`, una entrega, un correo con $500.000 y $300.000 y sin
+$800.000), y `test_a_mixed_return_names_the_note_and_the_cash_in_both_templates` (unitario, las dos plantillas).
+Los dos de integración se vieron fallar antes del arreglo: salía C7 diciendo *«Le devolvimos $800.000»*.

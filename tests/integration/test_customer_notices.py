@@ -878,3 +878,82 @@ async def test_a_receipt_does_not_spend_the_weekly_budget_of_a_reminder(
     assert _pay("100000.00")(client, shop, ctx, str(uuid4())).status_code == 201
     assert await _send_reminder_now(shop["company_id"], shop["with_mail"]) == "sent"
     assert await _send_reminder_now(shop["company_id"], shop["with_mail"]) == "throttled"
+
+
+# ------------------------------------ F21-37: la devolución de liquidación mixta ----
+
+
+def _mixed_sale(client: TestClient, shop: dict[str, Any]) -> dict[str, Any]:
+    """Venta de 800.000 pagada con 500.000 de nota + 300.000 en efectivo. La
+    nota sale de una venta anterior devuelta en nota (con los avisos todavía
+    apagados: ese hecho queda registrado, pero no es el que se mira)."""
+    first = _sale(
+        client,
+        shop,
+        shop["with_mail"],
+        lines=[{"item_id": str(shop["item_id"]), "quantity": "1", "unit_price": "500000.00"}],
+    )
+    assert first.status_code == 201, first.text
+    ret = _return("credit_note")(client, shop, {"sale": first.json()}, str(uuid4()))
+    assert ret.status_code == 201, ret.text
+    sale = _sale(
+        client,
+        shop,
+        shop["with_mail"],
+        lines=[{"item_id": str(shop["item_id"]), "quantity": "1", "unit_price": "800000.00"}],
+        credit_note_id=ret.json()["credit_note_id"],
+        credit_note_amount="500000.00",
+    )
+    assert sale.status_code == 201, sale.text
+    return {"sale": sale.json()}
+
+
+async def test_a_mixed_return_sends_ONE_notice_that_names_both_amounts(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """F21-37: devuelta en efectivo, la venta mixta liquida 300.000 en
+    efectivo y una nota NUEVA de 500.000. Es UNA devolución: un evento, una
+    entrega, un correo —el de la nota crédito, que es el más específico— y
+    dice los dos montos. Ni un segundo aviso por el efectivo, ni el total de
+    800.000 como si todo hubiera salido del cajón."""
+    ctx = _mixed_sale(client, shop)
+    await _enable(shop["company_id"], "credit_note_issued", "sale_reversed")
+    response = _return("cash")(client, shop, ctx, str(uuid4()))
+    assert response.status_code == 201, response.text
+    body = response.json()
+
+    events = [e for e in await _events(shop["company_id"]) if e.entity_id == UUID(body["id"])]
+    [event] = events
+    assert event.dedupe_key == f"return:{body['id']}"
+    assert event.event_type == "credit_note_issued"
+    assert event.payload["amount"] == "800000.00"
+    assert event.payload["credit_note_amount"] == "500000.00"
+    assert event.payload["refunded_amount"] == "300000.00"
+    assert event.payload["credit_note_number"] == body["credit_note_number"]
+
+    [delivery] = [
+        d for d in await _deliveries(shop["company_id"]) if d.dedupe_key == event.dedupe_key
+    ]
+    assert delivery.status == "sent"
+    [message] = outbox.outbox
+    assert f"nota crédito #{body['credit_note_number']} por $500.000" in message.text
+    assert "$300.000" in message.text
+    assert "$800.000" not in message.text
+
+
+async def test_a_mixed_return_with_credit_note_off_still_names_both_amounts(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """Con la nota crédito apagada sale el aviso de devolución (§18.1-3), y
+    tampoco puede callar la nota: dice lo devuelto y lo que quedó en nota."""
+    ctx = _mixed_sale(client, shop)
+    await _enable(shop["company_id"], "sale_reversed")
+    response = _return("cash")(client, shop, ctx, str(uuid4()))
+    assert response.status_code == 201, response.text
+    body = response.json()
+    [event] = [e for e in await _events(shop["company_id"]) if e.entity_id == UUID(body["id"])]
+    assert event.event_type == "sale_reversed"
+    [message] = outbox.outbox
+    assert "Le devolvimos $300.000" in message.text
+    assert f"nota crédito #{body['credit_note_number']} por $500.000" in message.text
+    assert "$800.000" not in message.text
