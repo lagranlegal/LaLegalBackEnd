@@ -96,9 +96,19 @@ def _esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _layout(*, title: str, blocks_html: list[str], footer_lines: list[str]) -> str:
+def _layout(
+    *,
+    title: str,
+    blocks_html: list[str],
+    footer_lines: list[str] | None = None,
+    footer_html: list[str] | None = None,
+) -> str:
+    """`footer_lines` se escapan; `footer_html` ya viene escapado (el pie del
+    cliente lleva un enlace, y un enlace no se puede escapar entero)."""
     body = "\n".join(blocks_html)
-    footer = "<br>".join(_esc(line) for line in footer_lines)
+    footer = "<br>".join(
+        footer_html if footer_html is not None else [_esc(x) for x in footer_lines or []]
+    )
     return (
         "<!doctype html>\n"
         '<html lang="es"><body style="margin:0;padding:0;background:#f4f4f5;'
@@ -403,7 +413,21 @@ def _customer_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]
     raise ValueError(f"Sin plantilla para el evento {event_type!r}")
 
 
+def _check_unsubscribe_url(url: Any) -> str:
+    """§9.2-e: todo correo al cliente lleva salida, incluidos los de servicio.
+    Sin enlace no se redacta — un correo sin salida es el que termina marcado
+    como spam, y esa marca la paga `prendo.com.co` para todos los inquilinos.
+
+    Y la salida es la PÁGINA de baja, nunca un endpoint de la API: el GET no
+    da de baja (los escáneres abren los enlaces solos, 03/09/2026)."""
+    link = str(url or "")
+    if "/baja/" not in link or "/api/" in link or "#" in link:
+        raise ValueError("Un correo al cliente sin enlace de baja (a la página /baja/…) no sale.")
+    return link
+
+
 def render_customer(event_type: str, payload: dict[str, Any], branding: Branding) -> RenderedEmail:
+    unsubscribe_url = _check_unsubscribe_url(payload.get("unsubscribe_url"))
     subject_tail, paragraphs = _customer_lines(event_type, payload)
     first = _first_name(payload)
     greeting = f"Hola, {first}:" if first else "Hola:"
@@ -414,17 +438,22 @@ def render_customer(event_type: str, payload: dict[str, Any], branding: Branding
     )
     footer = [
         " · ".join(x for x in (branding.company_name, contact, branding.footer_note or "") if x),
-        f"Enviado por {PLATFORM_NAME} en nombre de {branding.company_name}. "
-        f"Si no desea recibir estos avisos, avísele a {branding.company_name}.",
+        f"Enviado por {PLATFORM_NAME} en nombre de {branding.company_name}.",
     ]
+    optout = f"¿No quiere recibir más avisos de {branding.company_name} por correo?"
     blocks = [_p(greeting)] + [_p(line) for line in paragraphs]
+    footer_html = [_esc(line) for line in footer] + [
+        f'{_esc(optout)} <a href="{_esc(unsubscribe_url)}" style="color:#71717a">Darse de baja</a>'
+    ]
     return RenderedEmail(
         # §8: el remitente es la plataforma, el autor es la empresa.
         from_name=f"{branding.company_name} (vía {PLATFORM_NAME})",
         # §8: el asunto nunca dice Prendo.
         subject=f"{branding.company_name} · {subject_tail}",
-        html=_layout(title=subject_tail, blocks_html=blocks, footer_lines=footer),
-        text="\n\n".join([greeting, *paragraphs, *footer]),
+        html=_layout(title=subject_tail, blocks_html=blocks, footer_html=footer_html),
+        text="\n\n".join(
+            [greeting, *paragraphs, *footer, f"{optout} Darse de baja: {unsubscribe_url}"]
+        ),
         reply_to=branding.contact_email or None,
     )
 

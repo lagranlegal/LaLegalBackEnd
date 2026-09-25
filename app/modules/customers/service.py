@@ -2,14 +2,44 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+from fastapi.exceptions import RequestValidationError
+from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
 from app.core.errors import ConflictError, NotFoundError
+from app.modules.contracts import integration as contracts_integration
 from app.modules.customers import repository
+from app.modules.customers.repository import NOW
 from app.modules.customers.schemas import CustomerCreateIn, CustomerOut, CustomerUpdateIn
 from app.modules.identity import repository as identity_repo
+
+_EMAIL = TypeAdapter(EmailStr)
+
+#: La casilla del mostrador (NOTIFICACIONES §9.2-f). Es el único origen que
+#: escribe hoy la API: `contract_form` (§1c) todavía no tiene pantalla.
+_COUNTER = "counter"
+
+
+def _consent_fields() -> dict[str, Any]:
+    return {
+        "email_basis": "consent",
+        "email_basis_at": NOW,
+        "email_consent_at": NOW,
+        "email_consent_source": _COUNTER,
+    }
+
+
+def _validate_email(value: str) -> str:
+    """El mismo `EmailStr` del alta, con el mismo contrato de error:
+    `422 VALIDATION_ERROR` y `email` en `details.errors[].loc`."""
+    try:
+        return str(_EMAIL.validate_python(value))
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**e, "loc": ("body", "email")} for e in exc.errors(include_url=False)]
+        ) from exc
 
 
 def _resolver_fotos(
@@ -50,6 +80,12 @@ def _row_to_customer(row: Row[Any]) -> CustomerOut:
         alert_reason=m["alert_reason"],
         notes=m["notes"],
         created_at=m["created_at"],
+        email_basis=m["email_basis"],
+        email_basis_at=m["email_basis_at"],
+        email_consent_at=m["email_consent_at"],
+        email_consent_source=m["email_consent_source"],
+        email_opt_out_at=m["email_opt_out_at"],
+        email_invalid_at=m["email_invalid_at"],
     )
 
 
@@ -84,6 +120,13 @@ async def create_customer(
         notes=body.notes,
         created_by=created_by,
     )
+    # §9.2-f: la casilla marcada al registrar la ficha. Sin casilla no hay
+    # base: dar el correo no es autorizar nada, y un cliente recién creado no
+    # tiene contrato que la sostenga.
+    if body.email_consent:
+        await repository.update_customer(
+            db, company_id=company_id, customer_id=customer_id, fields=_consent_fields()
+        )
     # `customers` no auditaba NADA. Dar de alta a un cliente es la puerta de
     # entrada de todo lo demás —un contrato o una venta cuelgan de él— y con
     # datos personales de por medio (Habeas Data, Ley 1581): quién lo registró
@@ -96,7 +139,11 @@ async def create_customer(
         action="create_customer",
         entity_type="customer",
         entity_id=customer_id,
-        after={"full_name": body.full_name, "doc_number": body.doc_number},
+        after={
+            "full_name": body.full_name,
+            "doc_number": body.doc_number,
+            "email_basis": "consent" if body.email_consent else None,
+        },
     )
     row = await repository.get_customer(db, company_id=company_id, customer_id=customer_id)
     assert row is not None
@@ -133,6 +180,9 @@ async def update_customer(
         raise NotFoundError("El cliente no existe en esta empresa.")
 
     fields = body.model_dump(exclude_unset=True)
+    consent = fields.pop("email_consent", None)
+    opt_out = fields.pop("email_opt_out", None)
+    fields.update(await _email_basis_changes(db, company_id, current, fields, consent, opt_out))
     # Las dos claves viajan juntas o no viajan: escribir una sin la otra las
     # dejaría contradiciéndose, que es el modo exacto en que una migración de
     # expandir/contraer se rompe.
@@ -146,8 +196,16 @@ async def update_customer(
     await repository.update_customer(
         db, company_id=company_id, customer_id=customer_id, fields=fields
     )
+    row = await repository.get_customer(db, company_id=company_id, customer_id=customer_id)
+    assert row is not None
+    if not fields:
+        return _row_to_customer(row)
+    # Lo que la base puso con `now()` se audita con el valor que quedó.
+    written = {k: (row._mapping[k] if v is NOW else v) for k, v in fields.items()}
     # Con `before`: son datos personales (Ley 1581) y el documento identifica
-    # a quien firmó los contratos. Un cambio ahí hay que poder explicarlo.
+    # a quien firmó los contratos. Un cambio ahí hay que poder explicarlo. La
+    # base legal y la baja van en el mismo registro: son la respuesta a
+    # "¿quién dijo que se le podía escribir, y cuándo?".
     await identity_repo.insert_audit_log(
         db,
         company_id=company_id,
@@ -161,8 +219,75 @@ async def update_customer(
             for campo in fields
             if campo in current._mapping
         },
-        after={k: str(v) if v is not None else None for k, v in fields.items()},
+        after={k: str(v) if v is not None else None for k, v in written.items()},
     )
-    row = await repository.get_customer(db, company_id=company_id, customer_id=customer_id)
-    assert row is not None
     return _row_to_customer(row)
+
+
+async def _email_basis_changes(
+    db: AsyncSession,
+    company_id: UUID,
+    current: Row[Any],
+    fields: dict[str, Any],
+    consent: bool | None,
+    opt_out: bool | None,
+) -> dict[str, Any]:
+    """Qué columnas de la base legal cambian con este PATCH (§9.2).
+
+    Reglas, en orden:
+    1. **Correo:** se valida solo si CAMBIA (ver `CustomerUpdateIn.email`). Una
+       dirección nueva borra la marca de rebote: esa marca hablaba de la vieja.
+    2. **Casilla:** `true` → `consent` (conservando la fecha si ya la tenía);
+       `false` → se retira, y la base cae a `contract` si hay contrato vivo.
+    3. **Correo nuevo sin base, con contrato vivo** → `contract`. El correo casi
+       nunca está el día del contrato (§1c); si la base solo naciera ahí, el
+       que lo da una semana después quedaría sin base para siempre.
+    4. **Baja:** se registra o se levanta; nunca borra la base, la tapa.
+    """
+    m = current._mapping
+    changes: dict[str, Any] = {}
+
+    email_changed = False
+    if "email" in fields:
+        new_email = fields["email"]
+        if new_email is not None and new_email != m["email"]:
+            new_email = _validate_email(new_email)
+            changes["email"] = new_email
+        email_changed = new_email != m["email"]
+        if email_changed and m["email_invalid_at"] is not None:
+            changes["email_invalid_at"] = None
+    email_after = changes.get("email", fields.get("email", m["email"]))
+    has_email = bool((email_after or "").strip())
+
+    basis = m["email_basis"]
+    if consent is True and basis != "consent":
+        changes.update(_consent_fields())
+        basis = "consent"
+    elif consent is False and basis == "consent":
+        live = has_email and await contracts_integration.has_live_contract(
+            db, company_id=company_id, customer_id=m["id"]
+        )
+        basis = "contract" if live else None
+        changes.update(
+            email_basis=basis,
+            email_basis_at=NOW if basis else None,
+            email_consent_at=None,
+            email_consent_source=None,
+        )
+
+    if (
+        basis is None
+        and email_changed
+        and has_email
+        and consent is not False
+        and await contracts_integration.has_live_contract(
+            db, company_id=company_id, customer_id=m["id"]
+        )
+    ):
+        changes.update(email_basis="contract", email_basis_at=NOW)
+
+    if opt_out is True and m["email_opt_out_at"] is None:
+        changes["email_opt_out_at"] = NOW
+    elif opt_out is False and m["email_opt_out_at"] is not None:
+        changes["email_opt_out_at"] = None
+    return changes

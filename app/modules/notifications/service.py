@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.pagination import CursorPage, make_time_page
 from app.core.errors import AppError, NotFoundError
 from app.core.settings import get_settings
+from app.modules.customers import integration as customers_integration
 from app.modules.identity import repository as identity_repo
-from app.modules.notifications import catalog, preferences, repository
+from app.modules.notifications import catalog, preferences, repository, unsubscribe
 from app.modules.notifications.preferences import NotificationPrefs
 from app.modules.notifications.schemas import (
     ContactLimitsOut,
@@ -30,6 +31,7 @@ from app.modules.notifications.schemas import (
     NotificationSettingsOut,
     NotificationSettingsUpdateIn,
     ThresholdsOut,
+    UnsubscribeOut,
 )
 
 #: Qué permiso hace destinatario a un usuario, por familia de evento (§4.3).
@@ -48,6 +50,50 @@ class RecordOutcome:
     #: Las entregas que nacieron `pending`: las que un productor transaccional
     #: puede mandar ya, después del commit (§5.1), sin esperar al job.
     pending_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True)
+class CustomerGate:
+    """Si a este cliente se le puede escribir para esta finalidad (§9.2-c).
+
+    `status` es `ok`, `unroutable` o `suppressed`; `basis` es la base con la
+    que sale (solo si `ok`)."""
+
+    status: str
+    email: str | None
+    basis: str | None = None
+    reason: str | None = None
+
+
+def customer_gate(contact: Row[Any] | None, purpose: str) -> CustomerGate:
+    """El ÚNICO lugar donde se cruza la base legal del cliente con la
+    finalidad del evento. Lo usan el que planifica (`record_event`) y el que
+    manda (`dispatcher._prepare`): lo que cambió en el medio —una baja, un
+    correo corregido— tiene que surtir efecto antes de enviar, no en el
+    próximo aviso.
+
+    Tres cortes que ganan siempre y en este orden (§9.2-c): no hay dirección,
+    pidió la baja, rebotó. Después, la matriz."""
+    m = contact._mapping if contact is not None else {}
+    email = (m.get("email") or "").strip()
+    if not email:
+        return CustomerGate("unroutable", None)
+    if m.get("email_opt_out_at") is not None:
+        return CustomerGate(
+            "suppressed", email, reason="El cliente pidió la baja de los avisos por correo."
+        )
+    if m.get("email_invalid_at") is not None:
+        return CustomerGate(
+            "suppressed", email, reason="El correo del cliente rebotó: no se vuelve a intentar."
+        )
+    basis = m.get("email_basis")
+    if not catalog.basis_allows(purpose, basis):
+        return CustomerGate(
+            "suppressed",
+            email,
+            reason="El cliente no tiene base legal registrada para esta finalidad.",
+        )
+    return CustomerGate("ok", email, basis=basis)
 
 
 def is_stale(*, target_date: date | None, today: date, stale_after_days: int) -> bool:
@@ -108,7 +154,13 @@ async def record_event(
     counts: dict[str, int] = {}
     pending: list[UUID] = []
 
-    async def _add(to: str | None, status: str, user_id: UUID | None, error: str | None) -> None:
+    async def _add(
+        to: str | None,
+        status: str,
+        user_id: UUID | None,
+        error: str | None,
+        legal_basis: str | None = None,
+    ) -> None:
         delivery_id = await repository.insert_delivery(
             db,
             company_id=company_id,
@@ -117,6 +169,7 @@ async def record_event(
             recipient_user_id=user_id,
             status=status,
             last_error=error,
+            legal_basis=legal_basis,
         )
         counts[status] = counts.get(status, 0) + 1
         if delivery_id is not None and status == "pending":
@@ -142,23 +195,18 @@ async def record_event(
             if customer_id
             else None
         )
-        email = (contact._mapping["email"] or "").strip() if contact else ""
-        if not email:
+        gate = customer_gate(contact, et.purpose)
+        if gate.status == "unroutable":
             # §1: el caso NORMAL. Se registra, no se omite.
             await _add(None, "unroutable", None, None)
-        elif not catalog.basis_allows(et.purpose, None):
-            # §9.2-c: sin base legal registrada no sale nada. `customer.email_basis`
-            # llega en la fase 3; hasta entonces todo cliente está en este caso.
-            await _add(
-                email,
-                "suppressed",
-                None,
-                "El cliente no tiene base legal registrada para esta finalidad.",
-            )
+        elif gate.status == "suppressed":
+            # §9.2-c: baja, rebote o sin base para esta finalidad. Con la
+            # dirección y el motivo: es lo que cuenta el agregado (§4.2).
+            await _add(gate.email, "suppressed", None, gate.reason)
         elif stale:
-            await _add(email, "skipped_stale", None, None)
+            await _add(gate.email, "skipped_stale", None, None)
         else:
-            await _add(email, "pending", None, None)
+            await _add(gate.email, "pending", None, None, gate.basis)
         return RecordOutcome(created=True, event_id=event_id, deliveries=counts)
 
     # audience='platform' (P1, §16): un destinatario, el que trae el productor.
@@ -333,6 +381,7 @@ def _row_to_delivery(row: Row[Any]) -> DeliveryOut:
         sent_at=m["sent_at"],
         created_at=m["created_at"],
         updated_at=m["updated_at"],
+        legal_basis=m["legal_basis"],
     )
 
 
@@ -355,3 +404,54 @@ async def list_deliveries(
     )
     page = make_time_page(rows, limit, lambda r: (r._mapping["created_at"], r._mapping["id"]))
     return CursorPage(items=[_row_to_delivery(r) for r in page.items], next_cursor=page.next_cursor)
+
+
+# ----------------------------------------------------------- enlace de baja ----
+
+
+def _invalid_link() -> AppError:
+    # Un solo código para todo lo que no sirve —firma mala, cliente o empresa
+    # inexistente, secreto sin configurar—: a quien fabrica tokens no se le
+    # explica en qué se equivocó. 404, como un recurso que no existe.
+    return NotFoundError(
+        "Este enlace de baja no es válido. Si quiere dejar de recibir avisos, "
+        "comuníquese con la compraventa.",
+        code="UNSUBSCRIBE_LINK_INVALID",
+    )
+
+
+async def _resolve_unsubscribe(
+    db: AsyncSession, token: str
+) -> tuple[UUID, UUID, str, dict[str, Any]]:
+    ids = unsubscribe.read_token(token)
+    if ids is None:
+        raise _invalid_link()
+    company_id, customer_id = ids
+    company = await repository.get_company(db, company_id=company_id)
+    status = await customers_integration.get_email_status(
+        db, company_id=company_id, customer_id=customer_id
+    )
+    if company is None or status is None:
+        raise _invalid_link()
+    return company_id, customer_id, company._mapping["name"], status
+
+
+async def get_unsubscribe(db: AsyncSession, *, token: str) -> UnsubscribeOut:
+    _, _, company_name, status = await _resolve_unsubscribe(db, token)
+    return UnsubscribeOut(
+        company_name=company_name,
+        email_hint=unsubscribe.mask_email(status["email"]),
+        unsubscribed_at=status["email_opt_out_at"],
+    )
+
+
+async def confirm_unsubscribe(db: AsyncSession, *, token: str) -> UnsubscribeOut:
+    company_id, customer_id, company_name, status = await _resolve_unsubscribe(db, token)
+    opted_out_at = await customers_integration.record_opt_out_from_link(
+        db, company_id=company_id, customer_id=customer_id
+    )
+    return UnsubscribeOut(
+        company_name=company_name,
+        email_hint=unsubscribe.mask_email(status["email"]),
+        unsubscribed_at=opted_out_at,
+    )

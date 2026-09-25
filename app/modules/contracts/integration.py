@@ -108,3 +108,27 @@ async def list_state_entries(
         )
         (arrears if m["status"] == "in_arrears" else extension).append(entry)
     return arrears, extension
+
+
+async def has_live_contract(db: AsyncSession, *, company_id: UUID, customer_id: UUID) -> bool:
+    """¿El cliente tiene al menos un contrato NO terminal? Es la condición de
+    la base legal `contract` del correo (docs/NOTIFICACIONES.md §9.2-a): la
+    pregunta `customers` al registrar un correo nuevo. Mismo predicado que el
+    backfill de `00059`."""
+    result = await db.execute(
+        text(
+            """
+            select exists (
+              select 1 from public.contract
+              where company_id = :company_id and customer_id = :customer_id
+                and status::text <> all(:terminal)
+            )
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "customer_id": str(customer_id),
+            "terminal": sorted(rules.TERMINAL_STATUSES),
+        },
+    )
+    return bool(result.scalar_one())

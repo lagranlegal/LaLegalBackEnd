@@ -16,6 +16,7 @@ from app.modules.customers.router import router as customers_router
 from app.modules.identity.router import router as identity_router
 from app.modules.identity.router import router_me as me_router
 from app.modules.inventory.router import router as inventory_router
+from app.modules.notifications.router import public_router as notifications_public_router
 from app.modules.notifications.router import router as notifications_router
 from app.modules.platform.router import router as platform_router
 from app.modules.reports.router import router as reports_router
@@ -55,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(reports_router)
     app.include_router(notifications_router)
+    app.include_router(notifications_public_router)
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, str]:

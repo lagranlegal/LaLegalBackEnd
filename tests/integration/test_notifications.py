@@ -11,6 +11,7 @@ que "envían" inyectan un `RecordingProvider`. Los instantes son FIJOS (sept.
 (`only_company_ids`), para no tocar el resto de la base local.
 """
 
+import dataclasses
 import json
 from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, timedelta
@@ -25,6 +26,7 @@ from sqlalchemy import bindparam, text
 
 from app.core import security
 from app.core.db import AsyncSessionLocal, engine
+from app.core.settings import get_settings
 from app.jobs import nightly
 from app.modules.notifications import catalog, digest, dispatcher
 from app.modules.notifications.providers import (
@@ -78,6 +80,11 @@ async def notif(
     suscripción lejana. Los avisos nacen APAGADOS, como en producción."""
     private_pem, public_key = rsa_keypair
     monkeypatch.setattr(security, "get_jwk_client", lambda: FakeJwkClient(public_key))
+    # Todo correo al cliente lleva enlace de baja (§9.2-e), y sin estos dos no
+    # hay cómo armarlo: el despachador no lo manda (§17).
+    monkeypatch.setenv("FRONTEND_URL", "https://app.example.com")
+    monkeypatch.setenv("NOTIFICATIONS_LINK_SECRET", "secreto-de-prueba-de-los-enlaces-de-baja")
+    get_settings.cache_clear()
 
     cid, admin_role, asesor_role = uuid4(), uuid4(), uuid4()
     admin_id, asesor_id = uuid4(), uuid4()
@@ -143,9 +150,10 @@ async def notif(
         await s.execute(
             text(
                 "insert into public.customer (id, company_id, full_name, doc_type, doc_number, "
-                "phone, email) values "
-                "(:a, :cid, 'Juana Pérez', 'cc', :da, '3000000001', 'juana@example.com'), "
-                "(:b, :cid, 'Pedro Gómez', 'cc', :db, '3000000002', null)"
+                "phone, email, email_basis, email_basis_at) values "
+                "(:a, :cid, 'Juana Pérez', 'cc', :da, '3000000001', 'juana@example.com', "
+                " 'contract', now()), "
+                "(:b, :cid, 'Pedro Gómez', 'cc', :db, '3000000002', null, null, null)"
             ),
             {
                 "a": str(customer_mail),
@@ -196,6 +204,7 @@ async def notif(
             # `audit_log` es inmutable (trigger): su borrado falla a propósito
             # y no tiene FK, así que no bloquea el resto de la limpieza.
             pass
+    get_settings.cache_clear()
 
 
 # ------------------------------------------------------------------ helpers ----
@@ -538,10 +547,13 @@ async def test_customer_auction_notice_off_by_default(notif: dict[str, Any]) -> 
 
 
 async def test_customer_auction_notice_on_is_only_a_setting(notif: dict[str, Any]) -> None:
-    """Encendido: produce las dos entregas. La del cliente con correo nace
-    `suppressed` porque hasta la fase 3 no hay base legal registrada (§9.2-c):
-    encender un evento no se adelanta a la base que lo sostiene. La del cliente
-    sin correo, `unroutable` (§1: el caso normal, registrado)."""
+    """Encendido: produce las dos entregas. La del cliente con correo y base
+    `contract` nace `pending` (§9.2-c: servicio + contrato sale); la del
+    cliente sin correo, `unroutable` (§1: el caso normal, registrado).
+
+    Hasta la fase 3 la de Juana nacía `suppressed`: no existía dónde anotar la
+    base, y encender un evento no se adelantaba a ella. El caso "tiene correo
+    y no tiene base" sigue probado, en la sección de la base legal."""
     cid = notif["company_id"]
     await _enable(cid, events={"auction_ready_customer": True})
     for customer in (notif["customer_mail"], notif["customer_nomail"]):
@@ -556,14 +568,14 @@ async def test_customer_auction_notice_on_is_only_a_setting(notif: dict[str, Any
 
     customer_deliveries = await _deliveries(cid, catalog.AUCTION_READY_CUSTOMER)
     assert sorted((d.status, d.to_address) for d in customer_deliveries) == [
-        ("suppressed", "juana@example.com"),
+        ("pending", "juana@example.com"),
         ("unroutable", None),
     ]
     assert len(await _deliveries(cid, catalog.WEEKLY_DIGEST)) == 1
 
     provider = RecordingProvider()
     await _dispatch(cid, MON, provider)
-    assert all("juana" not in m.to for m in provider.outbox)
+    assert [m.to for m in provider.outbox if "juana" in m.to] == ["juana@example.com"]
 
 
 # ------------------------------------------------------- Ley 2300 (despacho) ----
@@ -661,7 +673,11 @@ async def test_customer_mail_skips_colombian_holidays(notif: dict[str, Any]) -> 
     cid = notif["company_id"]
     await _enable(cid, events=_DUE_ON)
     delivery = await _pending(
-        cid, event_type="installment_due_soon", to="juana@example.com", payload=_DUE
+        cid,
+        event_type="installment_due_soon",
+        to="juana@example.com",
+        payload=_DUE,
+        customer_id=notif["customer_mail"],
     )
     await _dispatch(cid, _bog(2030, 10, 14, 9), RecordingProvider())  # festivo (lunes)
     assert await _status(delivery) == ("pending", _bog(2030, 10, 15, 7))
@@ -671,19 +687,31 @@ async def test_weekly_cap_per_customer_throttles(notif: dict[str, Any]) -> None:
     cid = notif["company_id"]
     await _enable(cid, events=_DUE_ON)
     first = await _pending(
-        cid, event_type="installment_due_soon", to="juana@example.com", payload=_DUE
+        cid,
+        event_type="installment_due_soon",
+        to="juana@example.com",
+        payload=_DUE,
+        customer_id=notif["customer_mail"],
     )
     await _dispatch(cid, _bog(2030, 9, 2, 9), RecordingProvider())
     assert (await _status(first))[0] == "sent"
 
     second = await _pending(
-        cid, event_type="installment_due_soon", to="JUANA@example.com", payload=_DUE
+        cid,
+        event_type="installment_due_soon",
+        to="JUANA@example.com",
+        payload=_DUE,
+        customer_id=notif["customer_mail"],
     )
     await _dispatch(cid, _bog(2030, 9, 4, 9), RecordingProvider())
     assert (await _status(second))[0] == "throttled"
 
     third = await _pending(
-        cid, event_type="installment_due_soon", to="juana@example.com", payload=_DUE
+        cid,
+        event_type="installment_due_soon",
+        to="juana@example.com",
+        payload=_DUE,
+        customer_id=notif["customer_mail"],
     )
     await _dispatch(cid, _bog(2030, 9, 10, 9), RecordingProvider())  # pasó la semana
     assert (await _status(third))[0] == "sent"
@@ -693,7 +721,11 @@ async def test_limits_are_relaxed_by_configuration(notif: dict[str, Any]) -> Non
     cid = notif["company_id"]
     await _enable(cid, events=_DUE_ON, customer_contact_limits={"enabled": False})
     delivery = await _pending(
-        cid, event_type="installment_due_soon", to="juana@example.com", payload=_DUE
+        cid,
+        event_type="installment_due_soon",
+        to="juana@example.com",
+        payload=_DUE,
+        customer_id=notif["customer_mail"],
     )
     await _dispatch(cid, _bog(2030, 9, 1, 3), RecordingProvider())  # domingo 3 a. m.
     assert (await _status(delivery))[0] == "sent"
@@ -720,7 +752,11 @@ async def test_turning_an_event_off_stops_what_was_pending(notif: dict[str, Any]
     cid = notif["company_id"]
     await _enable(cid)  # installment_due_soon sigue en su default: apagado
     delivery = await _pending(
-        cid, event_type="installment_due_soon", to="juana@example.com", payload=_DUE
+        cid,
+        event_type="installment_due_soon",
+        to="juana@example.com",
+        payload=_DUE,
+        customer_id=notif["customer_mail"],
     )
     provider = RecordingProvider()
     await _dispatch(cid, _bog(2030, 9, 2, 9), provider)
@@ -958,3 +994,206 @@ async def test_digest_permission_seeded_for_admins_only() -> None:
         "notifications.receive_alerts",
         "notifications.receive_digest",
     ]
+
+
+# --------------------------------------------- base legal del cliente (fase 3) ----
+#
+# §14: «la matriz de §9.2-c probada en sus cuatro casillas, y el caso que
+# prueba el diseño y no la regla: cambiar el mapa a `service: ['consent']`».
+
+
+async def _set_basis(customer_id: UUID, basis: str | None, **extra: Any) -> None:
+    sets = {
+        "email_basis": basis,
+        "email_basis_at": datetime(2030, 1, 1, tzinfo=UTC) if basis else None,
+        "email_consent_at": datetime(2030, 1, 1, tzinfo=UTC) if basis == "consent" else None,
+        "email_consent_source": "counter" if basis == "consent" else None,
+        **extra,
+    }
+    await _exec(
+        "update public.customer set " + ", ".join(f"{k} = :{k}" for k in sets) + " where id = :id",
+        {**sets, "id": str(customer_id)},
+    )
+
+
+async def _auction_notice_for_juana(notif: dict[str, Any]) -> list[Any]:
+    cid = notif["company_id"]
+    await _enable(cid, events={"auction_ready_customer": True})
+    await _contract(
+        cid,
+        notif["customer_mail"],
+        status="in_extension",
+        interest_paid_until=date(2030, 4, 1),
+        extension_ends_at=date(2030, 9, 1),
+    )
+    await _digest(cid, MON)
+    return await _rows(
+        "select d.status, d.legal_basis, d.last_error from public.notification_delivery d "
+        "join public.notification_event e on e.id = d.event_id "
+        "where d.company_id = :cid and e.event_type = :t",
+        {"cid": str(cid), "t": catalog.AUCTION_READY_CUSTOMER},
+    )
+
+
+def _as_marketing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No hay ni un evento de mercadeo en el catálogo (§9.2-b), y esa es la
+    razón por la que la recomendación es sostenible. Para probar la casilla
+    se disfraza uno — en memoria, sin tocar la tabla."""
+    et = catalog.get(catalog.AUCTION_READY_CUSTOMER)
+    monkeypatch.setitem(catalog.EVENT_TYPES, et.code, dataclasses.replace(et, purpose="marketing"))
+
+
+async def test_matrix_service_with_contract_basis_goes_out(notif: dict[str, Any]) -> None:
+    [d] = await _auction_notice_for_juana(notif)
+    assert (d.status, d.legal_basis) == ("pending", "contract")
+
+
+async def test_matrix_email_without_basis_goes_nowhere(notif: dict[str, Any]) -> None:
+    """Tener el correo no es tener base: el mostrador lo anotó, nadie lo
+    autorizó y no hay contrato vivo que lo sostenga."""
+    await _set_basis(notif["customer_mail"], None)
+    [d] = await _auction_notice_for_juana(notif)
+    assert (d.status, d.legal_basis) == ("suppressed", None)
+    assert "base legal" in d.last_error
+
+
+async def test_matrix_marketing_needs_express_consent(
+    notif: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _as_marketing(monkeypatch)
+    [d] = await _auction_notice_for_juana(notif)
+    assert (d.status, d.legal_basis) == ("suppressed", None)
+
+
+async def test_matrix_marketing_with_consent_goes_out(
+    notif: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _as_marketing(monkeypatch)
+    await _set_basis(notif["customer_mail"], "consent")
+    [d] = await _auction_notice_for_juana(notif)
+    assert (d.status, d.legal_basis) == ("pending", "consent")
+
+
+async def test_opt_out_beats_any_basis(notif: dict[str, Any]) -> None:
+    await _set_basis(
+        notif["customer_mail"], "consent", email_opt_out_at=datetime(2030, 2, 1, tzinfo=UTC)
+    )
+    [d] = await _auction_notice_for_juana(notif)
+    assert (d.status, d.legal_basis) == ("suppressed", None)
+    assert "baja" in d.last_error
+
+
+async def test_a_bounced_address_is_not_retried(notif: dict[str, Any]) -> None:
+    await _set_basis(
+        notif["customer_mail"], "contract", email_invalid_at=datetime(2030, 2, 1, tzinfo=UTC)
+    )
+    [d] = await _auction_notice_for_juana(notif)
+    assert d.status == "suppressed"
+    assert "rebot" in d.last_error
+
+
+async def test_strict_lawyer_is_one_line_of_configuration(
+    notif: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El caso que prueba el DISEÑO (§9.2-d): si un abogado dice «estricto»,
+    se cambia el mapa y nada más — cero migraciones, cero plantillas. Los
+    clientes con base solo contractual quedan `suppressed`, contados."""
+    monkeypatch.setitem(catalog.PURPOSE_ACCEPTED_BASES, "service", frozenset({"consent"}))
+    [d] = await _auction_notice_for_juana(notif)
+    assert d.status == "suppressed"
+
+
+async def _juana_pending(notif: dict[str, Any]) -> UUID:
+    return await _pending(
+        notif["company_id"],
+        event_type="installment_due_soon",
+        to="juana@example.com",
+        payload=_DUE,
+        customer_id=notif["customer_mail"],
+    )
+
+
+async def test_an_opt_out_after_planning_stops_the_pending_mail(notif: dict[str, Any]) -> None:
+    """La baja tiene que surtir efecto YA, no en el próximo aviso: una entrega
+    planificada anoche no sale hoy si la persona se dio de baja en el medio."""
+    cid = notif["company_id"]
+    await _enable(cid, events=_DUE_ON)
+    delivery = await _juana_pending(notif)
+    await _set_basis(
+        notif["customer_mail"], "contract", email_opt_out_at=datetime(2030, 9, 1, tzinfo=UTC)
+    )
+    provider = RecordingProvider()
+    await _dispatch(cid, _bog(2030, 9, 2, 9), provider)
+    assert (await _status(delivery))[0] == "suppressed"
+    assert provider.outbox == []
+
+
+async def test_a_changed_address_does_not_receive_the_old_mail(notif: dict[str, Any]) -> None:
+    """La entrega guarda la dirección del día que se planificó. Si el mostrador
+    la corrigió después, mandarla a la vieja es mandarla a quien no es."""
+    cid = notif["company_id"]
+    await _enable(cid, events=_DUE_ON)
+    delivery = await _juana_pending(notif)
+    await _exec(
+        "update public.customer set email = 'juana.nueva@example.com' where id = :id",
+        {"id": str(notif["customer_mail"])},
+    )
+    provider = RecordingProvider()
+    await _dispatch(cid, _bog(2030, 9, 2, 9), provider)
+    assert (await _status(delivery))[0] == "suppressed"
+    assert provider.outbox == []
+
+
+async def test_a_sent_mail_records_its_basis_and_carries_the_unsubscribe_link(
+    notif: dict[str, Any],
+) -> None:
+    """§9.2-a: la base que importa es la del día que salió, y hay que poder
+    mostrarla después — queda en la entrega. §9.2-e: todo correo al cliente
+    lleva salida, y la salida es una PÁGINA (nunca un enlace que dé de baja
+    al abrirse)."""
+    from app.modules.notifications import unsubscribe
+
+    cid = notif["company_id"]
+    await _enable(cid, events=_DUE_ON)
+    await _set_basis(notif["customer_mail"], "consent")
+    delivery = await _juana_pending(notif)
+    provider = RecordingProvider()
+    await _dispatch(cid, _bog(2030, 9, 2, 9), provider)
+
+    row = (
+        await _rows(
+            "select status, legal_basis from public.notification_delivery where id = :id",
+            {"id": str(delivery)},
+        )
+    )[0]
+    assert (row.status, row.legal_basis) == ("sent", "consent")
+
+    [message] = provider.outbox
+    prefix = "https://app.example.com/baja/"
+    assert prefix in message.text
+    assert prefix in message.html
+    token = message.text.split(prefix, 1)[1].split()[0]
+    assert unsubscribe.read_token(token) == (cid, notif["customer_mail"])
+
+
+async def test_without_link_config_a_customer_mail_does_not_go_out(
+    notif: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un correo al cliente sin salida no sale (§9.2-e). No es reintentable —
+    falta configuración, no suerte—, así que va a `dead` con el motivo."""
+    cid = notif["company_id"]
+    await _enable(cid, events=_DUE_ON)
+    delivery = await _juana_pending(notif)
+    monkeypatch.setenv("NOTIFICATIONS_LINK_SECRET", "")
+    get_settings.cache_clear()
+    provider = RecordingProvider()
+    await _dispatch(cid, _bog(2030, 9, 2, 9), provider)
+    row = (
+        await _rows(
+            "select status, last_error from public.notification_delivery where id = :id",
+            {"id": str(delivery)},
+        )
+    )[0]
+    assert row.status == "dead"
+    assert "baja" in row.last_error
+    assert provider.outbox == []

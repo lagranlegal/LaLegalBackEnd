@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -7,9 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.search import name_clauses
 
+#: Marcador para `update_customer`: "esta columna vale `now()`".
+NOW = object()
+
 _COLUMNS = (
     "id, full_name, doc_type, doc_number, doc_issue_place, address, phone, email, "
-    "doc_photo_url, doc_photos, status, alert_reason, notes, created_at"
+    "doc_photo_url, doc_photos, status, alert_reason, notes, created_at, "
+    "email_basis, email_basis_at, email_consent_at, email_consent_source, "
+    "email_opt_out_at, email_invalid_at"
 )
 
 
@@ -123,10 +129,19 @@ async def update_customer(
     # `doc_photos` es `jsonb`: sin el cast, asyncpg manda el string y Postgres
     # se niega a asignarlo a la columna. El resto de las columnas son
     # escalares y no lo necesitan.
+    # Las columnas de fecha de la base legal aceptan el literal `now()` (ver
+    # `service._email_basis_changes`): la hora la pone la base, en la misma
+    # transacción, no el reloj del proceso.
+    now_cols = {k for k, v in fields.items() if v is NOW}
     assignments = ", ".join(
-        f"{key} = cast(:{key} as jsonb)" if key == "doc_photos" else f"{key} = :{key}"
+        f"{key} = now()"
+        if key in now_cols
+        else f"{key} = cast(:{key} as jsonb)"
+        if key == "doc_photos"
+        else f"{key} = :{key}"
         for key in fields
     )
+    fields = {k: v for k, v in fields.items() if k not in now_cols}
     params = {**fields, "company_id": str(company_id), "id": str(customer_id)}
     await db.execute(
         text(
@@ -134,3 +149,46 @@ async def update_customer(
         ),
         params,
     )
+
+
+async def set_contract_basis_if_missing(
+    db: AsyncSession, *, company_id: UUID, customer_id: UUID
+) -> bool:
+    """Escribe la base `contract` si el cliente tiene correo y NINGUNA base.
+    Nunca pisa `consent` (cubre lo mismo y más, y su fecha es la prueba)."""
+    result = await db.execute(
+        text(
+            """
+            update public.customer
+               set email_basis = 'contract', email_basis_at = now()
+             where company_id = :company_id and id = :id
+               and email_basis is null
+               and nullif(btrim(email), '') is not null
+            returning id
+            """
+        ),
+        {"company_id": str(company_id), "id": str(customer_id)},
+    )
+    return result.first() is not None
+
+
+async def mark_opted_out(
+    db: AsyncSession, *, company_id: UUID, customer_id: UUID
+) -> tuple[bool, datetime | None]:
+    """Pone `email_opt_out_at` si no estaba. Devuelve (si cambió, la fecha)."""
+    result = await db.execute(
+        text(
+            """
+            update public.customer
+               set email_opt_out_at = now()
+             where company_id = :company_id and id = :id and email_opt_out_at is null
+            returning email_opt_out_at
+            """
+        ),
+        {"company_id": str(company_id), "id": str(customer_id)},
+    )
+    row = result.first()
+    if row is not None:
+        return True, row[0]
+    current = await get_customer(db, company_id=company_id, customer_id=customer_id)
+    return False, current._mapping["email_opt_out_at"] if current else None

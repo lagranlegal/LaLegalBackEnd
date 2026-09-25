@@ -35,6 +35,7 @@ from app.modules.contracts.schemas import (
     PaymentQuoteOut,
     SettlementInfoOut,
 )
+from app.modules.customers import integration as customers_integration
 from app.modules.customers import repository as customers_repo
 from app.modules.identity import repository as identity_repo
 from app.modules.inventory import integration as inventory_integration
@@ -324,6 +325,11 @@ async def create_contract(
         entity_id=contract_id,
         after={"number": number, "principal": str(body.principal)},
     )
+    # NOTIFICACIONES §9.2-a: un contrato vivo es la base `contract` del
+    # correo del cliente — si tiene correo y todavía no tiene base.
+    await customers_integration.ensure_contract_basis(
+        db, company_id=company_id, customer_id=body.customer_id
+    )
 
     return await get_contract(db, company_id=company_id, contract_id=contract_id)
 
@@ -467,6 +473,10 @@ async def import_contract(
             "principal": str(body.principal),
             "capital_balance": str(body.capital_balance),
         },
+    )
+    # Un contrato importado está tan vivo como uno nativo (§9.2-a).
+    await customers_integration.ensure_contract_basis(
+        db, company_id=company_id, customer_id=body.customer_id
     )
 
     return await get_contract(db, company_id=company_id, contract_id=contract_id)
@@ -1313,5 +1323,10 @@ async def extend_loan(
             "interest_paid_until": str(interest_paid_until),
             "extended_on": str(today),
         },
+    )
+    # El sucesor es un contrato vivo más (§9.2-a). Casi siempre ya había base
+    # por el original; esto cubre al cliente que dio el correo en el medio.
+    await customers_integration.ensure_contract_basis(
+        db, company_id=company_id, customer_id=viejo["customer_id"]
     )
     return await get_contract(db, company_id=company_id, contract_id=nuevo_id)

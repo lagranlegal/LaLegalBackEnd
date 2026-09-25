@@ -10,6 +10,10 @@ BRAND = templates.Branding(
     footer_note="Gracias por preferirnos",
 )
 
+#: Todo correo al cliente lleva salida (§9.2-e); el despachador la arma al
+#: enviar. Sin ella la plantilla no redacta (ver el test de abajo).
+UNSUB = "https://app.example.com/baja/AbC.dEf"
+
 
 def test_money_is_colombian() -> None:
     assert templates.money("1234567.00") == "$1.234.567"
@@ -22,6 +26,7 @@ def test_customer_render_never_leaks_document_or_item() -> None:
         "contract_number": 42,
         "extension_ends_at": "2030-09-01",
         "first_name": "Juan Pérez",
+        "unsubscribe_url": UNSUB,
         # Lo que un productor descuidado podría meter de más:
         "doc_number": "1032456789",
         "item_description": "Cadena de oro 18k",
@@ -38,7 +43,9 @@ def test_customer_render_never_leaks_document_or_item() -> None:
 
 def test_customer_sender_is_platform_on_behalf_of_company() -> None:
     rendered = templates.render(
-        "auction_ready_customer", {"contract_number": 1, "extension_ends_at": "2030-09-01"}, BRAND
+        "auction_ready_customer",
+        {"contract_number": 1, "extension_ends_at": "2030-09-01", "unsubscribe_url": UNSUB},
+        BRAND,
     )
     assert rendered.from_name == "LA GRAN LEGAL (vía Prendo)"
     assert rendered.subject.startswith("LA GRAN LEGAL · ")
@@ -49,9 +56,42 @@ def test_customer_sender_is_platform_on_behalf_of_company() -> None:
 def test_no_reply_to_when_company_has_no_contact_email() -> None:
     brand = templates.Branding(company_name="X")
     rendered = templates.render(
-        "auction_ready_customer", {"contract_number": 1, "extension_ends_at": "2030-09-01"}, brand
+        "auction_ready_customer",
+        {"contract_number": 1, "extension_ends_at": "2030-09-01", "unsubscribe_url": UNSUB},
+        brand,
     )
     assert rendered.reply_to is None
+
+
+def test_customer_mail_carries_the_unsubscribe_page_link() -> None:
+    """§9.2-e: salida en TODO correo al cliente, también en los de servicio,
+    en el HTML y en el texto plano. Y es la página, no la API."""
+    rendered = templates.render(
+        "installment_due_soon",
+        {
+            "due_date": "2030-09-05",
+            "contracts": [{"number": 1, "amount": "50000"}],
+            "unsubscribe_url": UNSUB,
+        },
+        BRAND,
+    )
+    assert f'href="{UNSUB}"' in rendered.html
+    assert UNSUB in rendered.text
+    assert "Darse de baja" in rendered.html
+
+
+def test_customer_mail_without_unsubscribe_link_is_not_written() -> None:
+    import pytest
+
+    base = {"contract_number": 1, "extension_ends_at": "2030-09-01"}
+    for bad in (
+        None,
+        "",
+        "https://api.example.com/api/v1/public/unsubscribe/x",
+        "https://app.example.com/otra-cosa",
+    ):
+        with pytest.raises(ValueError, match="baja"):
+            templates.render("auction_ready_customer", {**base, "unsubscribe_url": bad}, BRAND)
 
 
 def test_from_header_cannot_be_injected() -> None:

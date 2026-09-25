@@ -142,3 +142,20 @@ class DeliveryOut(BaseModel):
     sent_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    #: Con qué base legal se decidió mandarla (NOTIFICACIONES §9.2-a): la de
+    #: ESE día, que es la que hay que poder mostrar después. Solo en entregas
+    #: al cliente que salieron o iban a salir.
+    legal_basis: Literal["contract", "consent"] | None = None
+
+
+class UnsubscribeOut(BaseModel):
+    """Lo que ve quien abre el enlace de baja (NOTIFICACIONES §17). Lo justo
+    para reconocerse: la empresa y el correo enmascarado. Ni el nombre del
+    cliente ni su documento — quien tiene el enlace puede no ser el titular
+    (un correo reenviado)."""
+
+    company_name: str
+    #: `j•••@gmail.com`. `null` si la ficha ya no tiene correo.
+    email_hint: str | None
+    #: `null` = sigue suscrito. Con fecha = ya se dio de baja (y desde cuándo).
+    unsubscribed_at: datetime | None

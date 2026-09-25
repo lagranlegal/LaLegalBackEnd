@@ -54,6 +54,9 @@ ACCIONES_AUDITADAS = {
     # customers
     "create_customer",
     "update_customer",
+    # la baja pedida por el titular desde el enlace del correo
+    # (NOTIFICACIONES §17): `user_id` NULL, no la hizo un usuario
+    "email_opt_out",
     # catalogs
     "create_category",
     "update_category",

@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # dominio de la plataforma; el nombre visible lo decide cada correo.
     resend_api_key: str = ""
     notifications_from_address: str = "notificaciones@prendo.com.co"
+    # Firma los enlaces de baja de los correos al cliente (NOTIFICACIONES §17).
+    # Sin esto no se arma ningún enlace, y un correo al cliente sin salida no
+    # sale (queda `dead`); el endpoint público tampoco acepta ningún token —
+    # un HMAC con clave vacía lo firma cualquiera. Cambiarlo invalida los
+    # enlaces de los correos ya enviados: se rota solo si se filtró.
+    notifications_link_secret: str = ""
 
     @model_validator(mode="after")
     def _resolve_jwks_url(self) -> "Settings":

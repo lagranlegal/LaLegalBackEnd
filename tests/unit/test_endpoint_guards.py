@@ -25,6 +25,12 @@ SIN_PERMISO_A_PROPOSITO = {
     # dejaría fuera a quien todavía no tiene ninguno (API_GUIDE §2.6).
     ("GET", "/api/v1/me"),
     ("PATCH", "/api/v1/me"),
+    # El enlace de baja del correo al cliente (NOTIFICACIONES §17): quien lo
+    # abre no es usuario de Prendo y no tiene sesión. Lo autoriza el token
+    # firmado del enlace, que solo sirve para dar de baja a ESE cliente de
+    # ESA empresa. El GET solo lee; la baja es el POST.
+    ("GET", "/api/v1/public/unsubscribe/{token}"),
+    ("POST", "/api/v1/public/unsubscribe/{token}"),
 }
 
 # `GET /api/v1/health` es público a propósito (lo usa el proxy, no una persona)

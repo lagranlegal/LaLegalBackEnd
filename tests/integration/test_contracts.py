@@ -1440,3 +1440,33 @@ async def test_el_sucesor_si_admite_el_abono(client: TestClient, contract_tenant
     )
     assert abono.status_code == 201, abono.text
     assert abono.json()["new_capital_balance"] == "1300000.00"
+
+
+async def test_creating_a_contract_writes_the_contract_email_basis(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """NOTIFICACIONES §9.2-a: la base `contract` la escribe `create_contract`
+    cuando el cliente tiene correo y todavía no tiene base. El import tiene su
+    propio test; este cubre el camino del mostrador."""
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.customer set email = 'cliente@example.com' where id = :id"),
+            {"id": str(contract_tenant["customer_id"])},
+        )
+    response = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
+    )
+    assert response.status_code == 201, response.text
+    async with AsyncSessionLocal() as session:
+        basis = (
+            await session.execute(
+                text("select email_basis from public.customer where id = :id"),
+                {"id": str(contract_tenant["customer_id"])},
+            )
+        ).scalar_one()
+    assert basis == "contract"

@@ -165,6 +165,7 @@ async def insert_delivery(
     recipient_user_id: UUID | None,
     status: str,
     last_error: str | None = None,
+    legal_basis: str | None = None,
 ) -> UUID | None:
     """Devuelve el id de la entrega, o None si ya existía (mismo evento, canal
     y dirección)."""
@@ -172,9 +173,10 @@ async def insert_delivery(
         text(
             """
             insert into public.notification_delivery
-                (company_id, event_id, channel, to_address, recipient_user_id, status, last_error)
+                (company_id, event_id, channel, to_address, recipient_user_id, status, last_error,
+                 legal_basis)
             values (:company_id, :event_id, 'email', :to_address, :recipient_user_id, :status,
-                    :last_error)
+                    :last_error, :legal_basis)
             on conflict do nothing
             returning id
             """
@@ -186,6 +188,7 @@ async def insert_delivery(
             "recipient_user_id": str(recipient_user_id) if recipient_user_id else None,
             "status": status,
             "last_error": last_error,
+            "legal_basis": legal_basis,
         },
     )
     return result.scalar_one_or_none()
@@ -210,8 +213,8 @@ async def get_customer_contact(
 ) -> Row[Any] | None:
     result = await db.execute(
         text(
-            "select id, full_name, email from public.customer "
-            "where company_id = :company_id and id = :id"
+            "select id, full_name, email, email_basis, email_opt_out_at, email_invalid_at "
+            "from public.customer where company_id = :company_id and id = :id"
         ),
         {"company_id": str(company_id), "id": str(customer_id)},
     )
@@ -494,6 +497,7 @@ async def update_delivery(
     provider_id: str | None = None,
     scheduled_at: datetime | None = None,
     sent_at: datetime | None = None,
+    legal_basis: str | None = None,
 ) -> None:
     await db.execute(
         text(
@@ -504,7 +508,8 @@ async def update_delivery(
                 last_error = :last_error,
                 provider_id = coalesce(:provider_id, provider_id),
                 scheduled_at = coalesce(:scheduled_at, scheduled_at),
-                sent_at = coalesce(:sent_at, sent_at)
+                sent_at = coalesce(:sent_at, sent_at),
+                legal_basis = coalesce(:legal_basis, legal_basis)
             where id = :id
             """
         ),
@@ -516,6 +521,7 @@ async def update_delivery(
             "provider_id": provider_id,
             "scheduled_at": scheduled_at,
             "sent_at": sent_at,
+            "legal_basis": legal_basis,
         },
     )
 
@@ -535,7 +541,8 @@ async def list_deliveries(
     query = """
         select d.id, d.event_id, e.event_type, e.audience, e.occurred_on, d.channel,
                d.to_address, d.recipient_user_id, d.status, d.attempts, d.last_error,
-               d.provider_id, d.scheduled_at, d.sent_at, d.created_at, d.updated_at
+               d.provider_id, d.scheduled_at, d.sent_at, d.created_at, d.updated_at,
+               d.legal_basis
         from public.notification_delivery d
         join public.notification_event e on e.id = d.event_id
         where d.company_id = :company_id

@@ -8,6 +8,12 @@ Orden de decisión por entrega, y el porqué del orden:
 
 1. **Ventana de rezago** (§5.3) → `skipped_stale`. Primero, porque un aviso
    que ya no es noticia no debe consumir cupo ni esperar horario.
+1-bis. **Base legal, baja y rebote del cliente** (§9.2-c, fase 3) →
+   `suppressed`, con el mismo `service.customer_gate` que usó quien la
+   planificó: lo que cambió en el medio (una baja por el enlace, una casilla
+   desmarcada, un correo corregido) surte efecto antes de enviar. Va antes de
+   los límites por la misma razón que el rezago. Acá también se arma el
+   enlace de baja: sin él, un correo al cliente no sale (`dead`).
 2. **Límites al cliente** (Ley 2300, §12.3), solo `audience='customer'`:
    fuera de horario → se corre al próximo momento hábil (sigue `pending`);
    tope semanal/diario alcanzado → `throttled`.
@@ -42,12 +48,14 @@ from app.core.db import AsyncSessionLocal
 from app.core.settings import get_settings
 from app.modules.identity import integration as identity_integration
 from app.modules.notifications import (
+    catalog,
     limits,
     preferences,
     providers,
     repository,
     service,
     templates,
+    unsubscribe,
 )
 from app.modules.notifications.providers import EmailMessage, EmailProvider, SendResult
 
@@ -90,6 +98,9 @@ class _Prepared:
     #: de la transacción de lectura (es una llamada HTTP).
     needs_invite_link: bool = False
     invitee_name: str | None = None
+    #: Base legal del cliente con la que sale (§9.2-a): se guarda en la entrega
+    #: al enviarla, porque es la de ESE día la que hay que poder mostrar.
+    legal_basis: str | None = None
 
 
 async def _prepare(
@@ -122,6 +133,52 @@ async def _prepare(
         if not prefs.event_enabled(e["event_type"]):
             return _Prepared(None, "suppressed", "El aviso está apagado para la empresa.")
 
+        payload: dict[str, Any] = dict(e["payload"] or {})
+        legal_basis: str | None = None
+        if e["audience"] == "customer":
+            customer = (
+                await repository.get_customer_contact(
+                    db, company_id=c["id"], customer_id=e["customer_id"]
+                )
+                if e["customer_id"] is not None
+                else None
+            )
+            # §9.2-c, OTRA VEZ al enviar: la base, la baja y el rebote se
+            # vuelven a mirar. Lo que cambió desde que se planificó (una baja
+            # por el enlace, una casilla desmarcada) surte efecto YA.
+            gate = service.customer_gate(customer, catalog.get(e["event_type"]).purpose)
+            if gate.status != "ok":
+                return _Prepared(
+                    None,
+                    "suppressed",
+                    gate.reason or "El cliente ya no tiene correo registrado.",
+                )
+            if (gate.email or "").lower() != (d["to_address"] or "").strip().lower():
+                # La entrega guarda la dirección del día que se planificó. Si
+                # el mostrador la corrigió, la vieja puede ser de otra persona
+                # (§9.3) y la nueva no es la que se decidió: ninguna.
+                return _Prepared(
+                    None,
+                    "suppressed",
+                    "El correo del cliente cambió después de planificar el aviso.",
+                )
+            legal_basis = gate.basis
+            assert customer is not None
+            # Solo el nombre de pila, y se resuelve al enviar: el payload
+            # guardado no lleva datos personales (§9.1).
+            payload["first_name"] = customer._mapping["full_name"]
+            # §9.2-e: todo correo al cliente lleva salida. Se arma al enviar
+            # y no se guarda: es derivable, y guardarlo sería guardar una
+            # credencial (pequeña, pero credencial) en una tabla exportable.
+            try:
+                payload["unsubscribe_url"] = unsubscribe.unsubscribe_link(
+                    company_id=c["id"], customer_id=e["customer_id"]
+                )
+            except unsubscribe.LinkNotConfigured as exc:
+                return _Prepared(
+                    None, "dead", f"Sin enlace de baja no sale un correo al cliente: {exc}"
+                )
+
         if e["audience"] == "customer":
             contact_limits = prefs.customer_contact_limits
             local_now = now.astimezone(_zone(tz_name))
@@ -138,16 +195,6 @@ async def _prepare(
                 sent_last_day=sent_day, sent_last_week=sent_week, limits=contact_limits
             ):
                 return _Prepared(None, "throttled", "Tope de contactos al cliente alcanzado.")
-
-        payload: dict[str, Any] = dict(e["payload"] or {})
-        if e["audience"] == "customer" and e["customer_id"] is not None:
-            customer = await repository.get_customer_contact(
-                db, company_id=c["id"], customer_id=e["customer_id"]
-            )
-            # Solo el nombre de pila, y se resuelve al enviar: el payload
-            # guardado no lleva datos personales (§9.1).
-            if customer is not None:
-                payload["first_name"] = customer._mapping["full_name"]
 
         if e["event_type"] == INVITATION:
             user = (
@@ -197,7 +244,8 @@ async def _prepare(
             text=rendered.text,
             reply_to=rendered.reply_to,
             idempotency_key=f"delivery-{d['id']}",
-        )
+        ),
+        legal_basis=legal_basis,
     )
 
 
@@ -223,7 +271,12 @@ async def _fresh_invite_link(delivery: Any, *, invitee_name: str) -> tuple[str |
 
 
 async def _record_result(
-    d: Any, result: SendResult, *, now: datetime, stats: DispatchStats
+    d: Any,
+    result: SendResult,
+    *,
+    now: datetime,
+    stats: DispatchStats,
+    legal_basis: str | None = None,
 ) -> None:
     if result.not_configured:
         await _finish(d["id"], status="skipped_no_provider", last_error=result.error)
@@ -237,6 +290,7 @@ async def _record_result(
             attempts=attempts,
             provider_id=result.provider_id,
             sent_at=now,
+            legal_basis=legal_basis,
         )
         stats.bump("sent")
         return
@@ -320,7 +374,7 @@ async def _dispatch_one(
 
     # Fuera de toda transacción (§5.1): un proveedor lento no retiene nada.
     result = await provider.send(message)
-    await _record_result(d, result, now=now, stats=stats)
+    await _record_result(d, result, now=now, stats=stats, legal_basis=prepared.legal_basis)
 
 
 async def _fail_internal(

@@ -502,3 +502,71 @@ def test_import_ready_for_auction_and_auction_of_expired_extension(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "auctioned"
+
+
+# --------------------------------------------------------------------------
+# La base legal del correo nace con el contrato (NOTIFICACIONES §9.2-a, §17)
+# --------------------------------------------------------------------------
+async def _basis(customer_id) -> tuple[str | None, object]:
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                text("select email_basis, email_basis_at from public.customer where id = :id"),
+                {"id": str(customer_id)},
+            )
+        ).first()
+    return row.email_basis, row.email_basis_at
+
+
+async def test_a_live_contract_writes_the_contract_basis_only_if_there_is_an_email(
+    client: TestClient, import_tenant: dict
+) -> None:
+    """Sin correo no hay a qué dirección aplicarle una base: el contrato no
+    escribe nada (el día que den el correo, lo escribe la ficha). Con correo,
+    el contrato vivo ES la base — y se escribe, no se deduce en cada envío."""
+    response = client.post(
+        "/api/v1/contracts/import",
+        headers=_headers(import_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_import_payload(import_tenant),
+    )
+    assert response.status_code == 201, response.text
+    assert await _basis(import_tenant["customer_id"]) == (None, None)
+
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.customer set email = 'cliente@example.com' where id = :id"),
+            {"id": str(import_tenant["customer_id"])},
+        )
+    response = client.post(
+        "/api/v1/contracts/import",
+        headers=_headers(import_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_import_payload(import_tenant),
+    )
+    assert response.status_code == 201, response.text
+    basis, basis_at = await _basis(import_tenant["customer_id"])
+    assert basis == "contract"
+    assert basis_at is not None
+
+
+async def test_a_contract_does_not_downgrade_express_consent(
+    client: TestClient, import_tenant: dict
+) -> None:
+    """`consent` cubre todo lo que cubre `contract` y más: un contrato nuevo
+    no la pisa (si la pisara, la fecha de la autorización se perdería)."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "update public.customer set email = 'cliente@example.com', "
+                "email_basis = 'consent', email_basis_at = '2026-01-01', "
+                "email_consent_at = '2026-01-01', email_consent_source = 'counter' "
+                "where id = :id"
+            ),
+            {"id": str(import_tenant["customer_id"])},
+        )
+    response = client.post(
+        "/api/v1/contracts/import",
+        headers=_headers(import_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_import_payload(import_tenant),
+    )
+    assert response.status_code == 201, response.text
+    assert (await _basis(import_tenant["customer_id"]))[0] == "consent"
