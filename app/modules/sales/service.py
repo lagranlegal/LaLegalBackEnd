@@ -483,6 +483,52 @@ async def void_sale(
             },
         )
 
+    # --- Una venta pagada con nota crédito NO se anula (F21-36) ---------
+    # El contra-movimiento de abajo sale por el `total` entero y en el medio
+    # de pago de la venta. Si parte del total se pagó con una nota crédito,
+    # esa parte NUNCA entró al cajón: anular le devolvía al cliente en
+    # efectivo lo que había pagado con la nota (venta de $800.000 = $500.000
+    # de nota + $300.000 en efectivo → salían $800.000 del cajón), y la
+    # redención quedaba en pie, así que la nota seguía gastada. El cliente
+    # convertía una nota —que no es plata— en efectivo, y el cajón
+    # descuadraba por el monto de la nota.
+    #
+    # Se rechaza en vez de «devolver la nota», con el mismo criterio que
+    # F21-31 (decisión de Mateo, opción A):
+    #
+    # 1. **`credit_note_redemption` es inmutable** (trigger de 00043): no se
+    #    puede borrar la redención para devolverle el saldo a la nota.
+    #    Revertirla exigiría una redención negativa o una nota nueva, y las
+    #    dos son un modelo que todavía no existe — y que nacería acá, en el
+    #    camino de la excepción, no en el de la regla.
+    # 2. **«Cerrado de más se nota; abierto de más no».** Rechazar se
+    #    descubre la primera vez; anular mal descuadra el cajón en silencio.
+    # 3. **La salida legítima ya existe:** una devolución liquidada en nota
+    #    crédito le reconoce al cliente el total de la venta como saldo, sin
+    #    sacar del cajón plata que nunca entró. El mensaje la nombra.
+    #
+    # Va DESPUÉS de la guarda de devoluciones (una venta con las dos cosas
+    # recibe el mensaje de las devoluciones, que es el que ya existía) y
+    # ANTES de tocar caja o stock, con la venta tomada `FOR UPDATE` arriba:
+    # un rechazo que igual deja rastro sería peor que el defecto.
+    redemption = await repository.get_sale_credit_note_redemption(
+        db, company_id=company_id, sale_id=sale_id
+    )
+    if redemption is not None:
+        rm = redemption._mapping
+        raise ConflictError(
+            "Esta venta se pagó (toda o en parte) con la nota crédito Nº "
+            f"{rm['credit_note_number']} y por eso no se puede anular: anularla le "
+            "devolvería en plata lo que se pagó con la nota, que nunca entró a la caja. "
+            "Para revertirla, registra una devolución liquidada en nota crédito.",
+            code="SALE_PAID_WITH_CREDIT_NOTE",
+            details={
+                "credit_note_id": str(rm["credit_note_id"]),
+                "credit_note_number": rm["credit_note_number"],
+                "redeemed_amount": str(rm["amount"]),
+            },
+        )
+
     session = await cashbox_integration.get_open_session(db, company_id=company_id)
     if session is None:
         raise CashSessionNotOpenError("No hay una sesión de caja abierta para anular la venta.")
@@ -508,7 +554,9 @@ async def void_sale(
     )
     # Lo que la caja le devuelve al cliente: el contra-movimiento Y el monto
     # del aviso C7 salen de esta MISMA variable, para que el correo no pueda
-    # decir un número distinto del que salió del cajón.
+    # decir un número distinto del que salió del cajón. Es el `total` entero
+    # porque la guarda de F21-36 ya garantizó que nada de él se pagó con nota
+    # crédito: todo entró por `payment_method`, y por ahí mismo sale.
     refunded = row._mapping["total"]
     if refunded > 0:
         # cash_movement.amount exige > 0 — una venta 100% descontada no tuvo

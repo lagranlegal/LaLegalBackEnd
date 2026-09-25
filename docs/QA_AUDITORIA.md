@@ -45,6 +45,89 @@
 
 ---
 
+## ✅ F21-36 · ALTO (plata) — Anular una venta pagada con nota crédito devolvía en plata la parte de la nota (25/09/2026 · cerrado)
+
+**Encontrado de paso** al cablear el aviso C7 de la anulación (`NOTIFICACIONES.md` §18.4, donde quedó anotado
+sin arreglar). Mismo carril que F21-31 —anulaciones— y el mismo tipo de daño: plata que sale del cajón sin
+haber entrado.
+
+**Qué hacía.** `sales.void_sale` emitía el contra-movimiento por `sale.total` entero y en el
+`payment_method` de la venta, sin mirar `credit_note_redemption`. La parte del total que se pagó con la nota
+nunca entró al cajón, pero salía; y la redención quedaba en pie, así que la nota seguía gastada. El cliente
+convertía una nota —que no es plata— en efectivo, y el cajón descuadraba por el monto de la nota.
+
+**Medido, no deducido** (reproducido contra la API local, y hoy fijado en los tests de abajo): venta de
+**$800.000** = **$500.000** de nota + **$300.000** en efectivo → entraban $300.000, al anular salían
+**$800.000**. En el extremo —la nota cubre toda la venta— entraban $0 y salía el total. **En dev: 0 casos**
+(medido en solo lectura), no había datos que reparar.
+
+### La decisión: se RECHAZA la anulación (opción A, de Mateo)
+
+La alternativa era «anular y devolverle el saldo a la nota». Se descartó por las mismas razones que F21-31, y
+están escritas también en `service.py::void_sale`:
+
+1. **`credit_note_redemption` es inmutable** (trigger `forbid_change` de 00043). No se puede borrar la
+   redención; revertirla exigiría una redención negativa o una nota nueva emitida desde una anulación, un
+   modelo que no existe y que nacería en el camino de la excepción.
+2. **«Cerrado de más se nota; abierto de más no».** Rechazar se descubre la primera vez; anular mal descuadra
+   el cajón en silencio.
+3. **La salida legítima ya existe:** una devolución **liquidada en nota crédito** le reconoce al cliente el
+   total como saldo sin sacar del cajón plata que nunca entró.
+
+### El código de error: `SALE_PAID_WITH_CREDIT_NOTE` (409), nuevo
+
+Código propio y no `CONFLICT`, por lo mismo que `SALE_HAS_RETURNS`: la venta sigue `completed` y viva, y el
+mensaje útil manda a hacer otra cosa. El mensaje:
+
+> Esta venta se pagó (toda o en parte) con la nota crédito Nº {n} y por eso no se puede anular: anularla le
+> devolvería en plata lo que se pagó con la nota, que nunca entró a la caja. Para revertirla, registra una
+> devolución liquidada en nota crédito.
+
+`details`: `{credit_note_id, credit_note_number, redeemed_amount}`. El número sale de un `JOIN` que se le
+agregó a `repository.get_sale_credit_note_redemption` (la misma lectura de «a lo sumo una nota por venta» que
+ya usaban el detalle y el listado).
+
+**Dónde va la guarda:** después de la de devoluciones (una venta con las dos cosas recibe `SALE_HAS_RETURNS`,
+que ya existía) y **antes** de exigir caja abierta y de tocar stock o caja, con la venta tomada `FOR UPDATE`
+desde F21-33. Documentado en `docs/API_GUIDE.md` §15 y en la fila de `POST /sales/{id}/void` (§10), y en
+`frontend-starter/src/lib/api/errors.ts` con su test de contrato. `tests/unit/test_error_catalog.py` pasa.
+
+### Tests (`tests/integration/test_sale_returns.py`), verificados a la inversa
+
+Todos asertan el **código**. Con la guarda desactivada:
+
+| Test | Sin el arreglo |
+|---|---|
+| `test_void_bloqueado_si_la_venta_se_pago_en_parte_con_nota_credito` | **falla**: `assert 200 == 409` |
+| `test_void_bloqueado_si_la_nota_credito_cubrio_toda_la_venta` | **falla**: `assert 200 == 409` |
+| `test_void_de_una_venta_sin_nota_sigue_devolviendo_el_total` | **pasa** — el camino normal: el mismo cliente, con una nota viva, anula una venta que pagó sin ella y salen los $500.000 del total |
+
+Los dos de rechazo verifican además que **nada se movió**: la venta sigue `completed`, el stock en su número,
+ningún contra-movimiento, y la nota con saldo 0.
+
+Suite completa con Docker arriba y `supabase start` corriendo: **659 passed** (656 + 3), 0 saltados.
+`ruff check` / `ruff format --check` / `mypy app` limpios.
+
+### Front
+
+`SaleReceiptDialog.tsx` ya mostraba el `message` del backend en el toast desde F21-31, así que el mensaje
+nuevo llega al cajero sin tocar la UI. Se agregó el código a `errors.ts`, al test de contrato (con el sobre real
+de la respuesta local) y un caso al test del diálogo; front en **278** tests (275 + 3). Detalle en
+`frontend-starter/docs/IMPLEMENTATION.md`.
+
+### Visto de paso, NO arreglado: la devolución EN EFECTIVO tiene el mismo agujero
+
+El mensaje manda a una devolución **liquidada en nota crédito** a propósito: una devolución liquidada en
+**efectivo** sobre una venta pagada con nota **saca la parte de la nota en efectivo**, igual que la anulación
+de antes. Medido en local con un test temporal (borrado): la misma venta de $800.000 ($500.000 nota +
+$300.000 efectivo), devuelta completa con `settlement_method: "cash"` → `201` y `cash_movement` `out` por
+**$800.000**, con $300.000 entrados. `create_return` liquida `sum_sale_return_amount` entero por el medio
+elegido sin mirar `credit_note_redemption`. Es otro defecto de plata, del carril de devoluciones; queda
+anotado **sin número** para que se decida aparte (¿rechazar efectivo por encima de lo cobrado en plata, o
+partir la liquidación: la parte de la nota en nota y el resto en efectivo?).
+
+---
+
 ## Dos defectos anotados el 24/09 — cerrados el 25/09/2026
 
 Los dos venían anotados sin número: uno en la medición de F21-14 (abajo, «Movimientos contra cuentas `bank`

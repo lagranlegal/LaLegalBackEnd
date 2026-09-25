@@ -846,6 +846,174 @@ async def test_void_bloqueado_si_la_venta_esta_totalmente_devuelta(
     assert voids == 0
 
 
+# --- F21-36: una venta pagada con nota crédito no se anula ------------------
+#
+# El defecto: `void_sale` sacaba del cajón el `total` entero, incluida la
+# parte que se pagó con una nota crédito y que nunca entró a la caja, y la
+# redención quedaba en pie. Se RECHAZA, con el mismo molde que F21-31.
+
+
+def _nota_credito_de(client: TestClient, tenant: dict) -> dict:
+    """Vende 1 unidad a 500.000 y la devuelve en nota crédito: deja una nota
+    de 500.000 a nombre del cliente y el lote otra vez en 5."""
+    original = _make_sale(client, tenant)
+    ret = client.post(
+        f"/api/v1/sales/{original['id']}/returns",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "lines": [{"sale_line_id": original["lines"][0]["id"], "quantity": "1"}],
+            "reason": "other",
+            "settlement_method": "credit_note",
+        },
+    )
+    assert ret.status_code == 201, ret.text
+    note = client.get(
+        f"/api/v1/credit-notes/{ret.json()['credit_note_id']}",
+        headers=_headers(tenant["full_token"]),
+    )
+    assert note.status_code == 200, note.text
+    return note.json()
+
+
+def _venta_con_nota(
+    client: TestClient, tenant: dict, *, note_id: str, unit_price: str, note_amount: str
+) -> dict:
+    response = client.post(
+        "/api/v1/sales",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(tenant["customer_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {"item_id": str(tenant["item_id"]), "quantity": "1", "unit_price": unit_price}
+            ],
+            "credit_note_id": note_id,
+            "credit_note_amount": note_amount,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def test_void_bloqueado_si_la_venta_se_pago_en_parte_con_nota_credito(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """El caso del defecto, con los números del hallazgo: venta de 800.000 =
+    500.000 de nota + 300.000 en efectivo.
+
+    Con el código anterior la anulación pasaba (200) y sacaba 800.000 del
+    cajón habiendo entrado 300.000, con la nota todavía redimida.
+    """
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    note = _nota_credito_de(client, returns_tenant)
+    sale = _venta_con_nota(
+        client,
+        returns_tenant,
+        note_id=note["id"],
+        unit_price="800000.00",
+        note_amount="500000.00",
+    )
+    assert sale["credit_note_redeemed_amount"] == "500000.00"
+
+    response = client.post(
+        f"/api/v1/sales/{sale['id']}/void",
+        headers=_headers(returns_tenant["full_token"]),
+        json={"reason": "error de digitación"},
+    )
+    assert response.status_code == 409, response.text
+    body = response.json()
+    # El CÓDIGO, no el status: `CONFLICT` a secas es «ya está anulada».
+    assert body["code"] == "SALE_PAID_WITH_CREDIT_NOTE"
+    assert body["details"] == {
+        "credit_note_id": note["id"],
+        "credit_note_number": note["number"],
+        "redeemed_amount": "500000.00",
+    }
+    # El mensaje nombra la nota y la salida, no solo niega.
+    assert f"Nº {note['number']}" in body["message"]
+    assert "devolución" in body["message"]
+
+    # Y nada se movió: ni el estado, ni el stock, ni la caja, ni la nota.
+    status, quantity, voids = await _sale_snapshot(returns_tenant["company_id"], sale["id"])
+    assert status == "completed"
+    assert quantity == 4  # 5 − 1 vendida con la nota
+    assert voids == 0
+    after = client.get(
+        f"/api/v1/credit-notes/{note['id']}", headers=_headers(returns_tenant["full_token"])
+    )
+    assert after.json()["balance"] == "0.00"
+
+
+async def test_void_bloqueado_si_la_nota_credito_cubrio_toda_la_venta(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """El extremo del mismo defecto: la nota pagó todo, al cajón no entró
+    nada, y anular habría sacado el total entero."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    note = _nota_credito_de(client, returns_tenant)
+    sale = _venta_con_nota(
+        client,
+        returns_tenant,
+        note_id=note["id"],
+        unit_price="400000.00",
+        note_amount="400000.00",
+    )
+
+    response = client.post(
+        f"/api/v1/sales/{sale['id']}/void",
+        headers=_headers(returns_tenant["full_token"]),
+        json={"reason": "error de digitación"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "SALE_PAID_WITH_CREDIT_NOTE"
+    assert response.json()["details"]["redeemed_amount"] == "400000.00"
+
+    status, _, voids = await _sale_snapshot(returns_tenant["company_id"], sale["id"])
+    assert status == "completed"
+    assert voids == 0
+
+
+async def test_void_de_una_venta_sin_nota_sigue_devolviendo_el_total(
+    client: TestClient, returns_tenant: dict
+) -> None:
+    """La guarda mira la VENTA, no al cliente: el mismo cliente con una nota
+    viva anula como siempre una venta que pagó sin ella, y el
+    contra-movimiento sale por el total."""
+    await _open_cash_session(
+        company_id=returns_tenant["company_id"], register_id=returns_tenant["register_id"]
+    )
+    note = _nota_credito_de(client, returns_tenant)
+    assert note["balance"] == "500000.00"
+    sale = _make_sale(client, returns_tenant)
+
+    response = client.post(
+        f"/api/v1/sales/{sale['id']}/void",
+        headers=_headers(returns_tenant["full_token"]),
+        json={"reason": "cobro doble"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "voided"
+
+    async with AsyncSessionLocal() as session, session.begin():
+        salida = (
+            await session.execute(
+                text(
+                    "select amount from public.cash_movement where company_id = :cid "
+                    "and reference_id = :sid and direction = 'out'"
+                ),
+                {"cid": str(returns_tenant["company_id"]), "sid": sale["id"]},
+            )
+        ).scalar_one()
+    assert str(salida) == "500000.00"
+    status, quantity, _ = await _sale_snapshot(returns_tenant["company_id"], sale["id"])
+    assert status == "voided"
+    assert quantity == 5  # 5 − 1 vendida + 1 repuesta
+
+
 # --- F21-17: el listado de ventas trae lo devuelto -------------------------
 
 

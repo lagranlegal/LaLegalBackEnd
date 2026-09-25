@@ -688,11 +688,18 @@ async def get_sale_credit_note_redemption(
 ) -> Row[Any] | None:
     """Una venta redime a lo sumo una nota crédito (`SaleCreateIn.credit_note_id`
     es singular) — la primera fila alcanza.
+
+    Trae también el `number` de la nota: `void_sale` lo pone en el error
+    `SALE_PAID_WITH_CREDIT_NOTE` (F21-36) para que el cajero sepa de qué nota
+    se habla sin abrir otra pantalla.
     """
     result = await db.execute(
         text(
-            "select credit_note_id, amount from public.credit_note_redemption "
-            "where company_id = :company_id and sale_id = :sale_id limit 1"
+            "select cnr.credit_note_id, cnr.amount, cn.number as credit_note_number "
+            "from public.credit_note_redemption cnr "
+            "join public.credit_note cn "
+            "  on cn.id = cnr.credit_note_id and cn.company_id = cnr.company_id "
+            "where cnr.company_id = :company_id and cnr.sale_id = :sale_id limit 1"
         ),
         {"company_id": str(company_id), "sale_id": str(sale_id)},
     )

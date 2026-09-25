@@ -1121,7 +1121,13 @@ apagado el hecho **se registra igual** y sin entregas (§4.3) — test `test_off
 
 ### 18.4 · Lo que NO quedó, y lo dudoso
 
-- **Defecto encontrado de paso, NO arreglado (fuera de alcance, y es de dinero):** anular una venta pagada **en parte
+- **✅ Cerrado el 25/09/2026 como F21-36 (`QA_AUDITORIA.md`).** Decisión de Mateo: se **rechaza** la anulación de
+  una venta con redención de nota crédito (`409 SALE_PAID_WITH_CREDIT_NOTE`), como `SALE_HAS_RETURNS`; la salida es una
+  devolución liquidada en nota crédito. El C7 no cambió: una anulación que pasa ya no tiene parte de nota, así que
+  `refunded = total` vuelve a ser cierto. **Queda abierto el gemelo:** una devolución liquidada en EFECTIVO sobre una
+  venta pagada con nota también saca en plata la parte de la nota (medido; ver el final de §F21-36). Lo que sigue es el
+  registro original del hallazgo.
+  **Defecto encontrado de paso, NO arreglado (fuera de alcance, y es de dinero):** anular una venta pagada **en parte
   con nota crédito** devuelve en efectivo el total, incluida la parte que se pagó con la nota, y la nota queda
   redimida. Reproducido en local contra la API: venta de $800.000 = $500.000 de nota + $300.000 en efectivo → al anular,
   `cash_movement` de salida por **$800.000** (entraron $300.000) y la redención de $500.000 sigue en pie. El cliente
