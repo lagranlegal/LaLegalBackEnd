@@ -1,5 +1,7 @@
 # NOTIFICACIONES.md — Avisos por correo al cliente y a la empresa (spec)
 
+> **Estado (25/09/2026, tarde): FASES 4 y 6 IMPLEMENTADAS en `dev`, sin desplegar** — cada operación de dinero genera su aviso al cliente (C1–C7), todos apagados por defecto: **§18**.
+>
 > **Estado (25/09/2026): FASES 1, 2 y 3 IMPLEMENTADAS en `dev`, sin desplegar.** La 3 —base legal del cliente, casilla del mostrador, enlace de baja— en **§17**; la 2 en §16. Ningún aviso al cliente está encendido.
 >
 > **Estado (24/09/2026): FASE 1 IMPLEMENTADA en `dev`, sin desplegar** — maquinaria, catálogo completo, resumen diario/semanal a la empresa y límites de la Ley 2300 como parámetros. Qué quedó, qué no y dónde el código contradijo este documento: **§15**. El párrafo que sigue describe el punto de partida y se deja como estaba.
@@ -791,7 +793,7 @@ nuevas en `reports/integration.py`. El job nocturno tiene ahora cuatro pasos (AR
 
 ### 15.3 · Lo que NO quedó (y en qué fase cae)
 
-- Ningún evento al cliente tiene **productor** salvo `auction_ready_customer` (§14 lo pide probado encendido y apagado): C1–C7 y R1–R4 están en catálogo y plantilla, sin disparo.
+- Ningún evento al cliente tiene **productor** salvo `auction_ready_customer` (§14 lo pide probado encendido y apagado): C1–C7 y R1–R4 están en catálogo y plantilla, sin disparo. → C1–C7 tienen productor desde las fases 4 y 6 (§18); R1–R4 siguen sin él (fase 5).
 - Webhook de Resend (`delivered`/`bounced`, `customer.email_invalid_at`), `resend_notification`, enlace de baja, `email_basis` y `EmailStr` del cliente: fase 3.
 - `BackgroundTasks` para los transaccionales (§5.1): no hay transaccionales todavía. → Lo estrenó la invitación en la fase 2, y el diseño no sobrevivió intacto: §16.2-1.
 - ~~Pantalla del front~~ **Ya existe** (corregido el 24/09/2026): `/configuracion/notificaciones`, commit `5146ee1` de `frontend-starter`. La etiqueta nueva de auditoría no hace falta: se reusó la acción `update_settings`.
@@ -978,3 +980,163 @@ día que alguien encienda uno, ya hay con qué decidir a quién se le puede escr
   Verificado en local: la página de baja a 360 y 1280 px contra el backend y la base locales, tres `GET` sin tocar la
   baja, el `POST` con su `audit_log`.
 
+---
+
+## 18. Fases 4 y 6 — lo implementado (25/09/2026)
+
+**Sin migración.** Todo cupo en `00058` y `00059`: los siete tipos ya estaban en el catálogo con su plantilla, y la
+entrega, sus estados y la base legal ya existían. Commit `8171f6c`. **Ningún aviso se encendió**: los siete siguen
+`default_enabled = false` y el interruptor de la empresa sigue apagado (§12.3). Lo que cambió es que ahora, si alguien
+los enciende, hay quién los produzca.
+
+Se juntaron las dos fases porque son el mismo trabajo: la fase 4 (C2, C3) y la 6 (C1, C4–C7) tienen el mismo
+disparo, la misma llave y el mismo camino de envío. Lo que las separaba en §11 era el valor, no el costo.
+
+**Código:** `notifications/integration.py` (`record_customer_notice`, `choose_event`), `service.record_event` (devolvía
+las entregas `pending` solo para la plataforma: ahora también para el cliente), los servicios y routers de
+`contracts` y `sales`, `templates._customer_lines` (C3, C4, C5, C7), y el tope semanal en `preferences`, `limits`,
+`repository.count_sent_to` y `dispatcher._prepare`. Tests: `tests/integration/test_customer_notices.py` (61) y
+cinco nuevos en `tests/unit/test_notification_templates.py` / `test_notification_limits.py`.
+
+### 18.1 · Las decisiones, y su porqué
+
+**1. La Ley 2300 y los comprobantes: el tope SEMANAL no los alcanza; la hora y el tope diario, sí.**
+La Ley 2300 de 2023 regula los contactos de **cobranza** (y la oferta de productos) —§12.2-1 la trajo para eso: *«ya
+vencida: máximo uno por semana»*—. Un comprobante de abono no es cobranza: es el acuse de algo que el cliente acaba de
+hacer en el mostrador, y lo recibe porque pagó, no para que pague. Con el tope semanal aplicado a todo aviso al
+cliente (como quedó en la fase 1, §15.1), el **segundo abono de la semana quedaba `throttled`** —terminal, §4.2— y ese
+cliente se quedaba sin su comprobante. Eso rompe el aviso que más vale después del paz y salvo. Quedó así:
+
+| Regla | ¿Alcanza a C1–C7? | Por qué |
+|---|---|---|
+| Tope **semanal** (Ley 2300, 1 por semana) | **No**, ni lo consume: un comprobante no gasta el cupo de un recordatorio | Es de cobranza. Y la premisa tiene que ser la misma de los dos lados de la cuenta: si el comprobante no es cobranza para dejarlo pasar, tampoco lo es para contarlo |
+| **Ventana horaria** (L–V 7–19, sáb 8–15, sin domingos ni festivos) | **Sí** | Es lo **conservador que no rompe**: el comprobante no se pierde, se corre al próximo momento hábil. Ver la salvedad abajo |
+| Tope **diario** de 3 (§3) | **Sí** | No es de la ley: es de producto, y §3 lo escribió *«contando transaccionales»*, contra el cliente de 13 contratos |
+
+**Es un parámetro, no una constante:** `customer_contact_limits.transactional_in_weekly_cap`, `false` por defecto. Si el
+abogado dice que un comprobante SÍ cuenta como contacto, se pone en `true` y vuelve el comportamiento anterior — sin
+código (test `test_the_lawyers_answer_is_configuration_receipts_can_count_again`). **La salvedad, sin adornos:** que
+la Ley 2300 no alcance a un comprobante es mi lectura del alcance de la ley, no un concepto legal, y va a la misma
+consulta que las otras tres de §12.2 (y que está en pausa, §12.3). Por eso la hora **se dejó**: si la ley sí alcanzara
+a los comprobantes, lo que se estaría violando es el horario, y un comprobante corrido a la mañana siguiente cumple las
+dos lecturas. El costo de esa prudencia está en §18.3-7.
+
+**2. Idempotencia: dos capas, y la de adentro es la que está probada como red.**
+La primera es la de siempre: un reintento con el mismo `Idempotency-Key` devuelve el documento que ya existía y
+**no vuelve a pasar por el registro del aviso** — los servicios salen antes, y devuelven `None` como entrega. La
+segunda es la llave del aviso (§6.1), que se **construye con el documento** y tiene `unique(company_id, dedupe_key)`
+con `on conflict do nothing`: si algún día un camino llegara dos veces al registro, entraría una sola fila. Test por
+cada disparo (`test_an_idempotent_retry_does_not_duplicate_the_notice`): mismo `Idempotency-Key` dos veces ⇒ un evento,
+una entrega, **un correo en el `RecordingProvider`**. La anulación no tiene `Idempotency-Key` (no la tenía antes): el
+segundo intento es `409` porque la venta ya no está `completed`, y el test fija eso.
+
+**3. C2 y C3: sale UNO — el paz y salvo, con lo pagado adentro.**
+§2.3 ya lo había decidido para otro caso y aplica igual: *«los transaccionales no se agrupan: cada uno es el acuse de
+un hecho puntual»*. El hecho es **un abono**; que deje el contrato en `paid` es una propiedad de ese abono, no un
+segundo hecho. Dos correos con segundos de diferencia —uno que dice *«saldo de capital: $0»* y otro que dice *«no nos
+debe nada»*— son el mismo aviso dicho dos veces, y el segundo gasta uno de los tres del día (§3). Así que:
+
+- El abono que salda manda **C3**, y C3 dice lo que C2 habría dicho: *«Recibimos $X (recibo #N). Su contrato #M quedó
+  saldado el …»*. El comprobante no se pierde: se incluye.
+- **La llave es la misma para los dos, `payment:<id>`**. Un abono, un aviso, por construcción: el `unique` hace
+  imposible que el mismo abono produzca los dos.
+- **Si la empresa apagó C3 y dejó C2**, sale C2 (`choose_event`): apagar el paz y salvo no puede dejar al último abono
+  sin su comprobante. Con los dos apagados se registra C3, que es el hecho que pasó.
+
+Y la misma regla, por la misma razón, para **C5 y C7**: una devolución liquidada en nota crédito es una devolución Y
+una nota; sale **C5** (el que le dice al cliente que tiene un saldo, y de qué compra salió), con `return:<id>` para los
+dos y C7 de respaldo si C5 está apagado.
+
+**4. C7 sobre una devolución: el monto es `total_amount`, el mismo número que salió de la caja o quedó en la nota.**
+`sum_sale_return_amount` es el **neto** de F21-33 (bruto menos el descuento prorrateado, `return_line_amounts_sql`), y
+es exactamente lo que ya se usa para el `cash_movement` de la devolución y para `credit_note.amount`. El servicio lo
+pone en el payload como texto y la plantilla solo lo formatea (`templates.money`): no hay una segunda cuenta que pueda
+divergir. Test con el caso real de F21-33: 2 × $500.000 con $100.000 de descuento, devolver 1 ⇒ el correo dice
+**$450.000** y no $500.000. En la **anulación**, el monto es el del contra-movimiento, y sale de la misma variable
+(`refunded`) que el `record_movement`: si alguien corrige uno, el otro va con él (ver el defecto de §18.4).
+
+**5. C1 en un contrato importado: NO se avisa.**
+Ya estaba decidido en §3 (*«`import_contract`: es carga de datos históricos»*) y el código lo confirma: el préstamo se
+entregó en otro sistema, el cliente ya tiene su papel, y una migración de 200 contratos serían 200 correos sobre nada —
+los primeros de un dominio nuevo, que es cómo se quema. Lo que `import_contract` **sí** hace es escribir la base
+`contract` (fase 3): el contrato está vivo, y los avisos que vengan después —abonos, paz y salvo— sí son hechos nuevos.
+Test: `test_an_imported_contract_does_not_notify`.
+
+**6. Todos siguen apagados.** `default_enabled = false` en los siete, sin tocar el catálogo. Con el interruptor
+apagado el hecho **se registra igual** y sin entregas (§4.3) — test `test_off_the_fact_is_recorded_but_nothing_goes_out`.
+
+### 18.2 · Qué quedó
+
+| Operación | Evento | `dedupe_key` | Payload (lo que lee la plantilla) |
+|---|---|---|---|
+| `POST /contracts` | `contract_created` (C1) | `contract:<contract_id>` | número, `principal`, `next_due_date` = `add_months(start_date, 1)` |
+| `POST /contracts/import` | — | — | — |
+| `POST /contracts/{id}/payments` | `payment_registered` (C2) | `payment:<contract_payment_id>` | número, recibo, `amount` (= `total`, neto de descuento), `interest_paid_until`, `capital_balance` |
+| ídem, si deja `paid` | `contract_paid_off` (C3) **en lugar de** C2 | `payment:<contract_payment_id>` | lo de C2 + `paid_on` |
+| `POST /contracts/{id}/extend-loan` | `loan_extended` (C4) | `extend:<id del sucesor>` | los dos números, `extension_amount`, `capital_balance`, `next_due_date`, `anchor_kept` |
+| `POST /sales` con `customer_id` | `sale_receipt` (C6) | `sale:<sale_id>` | número, `total` |
+| `POST /sales/{id}/void` | `sale_reversed` (C7) | `sale_void:<sale_id>` | `kind: void`, número, `amount` (el contra-movimiento) |
+| `POST /sales/{id}/returns`, en efectivo | `sale_reversed` (C7) | `return:<sale_return_id>` | `kind: return`, venta, devolución, `amount` (neto), `settlement_method` |
+| ídem, en nota crédito | `credit_note_issued` (C5) **en lugar de** C7 | `return:<sale_return_id>` | lo de C7 + `credit_note_number` |
+
+- **Ni prenda, ni artículos, ni cédula, ni el motivo** de una anulación (es una nota interna: *«cobro doble del
+  cajero»*). El test de las cinco promesas busca la descripción de la prenda y el código del artículo en asunto, texto
+  y HTML de cada correo real que salió.
+- **Sin cliente no hay evento** (venta de mostrador, devolución de una venta sin cliente en efectivo): §2.1, *«no es un
+  hueco: es el negocio»*. **Cliente sin correo, sí**: evento + entrega `unroutable` (§1).
+- **El aviso es el último paso de la transacción del documento**, después de la caja y la auditoría. Test por disparo
+  que fuerza una falla **justo después** de registrarlo: ni documento ni aviso. Es la prueba de §5.1 («si el abono se
+  revierte, el aviso se revierte con él») que no se podía escribir antes, porque no había productor.
+- **El envío inmediato** es `send_after_commit`, al final del endpoint (§16.2-1, `ARCHITECTURE.md` §4). Sin cambios en
+  request ni respuesta de ningún endpoint.
+
+### 18.3 · Discrepancias: dónde el código contradijo este documento (y ganó)
+
+1. **§6.1 dice `extend:<contract_id>` sin decir cuál.** Es el **sucesor**: es el documento de la ampliación —ahí apuntan
+   el `cash_movement` del delta y la fila de `audit_log`—. El padre también sería único (un contrato se amplía una sola
+   vez: queda `superseded`), pero la llave de un transaccional es el documento (§6.1), y el documento es el nuevo.
+2. **§6.1 no tenía llave para anulaciones ni devoluciones.** Quedaron `sale_void:<sale_id>` —no `sale:<id>`, que es la
+   del comprobante de la misma venta— y `return:<sale_return_id>`, que cubre C5 y C7.
+3. **§2.1 lista C3 como un evento aparte que sale «del mismo abono», y C5 y C7 como dos del mismo `create_return`.** Salen
+   uno por documento, con la misma llave: §18.1-3.
+4. **§3 (*«máximo 3 correos por cliente por día contando transaccionales»*) y §12.3 (*«tope semanal, activo para
+   `audience='customer'`»*) no distinguían cobranza de comprobante.** La fase 1 aplicó los dos a todo. Ahora el diario
+   sigue igual y el semanal deja pasar los comprobantes: §18.1-1.
+5. **La plantilla de C4 decía siempre *«La fecha de cobro no cambió»*.** Es cierto con `keep_anchor` (00053, el
+   default) y **falso** con `forgive`/`charge_month`, que siguen valiendo para los contratos firmados bajo esas
+   políticas (la columna es SNAPSHOT): ahí el sucesor arranca el ancla el día del recargo. El payload lleva
+   `anchor_kept` y la frase solo aparece si es verdad.
+6. **La plantilla de C7 decía *«anulación o devolución»*** porque no sabía cuál. Ahora el payload lleva `kind`, y la
+   devolución dice cómo se liquidó (*«le devolvimos $X»* o *«se liquidó con la nota crédito #N»*).
+7. **§5.1: *«un paz y salvo puede llegar hasta 24 h tarde en el peor caso»*. Con la ventana horaria, más.** Un abono de un
+   domingo, un festivo o después de las 19:00 no sale en el envío inmediato: queda `pending` con `scheduled_at` en el
+   próximo momento hábil, y lo manda **el job**, que corre una vez al día a una hora que no se fija (§15.2-10). Un paz y
+   salvo del sábado a las 16:00 puede llegar el lunes en la noche. Es el costo, dicho, de la prudencia de §18.1-1.
+8. **El hecho se escribe siempre, también apagado (§4.3) — y desde este deploy eso incluye cada abono, contrato y venta
+   con cliente de TODAS las empresas.** Es lo que el diseño pide (el agregado y el latido), pero es nuevo en volumen: con
+   los números de §10, del orden de 70 filas al mes por inquilino. El payload son números, montos y fechas; el
+   `customer_id` es la única referencia a una persona.
+9. **`record_event` no devolvía las entregas `pending` del cliente**, solo las de la plataforma: la fase 2 las necesitó
+   para la invitación y el cliente no tenía productor. Sin el arreglo, todo transaccional esperaba al job.
+
+### 18.4 · Lo que NO quedó, y lo dudoso
+
+- **Defecto encontrado de paso, NO arreglado (fuera de alcance, y es de dinero):** anular una venta pagada **en parte
+  con nota crédito** devuelve en efectivo el total, incluida la parte que se pagó con la nota, y la nota queda
+  redimida. Reproducido en local contra la API: venta de $800.000 = $500.000 de nota + $300.000 en efectivo → al anular,
+  `cash_movement` de salida por **$800.000** (entraron $300.000) y la redención de $500.000 sigue en pie. El cliente
+  convierte una nota —que no es plata— en efectivo, y el cajón descuadra por el monto de la nota. `void_sale` usa
+  `row.total` sin mirar `credit_note_redemption`. Hay que decidir si anular **devuelve la nota** o **se rechaza** (como
+  `SALE_HAS_RETURNS`, F21-31) — decisión de producto. El aviso C7 dice hoy el número que sale del cajón, porque sale de
+  la misma variable; si se corrige el movimiento, el correo se corrige solo.
+- **Pregunta legal, en la consulta en pausa (§12.3):** ¿la Ley 2300 alcanza a un comprobante? Si **no**, además del tope
+  semanal habría que sacarle la ventana horaria (hoy no hay parámetro para eso: sería un segundo booleano en
+  `customer_contact_limits` y una línea en `dispatcher._prepare`). Si **sí**, `transactional_in_weekly_cap: true`.
+- **Pregunta de producto para Mateo:** el tope diario de 3 corta el **cuarto comprobante** del día. Un cliente con
+  varios contratos que abona cuatro en la misma visita recibe tres; el cuarto queda `throttled`. Es lo que §3 decidió,
+  pero §3 pensaba en recordatorios más comprobantes; con solo comprobantes, quizás el tope no debería contarlos. Se dejó
+  como estaba: relajarlo es subir `max_per_day`, sin código.
+- **La pantalla de preferencias no muestra `transactional_in_weekly_cap`** (el front no se tocó). El campo es aditivo en
+  el `GET`/`PATCH` y el front no lo manda, así que no rompe nada; el valor por defecto es el correcto.
+- **Webhook de Resend, `delivered`/`bounced`, y verificado en vivo con un correo real:** pendientes, como en §15–§17.
+- **R1–R4 (fase 5)** siguen sin productor.
