@@ -368,6 +368,87 @@ def test_dashboard_and_closing_history(client: TestClient, reports_tenant: dict)
     assert "close_session" in audit_actions
 
 
+def test_desglose_incluye_lo_cobrado_por_banco_con_la_caja_cerrada(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """F21-35: una venta por transferencia hecha con la caja CERRADA entra al
+    desglose, en su día; el ajuste del arqueo del cajón sigue afuera.
+
+    Antes, `closings_breakdown` hacía INNER JOIN con `cash_session`, así que
+    un movimiento contra una cuenta `bank` entraba SOLO si por casualidad
+    había un turno abierto cuando se registró (`resolve_account_for_movement`
+    le cuelga la sesión abierta si existe, y `NULL` si no). La misma venta por
+    transferencia contaba en «Ventas» a las 10 a. m. y desaparecía del reporte
+    para siempre a las 7 p. m., después del cierre. Medido en dev el 25/09:
+    12 movimientos `bank` ($6.512.222) adentro por coincidencia, 2 ($5.060.000)
+    afuera por la misma coincidencia.
+    """
+    headers = _headers(reports_tenant["token"])
+    # Se cuenta al abrir con 500.000 sobre un cajón en 0: eso emite un
+    # `adjustment` de apertura con `session_id = NULL`, contra la cuenta `cash`.
+    opened = client.post(
+        "/api/v1/cashbox/sessions/open",
+        headers=headers,
+        json={"counted_cash": "500000.00", "difference_reason": "base del día"},
+    )
+    assert opened.status_code == 201, opened.text
+    session_id = opened.json()["id"]
+    item_id = _ingresar_uno(client, reports_tenant, unit_cost="100000.00", unit_price="250000.00")
+
+    expected = client.get(f"/api/v1/cashbox/sessions/{session_id}/report", headers=headers).json()[
+        "expected_cash"
+    ]
+    # Cierre con faltante: otro `adjustment` sin sesión, el del arqueo.
+    close = client.post(
+        f"/api/v1/cashbox/sessions/{session_id}/close",
+        headers=headers,
+        json={
+            "counted_cash": str(Decimal(expected) - Decimal("7000.00")),
+            "difference_reason": "faltante",
+        },
+    )
+    assert close.status_code == 200, close.text
+    session_date = close.json()["session_date"]
+
+    # Caja cerrada. La transferencia no la necesita (la exige el TIPO de
+    # cuenta), así que la venta pasa y su movimiento nace sin sesión.
+    sale = client.post(
+        "/api/v1/sales",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "transfer",
+            "lines": [{"item_id": item_id, "quantity": "1", "unit_price": "250000.00"}],
+        },
+    )
+    assert sale.status_code == 201, sale.text
+
+    def _lines(**params: str) -> list[dict]:
+        r = client.get("/api/v1/reports/closings-breakdown", headers=headers, params=params)
+        assert r.status_code == 200, r.text
+        return list(r.json()["lines"])
+
+    lines = _lines()
+    bank_sales = [x for x in lines if x["concept"] == "sale" and x["account_type"] == "bank"]
+    assert len(bank_sales) == 1, lines
+    assert bank_sales[0]["total"] == "250000.00"
+    # Su día es el de la EMPRESA en que se registró — que acá coincide con el
+    # del turno que ya cerró.
+    assert bank_sales[0]["session_date"] == session_date
+
+    # Los dos ajustes del cajón (apertura y arqueo) siguen afuera: son el
+    # arqueo, y F21-14 los reporta aparte desde el acta. Sumarlos acá los
+    # contaría dos veces en la misma pantalla.
+    assert not [x for x in lines if x["concept"] == "adjustment"], lines
+
+    # El rango filtra por ese mismo día, no por el turno.
+    assert any(
+        x["concept"] == "sale" and x["account_type"] == "bank"
+        for x in _lines(from_date=session_date, to_date=session_date)
+    )
+    ayer = (date.fromisoformat(session_date) - timedelta(days=1)).isoformat()
+    assert _lines(to_date=ayer) == []
+
+
 # ---- Utilidad bruta / costo de ventas (docs/PENDIENTES_BACKEND_INFRA.md #24.1:
 # `inventory_item.cost` y `sale_line.unit_price` existían pero nada los cruzaba,
 # así que "¿cuánto gané con lo que vendí?" no tenía respuesta).

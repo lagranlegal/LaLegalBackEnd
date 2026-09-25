@@ -138,7 +138,12 @@ async def list_closings(
 
 
 async def closings_breakdown(
-    db: AsyncSession, *, company_id: UUID, from_date: date | None, to_date: date | None
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    tz_name: str,
+    from_date: date | None,
+    to_date: date | None,
 ) -> list[Row[Any]]:
     """Módulo × concepto × medio × cuenta × DÍA, sumado sobre todas las
     sesiones cerradas del rango — una sola consulta en vez de pedir el acta
@@ -155,27 +160,57 @@ async def closings_breakdown(
     `account_type='cash'` — esa cuenta es "cuánto debería haber en el cajón
     HOY", sin sentido sumado sobre varios días. El front decide qué hacer
     con cada línea, igual que ya hace con las de una sola sesión.
+
+    --- MOVIMIENTOS SIN SESIÓN (F21-35) --------------------------------------
+
+    Hasta el 25/09 esto era un INNER JOIN con `cash_session`, y dejaba afuera
+    todo movimiento con `session_id = NULL`. Para los de una cuenta `cash`
+    está bien y se mantiene: son los `adjustment` de apertura y de arqueo, que
+    nacen sin sesión a propósito (ver `cashbox.service.close_session`) y que
+    F21-14 ya reporta aparte desde el acta — sumarlos acá los contaría dos
+    veces en la misma pantalla.
+
+    Para el resto NO estaba bien, porque ahí el `session_id` no significa
+    nada: `resolve_account_for_movement` le cuelga a un movimiento de banco
+    la sesión que HAYA abierta, y `NULL` si no hay. Pertenecer al reporte
+    dependía de la hora: la misma venta por transferencia contaba en
+    «Ventas» a las 10 a. m. y se perdía para siempre si se hacía después del
+    cierre. Medido en dev (25/09): 12 movimientos `bank` ($6.512.222) y 5
+    `settlement` ($5.500.000) adentro por coincidencia, 2 `bank`
+    ($5.060.000: un aporte del dueño y un desembolso) afuera por la misma.
+
+    Sacar los no-`cash` del reporte habría sido la otra forma de volverlo
+    coherente, y es peor: quitaría de «Ventas» y de «Capital desembolsado»
+    lo cobrado y prestado por transferencia, alejando estos KPI del estado
+    de resultados — que sale de DOCUMENTOS y ya los cuenta sin mirar turnos.
+
+    Un movimiento sin sesión cae en el día de la EMPRESA en que se registró
+    (`created_at` en su zona), que es la fecha que habría tenido su turno.
+    Así el reporte deja de depender de si el cajón estaba abierto, sin
+    cambiar su contrato: `session_date` sigue siendo "el día de la línea".
     """
+    line_date = "coalesce(cs.session_date, (m.created_at at time zone :tz)::date)"
     query = (
         "select m.module, m.direction, m.concept, m.payment_method, "
         "       a.id as account_id, a.name as account_name, a.type as account_type, "
-        "       cs.session_date, sum(m.amount) as total "
+        f"      {line_date} as session_date, sum(m.amount) as total "
         "from public.cash_movement m "
         "join public.account a on a.id = m.account_id "
-        "join public.cash_session cs on cs.id = m.session_id "
-        "where m.company_id = :company_id and cs.status = 'closed'"
+        "left join public.cash_session cs on cs.id = m.session_id "
+        "where m.company_id = :company_id "
+        "  and (cs.status = 'closed' or (m.session_id is null and a.type <> 'cash'))"
     )
-    params: dict[str, Any] = {"company_id": str(company_id)}
+    params: dict[str, Any] = {"company_id": str(company_id), "tz": tz_name}
     if from_date is not None:
-        query += " and cs.session_date >= :from_date"
+        query += f" and {line_date} >= :from_date"
         params["from_date"] = from_date
     if to_date is not None:
-        query += " and cs.session_date <= :to_date"
+        query += f" and {line_date} <= :to_date"
         params["to_date"] = to_date
     query += (
         " group by m.module, m.direction, m.concept, m.payment_method, a.id, a.name, a.type,"
-        " cs.session_date"
-        " order by cs.session_date, a.type, a.name, m.module, m.direction, m.concept"
+        f" {line_date}"
+        f" order by {line_date}, a.type, a.name, m.module, m.direction, m.concept"
     )
     result = await db.execute(text(query), params)
     return list(result.all())

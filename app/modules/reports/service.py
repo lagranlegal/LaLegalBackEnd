@@ -121,8 +121,9 @@ async def list_closings(
 async def get_closings_breakdown(
     db: AsyncSession, *, company_id: UUID, from_date: date | None, to_date: date | None
 ) -> ClosingsBreakdownOut:
+    tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
     rows = await repository.closings_breakdown(
-        db, company_id=company_id, from_date=from_date, to_date=to_date
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
     )
     return ClosingsBreakdownOut(
         lines=[
