@@ -45,6 +45,29 @@
 
 ---
 
+## ✅ F21-05 · BAJO — No había botón para volver al documento de fábrica (25/09/2026 · cerrado)
+
+**Cerrado como feature, que es lo que era** (ver «Corregido: F21-05 estaba mal descrito» más abajo): el backend emite
+`deactivate_document_template` por un camino real desde F8-02 y lo único que faltaba era la acción en la pantalla.
+
+- **Front:** `useDeactivateDocumentTemplate` en `features/settings/documentTemplates/api.ts` y, en
+  `DocumentTemplatesPage`, un recuadro bajo la lista —**solo si hay una plantilla activa de ese tipo**— que dice con
+  qué se imprime hoy y ofrece **«Volver al documento de fábrica»**. Pregunta antes con el `confirm` compartido, y la
+  pregunta dice las tres cosas que alguien necesita para no dudar: qué deja de usarse, que la plantilla **no se borra**
+  (queda guardada y se puede volver a activar) y que desde ahora se imprime con el formato de siempre.
+- **Vive a nivel del tipo de documento, no dentro del editor:** la pregunta es «¿con qué se imprime hoy el contrato?»,
+  y eso se tiene que poder contestar sin tener nada seleccionado.
+- **Invalidación:** la del prefijo `['company','document-templates']`, que alcanza también la consulta `active` que
+  leen las vistas de impresión. Sin eso, un contrato impreso en la misma sesión seguiría saliendo con la plantilla
+  recién apagada.
+- **Test:** `frontend-starter/tests/document-templates-deactivate.test.tsx` — sin activa no hay botón; con activa
+  confirma y desactiva **esa**; cancelar no llama al backend.
+- **Visto en navegador** (empresa de QA, solo lectura): la empresa no tiene ninguna activa, así que el estado «activa»
+  se simuló reescribiendo en el navegador la respuesta del `GET` de la lista. Apareció un defecto que el test no ve: en
+  la columna de 220px el texto del botón se salía 16px del recuadro; ahora parte la línea.
+
+---
+
 ## ✅ F21-37 · ALTO (plata) — Una devolución sobre una venta pagada con nota crédito liquidaba la parte de la nota en plata (25/09/2026 · cerrado)
 
 **El gemelo de F21-36**, anotado sin número al final de ese hallazgo: lo mismo que hacía la anulación, pero en el
@@ -504,7 +527,8 @@ escribe la acción, existe desde F8-02 porque sin él no había vuelta al docume
 hasta está en `src/types/api.ts`. **Lo que falta es el botón**: `documentTemplates/api.ts` tiene
 create/update/delete/activate pero no `useDeactivateDocumentTemplate`.
 
-La etiqueta se queda, porque es correcta. **Queda abierto como feature, no como defecto.**
+La etiqueta se queda, porque es correcta. **Quedó abierto como feature, no como defecto** — y se cerró el
+25/09/2026 con el botón (ver «✅ F21-05» arriba).
 
 ### Cerrado: F21-09 — y el hallazgo omitía el permiso más grave
 
@@ -717,7 +741,7 @@ Los tres primeros son defectos del front que un usuario sí sufre.
 | F21-02 | **Anular una venta exige caja abierta y el aviso no lo dice.** El backend lanza `CASH_SESSION_NOT_OPEN` antes de tocar nada, sin importar el medio de pago; el front no mapea ese código y muestra *«No se pudo anular la venta. Intenta de nuevo.»* | `sales/service.py:384-386` vs `SaleReceiptDialog.tsx:73-75` | **Media** — el usuario queda sin saber qué hacer |
 | F21-03 | **Abrir y cerrar caja tapan el mensaje del backend con un genérico.** `CASH_SESSION_ALREADY_OPEN` y `CASH_SESSION_ALREADY_CLOSED_TODAY` traen texto útil, pero el diálogo pinta *«No se pudo abrir la caja. Intenta de nuevo.»* | `OpenSessionDialog.tsx:135-139` · `cashbox/api.ts:52-76` (sin `onError`) | **Media** — relacionado con F20-01 |
 | F21-04 | **La cantidad de una línea de venta con fracciones es un input no controlado.** Se puede escribir 50 y verlo en pantalla aunque el valor quede acotado a 3. El total de arriba sí muestra lo correcto, pero la línea miente | `SaleFormPage.tsx:179` (`defaultValue`) | Baja |
-| F21-05 | **`deactivate_document_template` existe en el catálogo de auditoría pero ningún botón de la UI lo dispara** | `audit/labels.ts:67` vs `DocumentTemplatesPage.tsx` | Baja — verificar si quedó solo en el backend |
+| F21-05 | **`deactivate_document_template` existe en el catálogo de auditoría pero ningún botón de la UI lo dispara** | `audit/labels.ts:67` vs `DocumentTemplatesPage.tsx` | Baja — ✅ cerrado 25/09/2026: faltaba el botón, no sobraba la etiqueta |
 
 | F21-06 | **El nombre del proveedor se le muestra al usuario.** `INVITE_RATE_LIMITED` responde *«Supabase limitó el envío de correos»*, y el front no lo traduce: `errors.ts` solo cataloga el código, no hay handler, y el diálogo pinta el `message` crudo. Un admin de una compraventa no tiene por qué saber qué es Supabase | `identity/auth_admin.py:212-214` · sin handler en `InviteUserDialog.tsx:64-66` | Baja — cosmético, pero filtra un detalle de infraestructura |
 | F21-07 | **El aviso de caja cerrada del traslado es el único distinto.** Las otras diez operaciones abren `CashSessionRequiredDialog`, con botón «Abrir caja». El traslado pinta un texto rojo dentro del diálogo y **sin botón**, así que quien conoce el recuadro lo busca y no aparece | `TransferDialog.tsx:130-137` vs. las otras diez | Baja — inconsistencia de UX |
