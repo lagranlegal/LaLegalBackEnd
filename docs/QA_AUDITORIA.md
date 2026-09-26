@@ -1626,6 +1626,12 @@ fecha y sin importar si se liquidaron en efectivo o con nota crédito (esta últ
 
 ### F21-33 · ALTO (plata) — una devolución sobre una venta con descuento le paga al cliente de más
 
+> **Medido el 25/09/2026 en la base dev, solo lectura (`BEGIN TRANSACTION READ ONLY`, agregado): daño histórico
+> CERO.** No existe ninguna venta con `discount_amount > 0` en ninguna empresa (0 de 18), así que ninguna de las
+> 5 devoluciones pudo liquidarse al bruto. Las 5 tienen su movimiento de caja (3) o su nota crédito (2). No hay
+> nada que reparar. **Si algún día existe otra base con datos de clientes (producción), hay que correr la misma
+> medición ahí**: la consulta reusa el texto de `return_line_amounts_sql` con `{sale_filter}` → `true`.
+
 Encontrado el 24/09 leyendo el código al cerrar F21-17; **no medido contra datos reales todavía**.
 
 Lo que se le **liquida al cliente** en una devolución (`repository.sum_sale_return_amount`, en efectivo o
