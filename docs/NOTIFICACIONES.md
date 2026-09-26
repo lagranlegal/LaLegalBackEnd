@@ -1,5 +1,7 @@
 # NOTIFICACIONES.md — Avisos por correo al cliente y a la empresa (spec)
 
+> **Estado (25/09/2026, noche): FASE 7 IMPLEMENTADA en `dev`, sin desplegar** — las cuatro alertas inmediatas a la empresa (A1–A4) tienen productor, encendidas por catálogo y detrás del interruptor general, que sigue apagado: **§19**.
+>
 > **Estado (25/09/2026, tarde): FASES 4 y 6 IMPLEMENTADAS en `dev`, sin desplegar** — cada operación de dinero genera su aviso al cliente (C1–C7), todos apagados por defecto: **§18**.
 >
 > **Estado (25/09/2026): FASES 1, 2 y 3 IMPLEMENTADAS en `dev`, sin desplegar.** La 3 —base legal del cliente, casilla del mostrador, enlace de baja— en **§17**; la 2 en §16. Ningún aviso al cliente está encendido.
@@ -789,7 +791,7 @@ nuevas en `reports/integration.py`. El job nocturno tiene ahora cuatro pasos (AR
 8. **`bounced`/`delivered` no se escriben todavía:** exigen el webhook de Resend. Un rechazo permanente de la API (4xx que no sea 401/403/429) va directo a `dead`, no a `bounced` — no es un rebote.
 9. **El semanal sale en la primera corrida de cada semana** (no estrictamente el lunes) para que un lunes perdido no se coma la semana. Consecuencia: la primera noche tras el deploy sale un semanal, sea el día que sea.
 10. **La hora del job no es fija:** `--schedule daily` de Fly no fija la hora, así que el resumen puede llegar a cualquier hora. Al cliente lo protege la ventana horaria del despachador; a la empresa no se le aplica.
-11. **Las alertas A1–A4 y P1 existen en el catálogo pero sin productor.** `notifications.receive_alerts` ya está sembrado.
+11. **Las alertas A1–A4 y P1 existen en el catálogo pero sin productor.** `notifications.receive_alerts` ya está sembrado. → P1 tiene productor desde la fase 2 (§16); A1–A4, desde la fase 7 (§19).
 
 ### 15.3 · Lo que NO quedó (y en qué fase cae)
 
@@ -1177,3 +1179,162 @@ Tests: `test_a_mixed_return_sends_ONE_notice_that_names_both_amounts` y
 contra la API real: un evento con `dedupe_key = return:<id>`, una entrega, un correo con $500.000 y $300.000 y sin
 $800.000), y `test_a_mixed_return_names_the_note_and_the_cash_in_both_templates` (unitario, las dos plantillas).
 Los dos de integración se vieron fallar antes del arreglo: salía C7 diciendo *«Le devolvimos $800.000»*.
+
+---
+
+## 19. Fase 7 — lo implementado (25/09/2026)
+
+**Sin migración.** Todo cupo en `00058`: los cuatro tipos ya estaban en el catálogo con `audience='company'`,
+`family='alert'` y `default_enabled = true`, el permiso `notifications.receive_alerts` ya estaba sembrado al rol con
+`identity.manage_roles`, y la entrega ya tenía `recipient_user_id`. **Nada se encendió que no estuviera encendido**:
+las alertas nacen `true` por catálogo, pero el interruptor general de la empresa sigue apagado (§15.2-5), y es él el
+que manda.
+
+**Código:** `notifications/integration.py` (`record_company_alert`), `service.record_event` (la rama de las alertas,
+que hasta hoy devolvía «sin productor, nada que planificar»), `repository.list_recipients_with_permission` (el
+resumen y las alertas, una sola consulta), `preferences.above_discount_threshold`, `templates.render_alert`,
+`dispatcher.send_after_commit` (acepta varias entregas), el `alert_recipients` del `GET /notifications/settings`, y
+los servicios y routers de `sales`, `contracts`, `capital` y `cashbox`. Tests: `tests/integration/test_company_alerts.py`
+(45, contra la API real) y cinco en `tests/unit/test_notification_templates.py`.
+
+### 19.1 · Las decisiones, y su porqué
+
+**1. Quien hizo el acto NO recibe su propia alerta.**
+§2.5 dice para qué existe: *«el valor no está en el aviso, está en que llegue el mismo día a alguien que puede
+preguntar»*. Quien anuló la venta no se pregunta a sí mismo por qué la anuló; ya lo sabe, y acaba de escribir el
+motivo. Es la regla de §3 sin excepciones —*«un hecho cuyo destinatario es la persona que acaba de hacer clic no es un
+correo. Es una pantalla»*— y además la única que no entrena a ignorar: un dueño que retira todas las semanas y recibe
+un correo por cada retiro suyo aprende a archivar el remitente, y el día que el retiro lo haga otro, ese correo ya
+nadie lo abre. Se consideró el argumento contrario —que la propia alerta sirve de aviso de *cuenta comprometida*
+(«alguien usó mi usuario»)—, y se descartó **para esta fase**: eso es una alerta de seguridad, con otro destinatario
+(el titular, siempre, tenga o no el permiso) y otra redacción; mezclarla acá la dejaría a medias en las dos cosas.
+
+La consecuencia, dicha: **en una compraventa donde el dueño es el único con el permiso y hace él mismo el acto, no
+sale nada.** El hecho queda registrado sin entregas (§4.3), y sigue en `audit_log` y en el resumen diario, que es lo
+que había antes de la alerta. Es correcto: no hay nadie más a quien avisarle.
+
+**2. Una llave por DOCUMENTO, en un espacio propio.**
+
+| Operación | Alerta | `dedupe_key` | Por qué así |
+|---|---|---|---|
+| `POST /sales/{id}/void` | `alert_sale_voided` (A1) | `alert:void:<sale_id>` | Una venta se anula una sola vez |
+| `POST /sales` con descuento | `alert_discount` (A2) | `alert:discount:sale:<sale_id>` | El descuento nace con la venta y es inmutable |
+| `POST /contracts/{id}/payments` con descuento | `alert_discount` (A2) | `alert:discount:payment:<contract_payment_id>` | Ídem, con el abono |
+| `POST /capital/withdrawals` | `alert_capital_withdrawal` (A3) | `alert:withdrawal:<capital_movement_id>` | El retiro es el documento |
+| `POST /cashbox/sessions/{id}/reopen` | `alert_cash_reopened` (A4) | `alert:reopen:<session_id>:<closed_at>` | Ver abajo |
+
+- **El prefijo `alert:`** separa estas llaves de las del cliente para el MISMO documento (`sale_void:<id>` es el C7 de
+  la misma anulación, §18.3-2): la unicidad es `(company_id, dedupe_key)` sobre toda la tabla, y dos hechos distintos
+  del mismo documento no pueden compartir llave.
+- **A2 lleva el tipo de documento en la llave** (`sale:` / `payment:`), aunque los UUID no choquen: la llave se lee en
+  `GET /notifications/deliveries` y en la base, y tiene que decir de qué documento habla sin ir a buscarlo.
+- **A4 no puede ser solo la sesión**: una caja se cierra, se reabre, se vuelve a cerrar y se vuelve a reabrir, y cada
+  reapertura es un hecho nuevo. Una llave `alert:reopen:<sesión>` se tragaría la segunda en silencio por el
+  `on conflict do nothing` (el mismo error que §16.1 evitó con la invitación). Lo que hace única a una reapertura es
+  **el cierre que deshace**: su `closed_at`, que el cierre siguiente cambia. Anclada al hecho, como la llave de mora
+  (§6.1): la misma reapertura da la misma llave, la siguiente otra.
+- **Dos capas, como en §18.1-2.** Un reintento con el mismo `Idempotency-Key` devuelve el documento que ya existía y
+  no pasa por la alerta (venta, abono, retiro); anular o reabrir dos veces es `409` (`CONFLICT` /
+  `CASH_SESSION_NOT_CLOSED`), porque esos dos endpoints no llevan llave. La `dedupe_key` es la red de adentro. Test por
+  alerta: un evento, dos entregas, dos correos.
+
+**3. Qué dice cada alerta: quién, qué, cuánto, cuándo y el motivo. Del cliente, nada.**
+El motivo va —los cuatro actos lo exigen y ya queda en `audit_log`— porque el lector es la empresa y es la primera
+pregunta que haría; al cliente no se le dice (§18.2, C7). El cliente **no aparece ni por nombre**: §9.1 admite el
+nombre de pila en un correo **al cliente** porque es su propio aviso; acá el cliente es un tercero, y el número del
+documento alcanza para preguntar en la app. Ni cédula, ni prenda, ni artículos (test sobre cada correo real).
+
+| Alerta | Además de quién (nombre) y cuándo (hora local de la empresa) |
+|---|---|
+| A1 | número de la venta, total, lo que salió de la caja (el mismo `refunded` del contra-movimiento y del C7), día de la venta, motivo |
+| A2 · venta | número, total antes del descuento, descuento, cobrado, motivo, y el umbral si no es 0 |
+| A2 · abono | número del contrato y del recibo, interés del abono (de ahí sale el descuento), descuento, cobrado, motivo, umbral |
+| A3 | número del retiro, monto, cuenta, clase (utilidad / devolución de capital), fecha del documento, motivo (`notes`) |
+| A4 | día de la caja, cuándo se había cerrado, lo contado y el descuadre de ese cierre (que se revierte), motivo |
+
+**A4 dice lo que el acta pierde.** Reabrir borra `expected_cash`, `counted_cash` y `difference` de la sesión (F21-32);
+el `audit_log` los guarda en `before`, y la alerta los cuenta, porque *«reabrió la caja de ayer, que había cerrado con
+un faltante de $20.000»* es otra pregunta que *«reabrió la caja de ayer»*.
+
+**Remitente y marca: Prendo**, como el resumen (§8: el destinatario es un usuario de Prendo). La empresa va en el
+asunto —`Alerta · <Empresa> · Venta #12 anulada`— porque quien trabaja en dos compraventas tiene que saber de cuál
+es. Sin `Reply-To` y sin la firma del inquilino.
+
+**4. El resumen diario SIGUE listando los descuentos (y los descuadres). La alerta no saca nada del resumen.**
+Ya lo había decidido §12.2-4 —*«por debajo del umbral el evento igual sale en el resumen; el umbral decide solo la
+alerta inmediata»*— y la fase 7 no lo cambia, por tres razones: el resumen es el **registro del día** y la alerta es
+la **urgencia**, y un registro que omite lo que ya se avisó deja de sumar; sacarlo haría que el resumen dependiera de
+si la alerta salió (apagada, sin destinatarios, rebotada, `dead`), que es exactamente el acoplamiento que §5.1 evita;
+y quien recibe el resumen no es necesariamente quien recibe las alertas (son dos permisos, §4.3). La marca
+«⚠ sobre el umbral» del resumen y la decisión de la alerta salen ahora de **la misma función**
+(`preferences.above_discount_threshold`): no pueden divergir. Lo que el resumen **no** lista uno por uno —las
+anulaciones (solo el conteo), los retiros y las reaperturas— tampoco se agregó: el resumen es un tablero, no un
+segundo `audit_log`.
+
+**5. Sin Ley 2300, sin base legal; con interruptor y casilla.** El despachador ya aplicaba los límites de contacto solo
+a `audience='customer'`, y la base legal (§9.2) es del cliente. El destinatario acá es un usuario de la empresa, con un
+permiso que alguien le dio en un rol. Sí mandan el interruptor general y la casilla del evento, **al planificar y otra
+vez al enviar** (`dispatcher._prepare`, sin cambios): apagar la alerta entre el acto y el envío la deja `suppressed`.
+
+**6. Inmediata, sin ventana horaria.** Sale en el envío posterior al commit (`send_after_commit`), a cualquier hora:
+el test la manda un **domingo a las 23:00**. Sin rezago (`target_date` nula: un acto de hoy no caduca). Si el envío
+inmediato no ocurre, la entrega queda `pending` y la barre el job — la garantía de siempre (§5.1), con el costo de
+siempre: en ese caso llega al día siguiente.
+
+**A2 y el umbral, en concreto.** Estricto: alerta si `descuento > umbral`. Con el umbral en 0 —como nace— todo
+descuento alerta; con el umbral en $10.000, un descuento de $10.000 no. **Por debajo no se registra el evento**, a
+diferencia de «apagada», que sí lo registra sin entregas (§4.3): el evento del catálogo es *«descuento por encima del
+umbral»*, y un descuento por debajo no es ese hecho — el hecho (el descuento) ya está en el documento, en `audit_log` y
+en el resumen.
+
+### 19.2 · Qué quedó
+
+- **Destinatarios**: usuarios `active` con `notifications.receive_alerts`, menos el autor, **una entrega por
+  destinatario**, con `recipient_user_id`. Un `invited` o `inactive` no recibe (test explícito con un Exsocio que
+  conserva el rol).
+- **El hecho, último paso de la transacción**, después del documento, la caja, la auditoría y el aviso al cliente.
+  Test por alerta que fuerza una falla justo después de registrarla: ni alerta, ni `audit_log` del acto.
+- **`GET /notifications/settings` trae `alert_recipients`**, análogo a `digest_recipients` (aditivo). La pantalla dice
+  quién las recibe.
+- **Ningún endpoint cambió su request ni su respuesta.** Los servicios devuelven ahora `(documento, tupla de
+  entregas)`; el router llama `send_after_commit(db, background, *entregas)` (ARCHITECTURE §4).
+
+### 19.3 · Discrepancias: dónde el código contradijo este documento (y ganó)
+
+1. **§2.5 nombra `apply_sale_discount` / `apply_payment_discount` como si fueran funciones.** Son **acciones de
+   `audit_log`**: el descuento no tiene endpoint propio, nace dentro de `create_sale` y `create_payment`. La alerta se
+   dispara ahí, cuando `discount_amount > 0`.
+2. **§5.1/§16.2-1: `send_after_commit` recibía UNA entrega.** Una alerta son N (una por destinatario), y la misma
+   anulación trae también el C7. Se amplió a varias en vez de inventar otra función (ARCHITECTURE §4).
+3. **§4.3 no decía si el autor recibe.** Quedó que no (§19.1-1), con `record_event(actor_user_id=…)`.
+4. **§6.1 no tenía llaves de alertas**, y la obvia para A4 (`alert:reopen:<sesión>`) era incorrecta: §19.1-2.
+5. **§4.1 «el hecho se escribe SIEMPRE» — salvo A2 por debajo del umbral**, que no es el hecho del catálogo (§19.1, al
+   final).
+6. **§9.1 permite el nombre de pila del cliente «en un correo».** Pensaba en el correo **al** cliente; en una alerta a
+   la empresa el cliente no aparece ni por nombre.
+7. **A1 sobre una venta con nota crédito ya no existe** (F21-36 la rechaza con `409 SALE_PAID_WITH_CREDIT_NOTE`), así que
+   «lo que salió de la caja» es siempre el total. El payload lo trae aparte igual (`refunded_amount`), del mismo
+   `refunded` que el contra-movimiento: si la regla cambia, el correo va con ella.
+
+### 19.4 · Operación, orden de deploy, y lo dudoso
+
+- **Una empresa que YA tenga el interruptor encendido empieza a recibir alertas el día del deploy**, sin tocar nada: las
+  cuatro nacen `true` por catálogo (§15.1) y hasta hoy no tenían productor. Es lo que el catálogo prometía, pero es un
+  cambio de comportamiento que llega con el código y no con un acto. **No se midió en dev** (prohibido tocarla en esta
+  fase) cuántas empresas tienen `settings.notifications.enabled = true`; el día del deploy conviene mirarlo —de solo
+  lectura, con `BEGIN TRANSACTION READ ONLY`— y avisarle al dueño de cada una.
+- **Orden de deploy**: el backend primero o a la vez; el front después. El campo `alert_recipients` es aditivo, pero el
+  front nuevo lo lee: contra un backend viejo la lista vendría indefinida. Sin migración, así que no hay nada que
+  aplicar antes.
+- **Sin `RESEND_API_KEY`** las alertas quedan `skipped_no_provider`, como todo lo demás.
+- **Dudoso — el volumen si el umbral queda en 0.** §12.1-4 midió 11 abonos y 13 ventas en septiembre en toda la base;
+  con eso, avisar todo descuento es barato. En una empresa con descuentos a diario, cada uno es un correo por
+  destinatario. Es lo que §12.2-4 decidió («cerrado de más se nota») y se sube el umbral sin código.
+- **Dudoso — el autor excluido y la cuenta comprometida** (§19.1-1). Si Mateo quiere que el titular de la cuenta se
+  entere de lo que se hace con su usuario, es una alerta de seguridad aparte, no un cambio de esta regla.
+- **No hay alerta de descuadre de arqueo al cierre.** §12.2-4 menciona el umbral de «descuadre grande» para las
+  alertas inmediatas, pero §2.5 no lo tiene entre sus cuatro actos, y el catálogo tampoco. El descuadre sigue en el
+  resumen (E4) con su marca de umbral. Agregarlo sería un quinto tipo en el catálogo (migración) y una decisión de
+  producto; no se hizo.
+- **Verificado en vivo con un correo real: pendiente**, como en §15–§18.
+
