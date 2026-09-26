@@ -498,6 +498,8 @@ Una corrección respecto del molde, medida: la tarjeta de Supabase es `width:560
 
 **Por qué los avisos al cliente no llevan «Prendo» en el encabezado.** Es esta misma sección aplicada al cuerpo: el autor es la empresa. Donde la invitación y el resumen dicen PRENDO, el aviso al cliente dice el nombre de la compraventa; Prendo aparece solo bajo la tarjeta, en «Enviado por Prendo en nombre de …», que es lo que la honestidad exige y el `(vía Prendo)` del `From` ya anuncia. Un cliente que ve una marca que nunca oyó encabezando un correo sobre su contrato de empeño lo lee como phishing, que es exactamente el argumento de la tabla de arriba. El molde sigue siendo uno solo porque es de la plataforma (§4.4): cambia la marca, no la redacción ni el diseño. La firma de la empresa (teléfono, `footer_note`) va en el recuadro beige, y el enlace de baja (§9.2-e) en el pie, subrayado y a la vista.
 
+**Adónde enlazan los correos (anotado el 26/09/2026).** Hoy a dos lugares del front, y a ninguno más: la invitación a `{FRONTEND_URL}/auth/callback?token_hash=…` (§16.1) y los avisos al cliente a `{FRONTEND_URL}/baja/{token}` (§17). El resumen y las alertas a la empresa **no llevan botón a la app**. Si algún día lo llevan, el destino es **`{FRONTEND_URL}/inicio`**: desde el 26/09 la raíz del front es la landing pública de venta y el panel se mudó a `/inicio` (`frontend-starter/docs/ARCHITECTURE.md` §9). Un «Abrir Prendo» que apunte a la raíz le mostraría al dueño la página de venta en vez de su caja. Sin sesión, `/inicio` manda al login y vuelve al panel.
+
 ---
 
 ## 9. Habeas Data — Ley 1581
