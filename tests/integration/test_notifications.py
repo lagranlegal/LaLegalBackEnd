@@ -397,6 +397,44 @@ async def test_daily_goes_out_with_new_ready_contract_and_state_changes(
     ]
 
 
+async def test_a_payment_inside_the_extension_does_not_re_enter_it_in_the_digest(
+    notif: dict[str, Any],
+) -> None:
+    """E2 con el criterio de R3 (NOTIFICACIONES §20.3-4, §20.5). El día de
+    entrada en prórroga se DERIVA del ancla (`interest_paid_until` + ventana),
+    y un abono con la prórroga en curso mueve el ancla sin sacarlo de ahí.
+
+    El movido entró en prórroga el 3/08 (ancla 3/04, ventana 4, un mes de
+    prórroga: vence el 3/09). Abonó un mes y sigue en prórroga: el ancla pasó
+    al 3/05 y el día derivado es el martes 3/09 — dentro del período del
+    resumen. Sin la guarda, el diario del martes dice «entró en prórroga» de
+    un contrato que lleva un mes ahí. El coherente entró de verdad el martes
+    (ancla 3/05, vence el 3/10) y sí va."""
+    cid = notif["company_id"]
+    await _enable(cid)
+    await _digest(cid, MON)
+
+    await _contract(
+        cid,
+        notif["customer_mail"],
+        status="in_extension",
+        interest_paid_until=date(2030, 5, 3),
+        extension_ends_at=date(2030, 9, 3),
+    )
+    coherent = await _contract(
+        cid,
+        notif["customer_nomail"],
+        status="in_extension",
+        interest_paid_until=date(2030, 5, 3),
+        extension_ends_at=date(2030, 10, 3),
+    )
+
+    await _digest(cid, TUE)
+    daily = (await _events(cid, catalog.DAILY_DIGEST))[-1].payload
+    assert daily["entered_extension"] == [{"number": coherent, "extension_ends_at": "2030-10-03"}]
+    assert daily["entered_extension_total"] == 1
+
+
 async def test_disabled_company_records_events_but_sends_nothing(notif: dict[str, Any]) -> None:
     """El interruptor general nace apagado (§4.3, §11): el hecho queda, la entrega no."""
     cid = notif["company_id"]

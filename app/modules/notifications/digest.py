@@ -67,6 +67,39 @@ def weekly_key(company_id: UUID, week_start: date) -> str:
     return f"weekly_digest:{company_id}:{week_start.isoformat()}"
 
 
+async def _coherent_extension_entries(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    entries: list[contracts_integration.StateEntry],
+    today: date,
+) -> list[contracts_integration.StateEntry]:
+    """E2 «entró en prórroga», con la misma guarda que R3 (§20.3-4, §20.5).
+
+    `list_state_entries` DERIVA el día de entrada del ancla
+    (`interest_paid_until` + ventana). Un abono con la prórroga en curso
+    —debe más meses que la ventana, paga uno y sigue ahí— mueve el ancla, y el
+    día derivado se corre un mes: el resumen de ese día diría «entró en
+    prórroga» de un contrato que lleva un mes en ella. Solo vale la fecha
+    derivada que cuadra con el `extension_ends_at` persistido, que se escribió
+    UNA vez, el día que de verdad entró.
+
+    La guarda no se repite acá: `list_reminder_contracts` ya la aplica
+    (`extension_entered_on` es `None` cuando no cuadra), y dos copias de la
+    misma regla terminan divergiendo (§2.2). Una consulta más por empresa y
+    por noche, y solo si hay algo que filtrar.
+    """
+    if not entries:
+        return entries
+    coherent = {
+        c.contract_id: c.extension_entered_on
+        for c in await contracts_integration.list_reminder_contracts(
+            db, company_id=company_id, today=today
+        )
+    }
+    return [e for e in entries if coherent.get(e.contract_id) == e.entered_on]
+
+
 def auction_ready_key(contract_id: UUID, extension_ends_at: date) -> str:
     """§2.2-a: anclada al ancla del contrato, como todas las de estado (§6.1)."""
     return f"auction_ready:{contract_id}:{extension_ends_at.isoformat()}"
@@ -123,6 +156,9 @@ async def _sections(
 
     arrears, extension = await contracts_integration.list_state_entries(
         db, company_id=company_id, after=after, until=today
+    )
+    extension = await _coherent_extension_entries(
+        db, company_id=company_id, entries=extension, today=today
     )
 
     unclosed = await repository.unclosed_sessions(db, company_id=company_id, today=today)

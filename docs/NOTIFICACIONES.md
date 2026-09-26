@@ -565,6 +565,8 @@ Y por encima de la tabla, tres cortes que ganan siempre y en este orden: **no ha
 
 **(f) Capturar la autorización expresa en el mostrador, de ahora en adelante.** Preguntarla cuesta cero y quita la duda para siempre; no preguntarla deja al producto colgado de una interpretación. Va donde ya va la captura del correo (§1c), al crear el contrato, junto al *"¿quiere recibir avisos de su cuota por correo?"*: una casilla aparte, con su texto. Quien dice que sí queda `email_basis='consent'` + `email_consent_at` + `email_consent_source='contract_form'`, y ese cliente **ya no depende de cómo se resuelva la pregunta legal**. Quien no contesta se queda en `contract` y sigue recibiendo lo de su contrato.
 
+> **Implementado el 25/09/2026** (después de la fase 3, que la había dejado en la ficha — §17.2-4). En el formulario de nuevo contrato, junto al cliente elegido: su correo o, si no tiene, un campo para cargarlo ahí mismo (*«Sin correo no recibe avisos de sus cuotas ni de sus abonos»*); y si no tiene ya `consent` ni pidió la baja, la casilla *«El cliente autoriza recibir avisos por correo»*, deshabilitada hasta que haya correo. Viajan en el **mismo** `POST /contracts` (`customer_email`, `customer_email_consent`) y se escriben en **la misma transacción** que el contrato, vía `customers.integration.record_contract_form_email` — si el contrato no nace, la autorización tampoco. Origen `contract_form`, auditado como `update_customer`. Tres reglas que el diseño no decía: **(1)** el correo del formulario solo llena un vacío — si el cliente ya tiene otro, `422` (cambiarlo es una edición de su ficha, con su `before`); **(2)** la casilla exige correo, igual que en la ficha; **(3)** si ya había `consent`, se conserva la fecha y el origen originales — son la prueba (§9.2-g). Se escribe **antes** de `ensure_contract_basis` y del aviso C1, así que un correo recién cargado sin casilla queda en `contract` y el C1 ya tiene a quién salir. El *«¿quiere recibir avisos de su cuota por correo?»* de §1c sigue sin pregunta propia: lo cubre el campo de correo con su texto.
+
 **Lo que NO se hace: volver obligatorio el correo.** Obligarlo trabaría el mostrador y además no funcionaría —quien no tiene correo escribe `a@a.com` (§1c)—. **"No tiene correo" es el caso normal** (§1), y ninguna decisión legal cambia ese dato: lo que se gana acá es a quién se le puede escribir, no cuántos hay.
 
 **(g) Los 2 correos que ya existen: qué pasa con ellos ahora.** Con el diseño anterior nacían `suppressed` y había que volver a pedirles autorización. Con este, si tienen contrato vivo nacen `email_basis='contract'` y **son destinatarios desde el primer día**. Lo que **no** se hace es marcarlos `consent`: nadie los autorizó expresamente, y escribir una fecha de autorización que no ocurrió sería fabricar la prueba. **`email_consent_at` solo se escribe cuando alguien dijo que sí**, y por eso sigue sirviendo como prueba cuando se la pidan.
@@ -976,7 +978,7 @@ día que alguien encienda uno, ya hay con qué decidir a quién se le puede escr
 3. **§9.2-a: «de ahí en adelante lo pone `create_contract`».** También `import_contract`, `extend_loan` y el
    `PATCH` del cliente que le registra un correo teniendo un contrato vivo. Sin lo último, el caso normal de §1c —el
    correo llega después del contrato— dejaba al cliente sin base para siempre.
-4. **§9.2-f: la casilla va «al crear el contrato».** Quedó en el **formulario del cliente** (origen `counter`). La
+4. **§9.2-f: la casilla va «al crear el contrato».** ~~Quedó solo en el formulario del cliente.~~ **Completado el 25/09/2026: ahora está en los dos — ver la nota bajo §9.2-f.** En su momento quedó en el **formulario del cliente** (origen `counter`). La
    pantalla de crear contrato elige un cliente existente (`CustomerPicker`) y no tiene formulario de cliente; meterle
    uno era rediseñar esa pantalla. `contract_form` existe como valor permitido y hoy nadie lo escribe. Lo mismo para
    el *«¿quiere recibir avisos de su cuota por correo?»* de §1c: **no se construyó**.
@@ -1016,7 +1018,7 @@ día que alguien encienda uno, ya hay con qué decidir a quién se le puede escr
 
 ### 17.4 · Lo que NO quedó, y lo dudoso
 
-- **La captura al crear el contrato (§1c, §9.2-f)** — ver §17.2-4.
+- ~~**La captura al crear el contrato (§1c, §9.2-f)**~~ — hecha el 25/09/2026, ver la nota bajo §9.2-f.
 - **La lista «clientes sin correo» (§1c)** — no se construyó.
 - **Webhook de Resend:** `email_invalid_at` existe y el `gate` lo respeta, pero **nadie lo escribe todavía**.
 - ~~**Cabeceras `List-Unsubscribe` / `List-Unsubscribe-Post` (RFC 8058)** no se agregaron.~~ **Hechas el 25/09/2026**,
@@ -1579,8 +1581,7 @@ noche cuesta una consulta por empresa sobre sus contratos vivos. Es más simple 
    día «derivado» se corre y caería dentro de la ventana de búsqueda — un segundo «entró en prórroga» sobre la misma
    prórroga. `list_reminder_contracts` exige que el día derivado cuadre con el `extension_ends_at` persistido
    (`add_months(entrada, extension_months) == extension_ends_at`); si no, no hay R3. Test con el caso. **El resumen
-   (E2) tiene el mismo defecto** en `list_state_entries` y no se tocó (fuera de alcance; el efecto allá es una fila
-   de más en un correo interno).
+   (E2) tenía el mismo defecto** en `list_state_entries`; se arregló el 25/09/2026 con la misma guarda (§20.5).
 5. **R2 sí puede repetirse tras un abono parcial en mora, y es a propósito.** Si debe dos meses y paga uno, el ancla
    avanza y sigue en mora: la cuota siguiente también está vencida, y es un hecho nuevo — exactamente lo que la llave
    de §6.1 anclada a `interest_paid_until` producía. Si cae dentro de la ventana de búsqueda sale (o queda
@@ -1622,4 +1623,36 @@ noche cuesta una consulta por empresa sobre sus contratos vivos. Es más simple 
   haya insertado la cláusula en su plantilla.
 - **Revisión legal antes de encender** en una empresa real (§12.3): la recomendación sigue en pie.
 - **Webhook de Resend y verificado en vivo con un correo real:** pendientes, como en §15–§19.
+
+### 20.5 · El resumen (E2) con la misma guarda que R3 (25/09/2026)
+
+**El defecto.** «Entró en prórroga» del resumen diario sale de `contracts.integration.list_state_entries`, que
+**deriva** el día de entrada del ancla: `add_months(interest_paid_until, arrears_window_months)`. Un cliente que debe
+más meses que la ventana puede abonar uno y seguir en prórroga; el ancla avanza un mes y el día derivado también. Si
+cae en el período del resumen, el diario de ese día dice «entró en prórroga» de un contrato que lleva un mes en ella
+— el mismo segundo aviso falso de §20.3-4, en el correo de la empresa en vez del del cliente.
+
+**El arreglo, en `digest._coherent_extension_entries`:** una entrada en prórroga solo va al resumen si su día
+derivado cuadra con el `extension_ends_at` persistido (`add_months(entrada, extension_months) == extension_ends_at`),
+que se escribe **una vez**, el día que de verdad entró (`rules.compute_status`). **La guarda no se copió:** se lee de
+`list_reminder_contracts`, que ya la aplica para R3 (`extension_on` es `None` cuando no cuadra). Dos copias de la
+misma regla terminan divergiendo (§2.2), y el caso de R3 lo demuestra: el defecto de E2 existía justamente porque la
+fecha se derivaba en dos lugares. Cuesta una consulta más por empresa y por noche, y solo si hay entradas que filtrar.
+
+- **Por qué en `notifications` y no en `list_state_entries`:** la regla natural viviría ahí, pero en esta tanda
+  `app/modules/contracts/` lo estaba tocando otro trabajo en paralelo. Si algún día se toca, mover la guarda adentro
+  de `list_state_entries` (seleccionando `extension_months`) deja a `digest` sin la consulta extra — y el test de
+  abajo sigue siendo el que manda.
+- **«O no listarlo»: con el job corriendo, no pasa por un abono.** El día que entra en prórroga el contrato debe
+  exactamente la ventana; cualquier abono de ese día lo saca a mora. Para abonar **y seguir** en prórroga hay que deber
+  un mes más, o sea estar al menos un mes después de la entrada — y para entonces el resumen de aquel día ya salió (el
+  período nunca pasa de 7 días). La guarda cierra el lado que sí ocurre: listarlo **otro** día. Un contrato cuya fecha
+  no cuadra por otra razón (un dato escrito a mano, un import con fechas incoherentes) queda fuera de E2, como de R3:
+  preferimos callar a afirmar una fecha falsa.
+- **«Entró en mora» (la otra mitad de E2) no se tocó, a propósito:** si debe dos meses y paga uno, el ancla avanza y
+  la cuota siguiente también está vencida — es un hecho nuevo, el mismo criterio de R2 (§20.3-5).
+- **Test:** `test_a_payment_inside_the_extension_does_not_re_enter_it_in_the_digest`
+  (`tests/integration/test_notifications.py`): dos contratos en prórroga con el mismo día derivado (el martes 3/09),
+  uno movido por un abono (vence el 3/09) y uno que entró de verdad ese día (vence el 3/10). Visto fallar antes del
+  arreglo (el diario listaba los dos); después, solo el coherente.
 
