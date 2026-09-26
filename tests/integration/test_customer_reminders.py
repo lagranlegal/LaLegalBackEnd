@@ -565,10 +565,15 @@ async def test_weekly_cap_throttles_the_second_reminder_but_not_a_receipt(
     assert "Recibimos" in provider.outbox[1].subject
 
 
-async def test_with_the_default_R1_still_spends_the_week_of_R2(rem: dict[str, Any]) -> None:
-    """§20.4: sacar el 0 de R1 no libera el día del vencimiento. El tope es de 7
-    días corridos, y R2 nace 3 días después del R1: con los dos encendidos, R2
-    queda `throttled`. Se deja fijado para que nadie lo descubra en producción."""
+async def test_with_the_default_R1_R2_waits_for_the_week_instead_of_being_lost(
+    rem: dict[str, Any],
+) -> None:
+    """§20.4 → §20.6: el tope es de 7 días corridos y R2 nace 3 días después del
+    R1. Hasta el 26/09/2026 R2 quedaba `throttled` y el cliente nunca recibía
+    el aviso de mora. Ahora se REPROGRAMA: la MISMA entrega, `pending`, para
+    el primer momento en que el R1 del martes sale de la ventana — el martes
+    siguiente a las 12:00:01 —, sin contar como intento. Y sale aunque ya pasó
+    el rezago de 2 días: la mora sigue siendo cierta."""
     cid, juana = rem["company_id"], rem["juana"]
     await _enable(cid, R1, R2)
     number = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
@@ -582,9 +587,181 @@ async def test_with_the_default_R1_still_spends_the_week_of_R2(rem: dict[str, An
     await _run(cid, FRI)
     await _dispatch(cid, FRI, provider)
     assert [e.event_type for e in await _events(cid) if e.target_date == date(2030, 9, 6)] == [R2]
-    [arrears] = await _deliveries(cid, _key("arrears", juana, "2030-09-06"))
-    assert arrears.status == "throttled"
+    arrears_key = _key("arrears", juana, "2030-09-06")
+    [arrears] = await _deliveries(cid, arrears_key)
+    assert arrears.status == "pending"
+    released = _bog(2030, 9, 10, 12) + timedelta(seconds=1)
+    assert arrears.scheduled_at == released
+    assert "Tope" in (arrears.last_error or "")
+    assert await _attempts_and_deferred(arrears.id) == (0, FRI)
     assert len(provider.outbox) == 1
+
+    await _dispatch(cid, released - timedelta(seconds=1), provider)  # todavía no
+    assert (await _deliveries(cid, arrears_key))[0].status == "pending"
+    await _dispatch(cid, released, provider)
+    assert [d.status for d in await _deliveries(cid, arrears_key)] == ["sent"]
+    assert len(provider.outbox) == 2
+    assert "venció el 6 de septiembre de 2030" in provider.outbox[1].text
+
+
+# ------------------------------- el tope reprograma en vez de callar (§20.6) ----
+
+#: Octubre de 2030: lunes 7, jueves 10, lunes 14 (festivo, Día de la Raza
+#: trasladado), martes 15. Una cuota que vence el jueves 10 tiene su R1 el
+#: lunes 7; R2 nace el jueves 10.
+OCT_MON = _bog(2030, 10, 7)
+OCT_THU = _bog(2030, 10, 10)
+OCT_TUE_7AM = _bog(2030, 10, 15, 7)
+
+
+async def _attempts_and_deferred(delivery_id: UUID) -> tuple[int, datetime | None]:
+    [row] = await _rows(
+        "select attempts, deferred_at from public.notification_delivery where id = :id",
+        {"id": str(delivery_id)},
+    )
+    return row.attempts, row.deferred_at
+
+
+async def _r1_monday_then_r2_thursday(
+    cid: UUID, customer: UUID, provider: RecordingProvider
+) -> int:
+    """R1 sale el lunes 7 a las 12:00; el jueves 10 entra en mora y R2 choca
+    con el tope. Devuelve el número del contrato."""
+    number = await _contract(cid, customer, status="active", interest_paid_until=date(2030, 9, 10))
+    await _run(cid, OCT_MON)
+    await _dispatch(cid, OCT_MON, provider)
+    await _set_status(cid, number, "in_arrears")
+    await _run(cid, OCT_THU)
+    await _dispatch(cid, OCT_THU, provider)
+    return number
+
+
+async def test_a_capped_R2_goes_out_when_the_week_frees_up_inside_business_hours(
+    rem: dict[str, Any],
+) -> None:
+    """El R1 del lunes 7 sale de la ventana el lunes 14 a las 12:00:01 — que es
+    festivo. El primer momento permitido por el tope Y por la hora es el martes
+    15 a las 7:00. Ese día R2 está 5 días atrasado (rezago de 2): sale igual."""
+    cid, juana = rem["company_id"], rem["juana"]
+    await _enable(cid, R1, R2)
+    provider = RecordingProvider()
+    await _r1_monday_then_r2_thursday(cid, juana, provider)
+
+    key = _key("arrears", juana, "2030-10-10")
+    [arrears] = await _deliveries(cid, key)
+    assert (arrears.status, arrears.scheduled_at) == ("pending", OCT_TUE_7AM)
+
+    await _dispatch(cid, _bog(2030, 10, 14, 13), provider)  # el festivo: nada
+    assert len(provider.outbox) == 1
+    await _dispatch(cid, OCT_TUE_7AM + timedelta(minutes=30), provider)
+    assert [d.status for d in await _deliveries(cid, key)] == ["sent"]
+    assert "venció el 10 de octubre de 2030" in provider.outbox[1].text
+
+
+async def test_a_rescheduled_R2_whose_customer_paid_meanwhile_does_not_go_out(
+    rem: dict[str, Any],
+) -> None:
+    """Entre el jueves y el martes Juana se puso al día: el ancla avanzó y el
+    contrato volvió a `active`. Al enviar, el despachador re-verifica el hecho
+    con el MISMO planificador del job, y el aviso de mora ya no corresponde:
+    `suppressed`, con el motivo."""
+    cid, juana = rem["company_id"], rem["juana"]
+    await _enable(cid, R1, R2)
+    provider = RecordingProvider()
+    number = await _r1_monday_then_r2_thursday(cid, juana, provider)
+
+    await _exec(
+        "update public.contract set interest_paid_until = '2030-10-10', "
+        "status = 'active' where company_id = :cid and number = :n",
+        {"cid": str(cid), "n": number},
+    )
+    await _dispatch(cid, OCT_TUE_7AM + timedelta(minutes=30), provider)
+    [arrears] = await _deliveries(cid, _key("arrears", juana, "2030-10-10"))
+    assert arrears.status == "suppressed"
+    assert "ya no es cierto" in (arrears.last_error or "")
+    assert len(provider.outbox) == 1
+
+
+async def test_a_rescheduled_R2_only_names_the_contracts_still_in_arrears(
+    rem: dict[str, Any],
+) -> None:
+    """Dos contratos entran en mora el mismo jueves (un correo, §2.3); Juana
+    paga uno. El martes sale el aviso, y nombra solo el que sigue vencido."""
+    cid, juana = rem["company_id"], rem["juana"]
+    await _enable(cid, R1, R2)
+    provider = RecordingProvider()
+    kept = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 9, 10))
+    paid = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 9, 10))
+    await _run(cid, OCT_MON)
+    await _dispatch(cid, OCT_MON, provider)  # un R1 con los dos
+    for number in (kept, paid):
+        await _set_status(cid, number, "in_arrears")
+    await _run(cid, OCT_THU)
+    await _dispatch(cid, OCT_THU, provider)
+    [event] = await _events(cid, R2)
+    assert sorted(r["number"] for r in event.payload["contracts"]) == sorted([kept, paid])
+
+    await _exec(
+        "update public.contract set interest_paid_until = '2030-10-10', "
+        "status = 'active' where company_id = :cid and number = :n",
+        {"cid": str(cid), "n": paid},
+    )
+    await _dispatch(cid, OCT_TUE_7AM + timedelta(minutes=30), provider)
+    assert [d.status for d in await _deliveries(cid, event.dedupe_key)] == ["sent"]
+    mail = provider.outbox[-1]
+    assert f"#{kept}" in mail.text
+    assert f"#{paid}" not in mail.text
+
+
+async def test_an_R1_that_would_free_up_after_the_due_date_stays_throttled(
+    rem: dict[str, Any],
+) -> None:
+    """El lunes 2 sale el R1 de una cuota que vence el jueves 5; el martes 3
+    toca el de otra que vence el viernes 6. El cupo se libera el lunes 9: «su
+    cuota vence el 6» mandado el 9 es desinformación (§5.3). Queda `throttled`,
+    como antes del 26/09/2026, y el motivo lo dice."""
+    cid, juana = rem["company_id"], rem["juana"]
+    await _enable(cid, R1)
+    await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 5))
+    await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
+    provider = RecordingProvider()
+
+    await _run(cid, MON)
+    await _dispatch(cid, MON, provider)
+    await _run(cid, TUE)
+    await _dispatch(cid, TUE, provider)
+
+    [second] = await _deliveries(cid, _key("due_soon", juana, "2030-09-03"))
+    assert second.status == "throttled"
+    assert "vencimiento" in (second.last_error or "")
+    assert await _attempts_and_deferred(second.id) == (0, None)
+    assert len(provider.outbox) == 1
+
+
+async def test_running_the_job_twice_does_not_duplicate_a_rescheduled_reminder(
+    rem: dict[str, Any],
+) -> None:
+    """Reprogramar MUEVE la entrega existente, no crea otra. Dos corridas el
+    jueves (job + despacho) y dos despachos el martes: un evento, una entrega,
+    un correo de mora."""
+    cid, juana = rem["company_id"], rem["juana"]
+    await _enable(cid, R1, R2)
+    provider = RecordingProvider()
+    await _r1_monday_then_r2_thursday(cid, juana, provider)
+    later = OCT_THU + timedelta(hours=3)
+    await _run(cid, later)
+    await _dispatch(cid, later, provider)
+
+    key = _key("arrears", juana, "2030-10-10")
+    [arrears] = await _deliveries(cid, key)
+    assert (arrears.status, arrears.scheduled_at) == ("pending", OCT_TUE_7AM)
+    assert await _attempts_and_deferred(arrears.id) == (0, OCT_THU)
+
+    for minutes in (30, 45):
+        await _dispatch(cid, OCT_TUE_7AM + timedelta(minutes=minutes), provider)
+    assert len(await _events(cid, R2)) == 1
+    assert [d.status for d in await _deliveries(cid, key)] == ["sent"]
+    assert len(provider.outbox) == 2
 
 
 async def _receipt(cid: UUID, customer_id: UUID, number: int) -> str:

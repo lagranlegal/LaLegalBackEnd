@@ -173,11 +173,15 @@ class ReminderContract:
 
 
 async def list_reminder_contracts(
-    db: AsyncSession, *, company_id: UUID, today: date
+    db: AsyncSession, *, company_id: UUID, today: date, customer_id: UUID | None = None
 ) -> list[ReminderContract]:
     """Contratos NO terminales de la empresa, con sus fechas y montos ya
     derivados. Lee el estado PERSISTIDO: el paso del job que lo llama va
-    después de `recompute_all_statuses` (§5.2)."""
+    después de `recompute_all_statuses` (§5.2).
+
+    `customer_id` lo usa el despachador para re-verificar, al enviarlo, un
+    recordatorio que el tope reprogramó (NOTIFICACIONES §20.6): los de un
+    cliente, no los de toda la empresa por cada entrega."""
     result = await db.execute(
         text(
             """
@@ -186,10 +190,16 @@ async def list_reminder_contracts(
                    capital_balance, interest_rate_pct
             from public.contract
             where company_id = :company_id and status::text <> all(:terminal)
+              and (cast(:customer_id as uuid) is null
+                   or customer_id = cast(:customer_id as uuid))
             order by number
             """
         ),
-        {"company_id": str(company_id), "terminal": sorted(rules.TERMINAL_STATUSES)},
+        {
+            "company_id": str(company_id),
+            "terminal": sorted(rules.TERMINAL_STATUSES),
+            "customer_id": str(customer_id) if customer_id is not None else None,
+        },
     )
     out: list[ReminderContract] = []
     for row in result.all():

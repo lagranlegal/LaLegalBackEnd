@@ -7,7 +7,11 @@ Es el ÚNICO lugar donde se deciden la hora y el tope de contactos al cliente
 Orden de decisión por entrega, y el porqué del orden:
 
 1. **Ventana de rezago** (§5.3) → `skipped_stale`. Primero, porque un aviso
-   que ya no es noticia no debe consumir cupo ni esperar horario.
+   que ya no es noticia no debe consumir cupo ni esperar horario. **Salvo un
+   recordatorio que el tope ya reprogramó** (§20.6): para él la vigencia no
+   es la edad sino la verdad — se re-verifica el hecho con el planificador
+   del job (`reminders.still_true`): si el cliente pagó → `suppressed`; si
+   era un R1/R4 y ya pasó la fecha que anuncia → `skipped_stale`.
 1-bis. **Base legal, baja y rebote del cliente** (§9.2-c, fase 3) →
    `suppressed`, con el mismo `service.customer_gate` que usó quien la
    planificó: lo que cambió en el medio (una baja por el enlace, una casilla
@@ -16,7 +20,10 @@ Orden de decisión por entrega, y el porqué del orden:
    enlace de baja: sin él, un correo al cliente no sale (`dead`).
 2. **Límites al cliente** (Ley 2300, §12.3), solo `audience='customer'`:
    fuera de horario → se corre al próximo momento hábil (sigue `pending`);
-   tope semanal/diario alcanzado → `throttled`. El semanal es de cobranza:
+   tope semanal/diario alcanzado → un recordatorio R1–R4 se REPROGRAMA a
+   cuando se libere el cupo, en hora hábil (sigue `pending`, `deferred_at`,
+   sin contar intento), si para entonces todavía dice la verdad; si no, y
+   todo lo demás, `throttled` (§20.6). El semanal es de cobranza:
    un comprobante (familia `transactional`) ni lo consume ni lo gasta, salvo
    `transactional_in_weekly_cap` (§18.1-1). La hora y el diario, para todos.
 3. **Sin proveedor** → `skipped_no_provider`. El job NO falla: registra.
@@ -54,6 +61,7 @@ from app.modules.notifications import (
     limits,
     preferences,
     providers,
+    reminders,
     repository,
     service,
     templates,
@@ -74,6 +82,8 @@ class DispatchStats:
     claimed: int = 0
     by_status: dict[str, int] = field(default_factory=dict)
     rescheduled: int = 0
+    #: De los `rescheduled`, los que corrió el tope (§20.6) y no la hora.
+    deferred: int = 0
 
     def bump(self, status: str) -> None:
         self.by_status[status] = self.by_status.get(status, 0) + 1
@@ -103,6 +113,25 @@ class _Prepared:
     #: Base legal del cliente con la que sale (§9.2-a): se guarda en la entrega
     #: al enviarla, porque es la de ESE día la que hay que poder mostrar.
     legal_basis: str | None = None
+    #: `reschedule_to` lo decidió el TOPE, no la hora (§20.6): se marca
+    #: `deferred_at`, que es lo que hace que al enviarla se re-verifique.
+    deferred: bool = False
+
+
+#: Los motivos van en `last_error`, que es el «por qué» de toda entrega que no
+#: salió (el `throttled` de siempre ya lo usaba así).
+DEFERRED_REASON = (
+    "Tope de contactos al cliente (Ley 2300): reprogramado para cuando se libere el cupo."
+)
+THROTTLED_TOO_LATE_REASON = (
+    "Tope de contactos al cliente alcanzado, y cuando se libere el cupo el aviso ya habrá "
+    "pasado su fecha (el vencimiento que anuncia)."
+)
+NO_LONGER_TRUE_REASON = (
+    "El aviso esperaba cupo y el hecho ya no es cierto: el cliente se puso al día o el "
+    "contrato cambió de estado."
+)
+PAST_ITS_DATE_REASON = "El aviso esperaba cupo y ya pasó la fecha que anuncia."
 
 
 async def _prepare(
@@ -125,7 +154,10 @@ async def _prepare(
         prefs = preferences.parse(settings)
         today = today_in(tz_name, now=now)
 
-        if service.is_stale(
+        # §20.6: el tope corrió este recordatorio, y a propósito lo mandó más
+        # allá del rezago. Su vigencia se mide por la verdad, abajo.
+        deferred = d["deferred_at"] is not None and e["event_type"] in reminders.DEFERRABLE
+        if not deferred and service.is_stale(
             target_date=e["target_date"], today=today, stale_after_days=prefs.stale_after_days
         ):
             return _Prepared(None, "skipped_stale")
@@ -136,6 +168,28 @@ async def _prepare(
             return _Prepared(None, "suppressed", "El aviso está apagado para la empresa.")
 
         payload: dict[str, Any] = dict(e["payload"] or {})
+        if deferred:
+            # Días de espera: el cliente pudo pagar. Sin esto, el aviso de mora
+            # le llega a quien ya está al día (§20.6).
+            fresh = await reminders.still_true(
+                db,
+                company_id=c["id"],
+                event_type=e["event_type"],
+                customer_id=e["customer_id"],
+                target_date=e["target_date"],
+                dedupe_key=e["dedupe_key"],
+                payload=payload,
+                today=today,
+                prefs=prefs,
+            )
+            if fresh is None:
+                return _Prepared(None, "suppressed", NO_LONGER_TRUE_REASON)
+            until = reminders.deferrable_until(e["event_type"], fresh)
+            if until is None or today > until:
+                # Solo si el job llegó tarde a la hora que se le dio: al
+                # reprogramarla ya se comprobó que el cupo se liberaba a tiempo.
+                return _Prepared(None, "skipped_stale", PAST_ITS_DATE_REASON)
+            payload = fresh
         legal_basis: str | None = None
         # Cabeceras del correo. Solo las lleva el correo al CLIENTE (§17-bis):
         # el resumen y las alertas van a usuarios de la empresa, que no se
@@ -204,23 +258,49 @@ async def _prepare(
             # §18.1-1: el tope semanal es de cobranza. Un comprobante no lo
             # consume ni lo gasta; el diario (§3) cuenta todo.
             weekly_cobranza_only = not contact_limits.transactional_in_weekly_cap
-            sent_week = await repository.count_sent_to(
+            sent_week = await repository.sent_times_to(
                 db,
                 company_id=c["id"],
                 to_address=d["to_address"],
-                since=now - timedelta(days=7),
+                since=now - limits.WEEK,
                 exclude_transactional=weekly_cobranza_only,
             )
-            sent_day = await repository.count_sent_to(
-                db, company_id=c["id"], to_address=d["to_address"], since=now - timedelta(days=1)
+            sent_day = await repository.sent_times_to(
+                db, company_id=c["id"], to_address=d["to_address"], since=now - limits.DAY
             )
+            transactional = catalog.get(e["event_type"]).family == "transactional"
             if limits.exceeds_cap(
-                sent_last_day=sent_day,
-                sent_last_week=sent_week,
+                sent_last_day=len(sent_day),
+                sent_last_week=len(sent_week),
                 limits=contact_limits,
-                transactional=catalog.get(e["event_type"]).family == "transactional",
+                transactional=transactional,
             ):
-                return _Prepared(None, "throttled", "Tope de contactos al cliente alcanzado.")
+                until = reminders.deferrable_until(e["event_type"], payload)
+                if until is None:
+                    # Un comprobante (o R5): como siempre, terminal.
+                    return _Prepared(None, "throttled", "Tope de contactos al cliente alcanzado.")
+                # §20.6: un recordatorio no se pierde por el tope; se corre al
+                # primer momento que permitan el tope Y la hora hábil — si para
+                # entonces todavía dice la verdad.
+                freed = limits.cap_release_moment(
+                    now=now,
+                    sent_last_day=sent_day,
+                    sent_last_week=sent_week,
+                    limits=contact_limits,
+                    transactional=transactional,
+                )
+                if freed is not None:
+                    moment = limits.next_allowed_moment(
+                        freed.astimezone(_zone(tz_name)), contact_limits
+                    )
+                    if moment.date() <= until:
+                        return _Prepared(
+                            None,
+                            error=DEFERRED_REASON,
+                            reschedule_to=moment.astimezone(UTC),
+                            deferred=True,
+                        )
+                return _Prepared(None, "throttled", THROTTLED_TOO_LATE_REASON)
 
         if e["event_type"] == INVITATION:
             user = (
@@ -378,8 +458,18 @@ async def _dispatch_one(
         )
 
     if prepared.reschedule_to is not None:
-        await _finish(d["id"], status="pending", scheduled_at=prepared.reschedule_to)
+        # Mueve la MISMA entrega (§20.6: reprogramar no crea otra) y no cuenta
+        # como intento: `attempts` no se toca, nada falló.
+        await _finish(
+            d["id"],
+            status="pending",
+            scheduled_at=prepared.reschedule_to,
+            last_error=prepared.error,
+            deferred_at=now if prepared.deferred else None,
+        )
         stats.rescheduled += 1
+        if prepared.deferred:
+            stats.deferred += 1
         stats.bump("pending")
         return
     if prepared.final_status is not None or prepared.message is None:

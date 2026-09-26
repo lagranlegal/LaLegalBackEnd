@@ -10,10 +10,14 @@ Dos decisiones distintas, y por eso dos funciones:
 - **La hora** (`next_allowed_moment`): fuera de horario la entrega NO se
   pierde, se corre al próximo momento hábil. Un recordatorio que el job
   decidió a las 3 a. m. sale a las 7 a. m., no se descarta.
-- **El tope** (`exceeds_cap`): pasado el tope la entrega queda `throttled`,
-  terminal (§4.2). Correrla a la semana siguiente sería mandar un aviso viejo.
+- **El tope** (`exceeds_cap`): pasado el tope, un comprobante queda
+  `throttled`, terminal (§4.2). Un recordatorio R1–R4, desde el 26/09/2026,
+  se REPROGRAMA al momento que da `cap_release_moment` (§20.6) — salvo que
+  para entonces ya no diga la verdad, y eso lo decide `reminders`, no este
+  módulo: acá solo se calcula CUÁNDO, no SI conviene.
 """
 
+from collections.abc import Sequence
 from datetime import datetime, time, timedelta
 
 from app.common.co_holidays import is_colombian_holiday
@@ -85,7 +89,7 @@ def exceeds_cap(
       COBRANZA. Un comprobante (`transactional`) no es cobranza: no lo frena —
       salvo `transactional_in_weekly_cap`, que es la respuesta del abogado
       puesta como parámetro. Quien cuenta `sent_last_week` tiene que contar
-      con el mismo criterio (`repository.count_sent_to`)."""
+      con el mismo criterio (`repository.sent_times_to`)."""
     if not limits.enabled:
         return False
     if sent_last_day >= limits.max_per_day:
@@ -93,3 +97,56 @@ def exceeds_cap(
     if transactional and not limits.transactional_in_weekly_cap:
         return False
     return sent_last_week >= limits.max_per_week
+
+
+#: El despachador cuenta `sent_at >= now − ventana`: en el instante exacto en
+#: que un envío cumple la ventana, todavía cuenta. Un segundo después, no.
+RELEASE_MARGIN = timedelta(seconds=1)
+DAY = timedelta(days=1)
+WEEK = timedelta(days=7)
+
+
+def _release(sent: Sequence[datetime], cap: int, window: timedelta) -> datetime | None:
+    """Cuándo `sent` (los envíos dentro de la ventana) deja de llenar `cap`.
+
+    Hace falta que queden `cap − 1`: tiene que salir de la ventana el
+    `cap`-ésimo más reciente. Con el tope de fábrica (1) es el único que hay;
+    si el tope se bajó y hay más enviados que cupo, no alcanza con el más
+    viejo."""
+    if cap <= 0:
+        return None
+    kth = sorted(sent, reverse=True)[cap - 1]
+    return kth + window + RELEASE_MARGIN
+
+
+def cap_release_moment(
+    *,
+    now: datetime,
+    sent_last_day: Sequence[datetime],
+    sent_last_week: Sequence[datetime],
+    limits: ContactLimits,
+    transactional: bool = False,
+) -> datetime | None:
+    """El primer instante >= `now` en que mandar uno más NO superaría ningún
+    tope, contando lo YA enviado (los `sent_at` de cada ventana, con el mismo
+    criterio de `exceeds_cap`). `None` = nunca (un tope en 0).
+
+    Tienen que permitirlo los dos: se toma el más tardío de los que están
+    llenos. Uno que hoy no está lleno no se llena solo con el tiempo — solo
+    con envíos nuevos, y esos los vuelve a mirar el despachador cuando llegue
+    la hora. NO mira la ventana horaria: eso es `next_allowed_moment`,
+    aplicado DESPUÉS sobre lo que devuelve esto."""
+    if not limits.enabled:
+        return now
+    moment = now
+    windows = [(sent_last_day, limits.max_per_day, DAY)]
+    if not transactional or limits.transactional_in_weekly_cap:
+        windows.append((sent_last_week, limits.max_per_week, WEEK))
+    for sent, cap, window in windows:
+        if len(sent) < cap:
+            continue
+        freed = _release(sent, cap, window)
+        if freed is None:
+            return None
+        moment = max(moment, freed)
+    return moment

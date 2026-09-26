@@ -189,6 +189,10 @@ class DeliveryOut(BaseModel):
     #: ESE día, que es la que hay que poder mostrar después. Solo en entregas
     #: al cliente que salieron o iban a salir.
     legal_basis: Literal["contract", "consent"] | None = None
+    #: Cuándo el tope de contactos (Ley 2300) corrió por primera vez este
+    #: recordatorio en vez de dejarlo `throttled` (NOTIFICACIONES §20.6). Con
+    #: `status = pending`, `scheduled_at` es cuándo se libera el cupo.
+    deferred_at: datetime | None = None
 
 
 class UnsubscribeOut(BaseModel):

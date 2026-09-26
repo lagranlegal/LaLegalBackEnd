@@ -411,6 +411,7 @@ def _row_to_delivery(row: Row[Any]) -> DeliveryOut:
         created_at=m["created_at"],
         updated_at=m["updated_at"],
         legal_basis=m["legal_basis"],
+        deferred_at=m["deferred_at"],
     )
 
 

@@ -402,7 +402,7 @@ async def claim_due_deliveries(
             from due
             where d.id = due.id
             returning d.id, d.company_id, d.event_id, d.to_address, d.recipient_user_id,
-                      d.attempts
+                      d.attempts, d.deferred_at
             """
         ),
         {
@@ -432,7 +432,7 @@ async def claim_delivery(db: AsyncSession, *, delivery_id: UUID) -> Row[Any] | N
             from one
             where d.id = one.id
             returning d.id, d.company_id, d.event_id, d.to_address, d.recipient_user_id,
-                      d.attempts
+                      d.attempts, d.deferred_at
             """
         ),
         {"id": str(delivery_id)},
@@ -475,7 +475,7 @@ async def get_event(db: AsyncSession, *, event_id: UUID) -> Row[Any] | None:
         text(
             """
             select id, company_id, event_type, audience, customer_id, payload, occurred_on,
-                   target_date
+                   target_date, dedupe_key
             from public.notification_event where id = :id
             """
         ),
@@ -484,17 +484,19 @@ async def get_event(db: AsyncSession, *, event_id: UUID) -> Row[Any] | None:
     return result.first()
 
 
-async def count_sent_to(
+async def sent_times_to(
     db: AsyncSession,
     *,
     company_id: UUID,
     to_address: str,
     since: datetime,
     exclude_transactional: bool = False,
-) -> int:
-    """Correos que YA salieron a esa dirección desde `since` — el insumo del
-    tope de la Ley 2300. Por empresa: cada compraventa es un acreedor distinto
-    (§12.2-6) y responde por sus propios contactos.
+) -> list[datetime]:
+    """Cuándo salieron los correos que YA se mandaron a esa dirección desde
+    `since`, del más reciente al más viejo — el insumo del tope de la Ley 2300.
+    Cuántos son dice si el tope está lleno; cuándo salieron dice cuándo se
+    libera (`limits.cap_release_moment`, §20.6). Por empresa: cada compraventa
+    es un acreedor distinto (§12.2-6) y responde por sus propios contactos.
 
     `exclude_transactional`: para el tope SEMANAL, un comprobante no gasta el
     cupo de la cobranza (§18.1-1) — la misma premisa que lo exime del tope, del
@@ -503,7 +505,7 @@ async def count_sent_to(
     result = await db.execute(
         text(
             """
-            select count(*) from public.notification_delivery d
+            select d.sent_at from public.notification_delivery d
             join public.notification_event e on e.id = d.event_id
             join public.notification_event_type t on t.code = e.event_type
             where d.company_id = :cid and d.channel = 'email'
@@ -512,6 +514,7 @@ async def count_sent_to(
               and d.sent_at >= :since
               and d.status in ('sent', 'delivered')
               and (not :exclude_transactional or t.family <> 'transactional')
+            order by d.sent_at desc
             """
         ),
         {
@@ -521,7 +524,7 @@ async def count_sent_to(
             "exclude_transactional": exclude_transactional,
         },
     )
-    return int(result.scalar_one())
+    return [row[0] for row in result.all()]
 
 
 async def update_delivery(
@@ -535,7 +538,10 @@ async def update_delivery(
     scheduled_at: datetime | None = None,
     sent_at: datetime | None = None,
     legal_basis: str | None = None,
+    deferred_at: datetime | None = None,
 ) -> None:
+    """`deferred_at` guarda la PRIMERA vez que el tope corrió la entrega
+    (§20.6): las siguientes no la pisan."""
     await db.execute(
         text(
             """
@@ -546,7 +552,8 @@ async def update_delivery(
                 provider_id = coalesce(:provider_id, provider_id),
                 scheduled_at = coalesce(:scheduled_at, scheduled_at),
                 sent_at = coalesce(:sent_at, sent_at),
-                legal_basis = coalesce(:legal_basis, legal_basis)
+                legal_basis = coalesce(:legal_basis, legal_basis),
+                deferred_at = coalesce(deferred_at, :deferred_at)
             where id = :id
             """
         ),
@@ -559,6 +566,7 @@ async def update_delivery(
             "scheduled_at": scheduled_at,
             "sent_at": sent_at,
             "legal_basis": legal_basis,
+            "deferred_at": deferred_at,
         },
     )
 
@@ -579,7 +587,7 @@ async def list_deliveries(
         select d.id, d.event_id, e.event_type, e.audience, e.occurred_on, d.channel,
                d.to_address, d.recipient_user_id, d.status, d.attempts, d.last_error,
                d.provider_id, d.scheduled_at, d.sent_at, d.created_at, d.updated_at,
-               d.legal_basis
+               d.legal_basis, d.deferred_at
         from public.notification_delivery d
         join public.notification_event e on e.id = d.event_id
         where d.company_id = :company_id

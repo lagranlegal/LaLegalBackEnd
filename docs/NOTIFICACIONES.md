@@ -237,7 +237,7 @@ El cajero que registró el abono ya vio el recibo. El bodeguero que publicó el 
 
 ### Y un límite duro, por cliente y por día
 
-**Máximo 1 recordatorio por cliente por día** (§2.3) y **máximo 3 correos por cliente por día** contando transaccionales. Pasado eso, el evento se registra y la entrega queda `throttled`. Por qué existe el tope: sin él, un cliente con 13 contratos que hace 3 abonos el mismo día recibe 16 correos, y no hay ninguna redacción que lo haga parecer intencional.
+**Máximo 1 recordatorio por cliente por día** (§2.3) y **máximo 3 correos por cliente por día** contando transaccionales. Pasado eso, el evento se registra y la entrega queda `throttled` — **o, si es un recordatorio R1–R4 que todavía será cierto cuando se libere el cupo, se reprograma para ese momento** (§20.6, desde el 26/09/2026). Por qué existe el tope: sin él, un cliente con 13 contratos que hace 3 abonos el mismo día recibe 16 correos, y no hay ninguna redacción que lo haga parecer intencional.
 
 ---
 
@@ -309,7 +309,7 @@ create table public.notification_delivery (
 |---|---|---|
 | `unroutable` | El caso **normal** (§1) | **Ruidosa a propósito:** alimenta la lista de clientes sin correo |
 | `suppressed` | La base legal del cliente no alcanza para la finalidad de ese evento (§9.2), pidió la baja, o `email_invalid_at` puesta | Ruidosa en el agregado, invisible por fila. **Es el contador que hay que mirar el día que cambie el mapa de §9.2-d** |
-| `throttled` | Tope de §3 | Silenciosa; solo importa si sube |
+| `throttled` | Tope de §3. Desde §20.6, un recordatorio R1–R4 no llega acá mientras siga siendo cierto: vuelve a `pending` con `deferred_at`. Quedan los comprobantes, R5 y el R1/R4 que ya no sería cierto al liberarse el cupo | Silenciosa; solo importa si sube |
 | `skipped_stale` | El job estuvo caído y el hecho ya no es noticia (§5) | **La alarma más importante del sistema.** Un `skipped_stale > 0` es la señal que nadie tuvo cuando la Machine desapareció 12 días |
 | `dead` | 3 intentos y no salió | **Ruidosa:** entra al resumen de la empresa |
 | `bounced` | Rebotó duro | Ruidosa una vez, y marca la dirección (§7) |
@@ -1629,17 +1629,19 @@ y el del tope semanal).
   de 3 días antes salía y el del día del vencimiento quedaba `throttled`**. Mateo decidió quedarse con el de 3 días
   (§20.2-4) y el default pasó a `[3]`. Una empresa que configure `[3, 0]` vuelve a este caso (test
   `test_weekly_cap_throttles_the_second_reminder_but_not_a_receipt`, que lo configura).
-- **Dudoso — lo que sigue en pie: con R1 y R2 encendidos, R2 queda `throttled`.** El tope es de **7 días corridos**
-  (`count_sent_to(since=now − 7 días)`), y R2 nace el día del vencimiento, 3 días después del R1. Sacar el 0 no
-  lo cambió: el siguiente contacto posible es R3, meses después (test
-  `test_with_the_default_R1_still_spends_the_week_of_R2`). No es un defecto del código: son dos decisiones
-  juntas. Si Mateo quiere que el aviso de mora salga, las salidas son apagar R1 (y perder el aviso previo), que
-  el tope no cuente un R1 contra un R2 del mismo ancla (código nuevo, y una lectura de la ley que habría que
-  sostener), o subir `max_per_week` — y eso último es justo lo que la ley limita.
+- **✅ Resuelto el 26/09/2026 (§20.6) — con R1 y R2 encendidos, R2 quedaba `throttled`.** El tope es de **7 días
+  corridos** (contado con `since = now − 7 días`), y R2 nace el día del vencimiento, 3 días después del R1: el cliente
+  nunca recibía el aviso de mora (test `test_with_the_default_R1_still_spends_the_week_of_R2`, hoy
+  `test_with_the_default_R1_R2_waits_for_the_week_instead_of_being_lost`). Las tres salidas que se habían anotado
+  —apagar R1, que el tope no cuente un R1 contra un R2 del mismo ancla, o subir `max_per_week`— cedían algo: el aviso
+  previo, una lectura de la ley difícil de sostener, o la ley misma. Mateo eligió una cuarta que no cede nada de eso:
+  **el recordatorio frenado por el tope no se pierde, se reprograma** al primer momento en que el tope lo permita. El
+  cliente recibe los dos avisos y nunca más de uno por semana.
 - **Dudoso — sin prioridad dentro de la misma noche.** Si a un cliente le tocan dos recordatorios de tipos distintos
-  la misma noche (R1 de un contrato y R3 de otro), sale el primero que tome el despachador y el otro queda
-  `throttled`; el orden entre entregas creadas en la misma transacción no está definido (`claim_due_deliveries`
-  ordena por `scheduled_at`, que es el mismo). Lo razonable sería que ganara R3 (la última campana); no se hizo.
+  la misma noche (R1 de un contrato y R3 de otro), sale el primero que tome el despachador y el otro espera cupo una
+  semana (§20.6; antes quedaba `throttled`), o se pierde si es un R1/R4 que para entonces ya no sería cierto; el
+  orden entre entregas creadas en la misma transacción no está definido (`claim_due_deliveries` ordena por
+  `scheduled_at`, que es el mismo). Lo razonable sería que ganara R3 (la última campana); no se hizo.
 - **Dudoso — cambiar un interruptor a mitad del día** puede producir, en una segunda corrida de esa misma noche, R1
   «vence hoy» además del R2 que ya salió (la llave es otra). Caso de borde: el job corre una vez al día, y desde el
   25/09/2026 solo pasa si la empresa configuró el 0.
@@ -1680,3 +1682,110 @@ fecha se derivaba en dos lugares. Cuesta una consulta más por empresa y por noc
   uno movido por un abono (vence el 3/09) y uno que entró de verdad ese día (vence el 3/10). Visto fallar antes del
   arreglo (el diario listaba los dos); después, solo el coherente.
 
+### 20.6 · El tope reprograma en vez de callar (Mateo, 26/09/2026)
+
+**La regla.** Un recordatorio R1–R4 que choca con el tope de contactos **no queda `throttled`: la misma entrega vuelve
+a `pending`** con `scheduled_at` en el primer momento en que el tope y la ventana horaria lo permiten, y
+`deferred_at` (migración `00060`) anota cuándo el tope la corrió por primera vez. **Salvo que para entonces el aviso
+ya no diga la verdad**: ahí queda `throttled`, como antes. Al llegar la hora, el despachador **re-verifica el hecho**
+antes de mandarla. Resuelve el dudoso de §20.4 (R2 se perdía detrás del R1 de la misma cuota).
+
+**1. Cuándo es «el primer momento permitido».** `limits.cap_release_moment`: cuando el contacto que llena el tope sale
+de la ventana de 7 días corridos. El despachador cuenta `sent_at >= now − 7 días`, así que en el instante exacto en
+que ese envío cumple 7 días **todavía cuenta**: el cupo se libera un segundo después. Con el tope de fábrica (1) el
+que tiene que salir es el único que hay; si una empresa bajó el tope y hay más enviados que cupo, tiene que salir el
+N-ésimo más reciente — no alcanza con el más viejo. Sobre ese instante se aplica `next_allowed_moment` (L–V 7–19,
+sáb 8–15, sin domingos ni festivos), que ya existía. Un R1 que salió un lunes a las 12:00 libera el cupo el lunes
+siguiente a las 12:00:01; si ese lunes es festivo, el martes a las 7:00 (test
+`test_a_capped_R2_goes_out_when_the_week_frees_up_inside_business_hours`, con el 14/10/2030).
+
+**No cuenta como intento:** `attempts` no se toca. Nada falló — el tope es una espera, como la hora hábil, y la
+entrega conserva sus cuatro intentos para cuando de verdad salga. **La barre el job** (o el reintento: todo lo
+`pending` con `scheduled_at <= now`), sin infraestructura nueva. **El costo, dicho:** el job corre una vez al día a una
+hora que no se fija (§15.2-10), así que «el primer momento permitido» es en la práctica «la primera corrida del job
+después de ese momento». Y el aviso reprogramado, al salir, gasta el cupo de la semana siguiente: si ahí toca otro
+recordatorio, ese también espera. Es la ley aplicada tal cual: nunca más de uno por semana.
+
+**2. El rezago, por tipo.** Una entrega que el tope corrió puede salir días después de su fecha objetivo, y
+`stale_after_days` (2) la mataría con `skipped_stale` — que además es *«la alarma más importante del sistema»* (§4.2),
+la que dice que el job estuvo caído. **A una entrega con `deferred_at` no se le aplica el rezago genérico:** la esperó
+a propósito, no por una caída, y la estampida que el rezago evita (§5.3) no aplica — es una por cliente por semana. En
+su lugar rige el criterio del que el rezago es solo una aproximación: *«un recordatorio atrasado no es un
+recordatorio»*, o sea, **¿lo que dice sigue siendo cierto el día que llega?** (`reminders.deferrable_until`)
+
+| # | Qué dice | ¿Hasta cuándo puede esperar cupo? | Por qué |
+|---|---|---|---|
+| R1 | «su cuota vence el 6» | hasta **el día del vencimiento**, inclusive; con varios contratos, el que vence primero | El 6, «vence el 6» es cierto (y es el último día para pagar a tiempo). El 7 es desinformación: exactamente el ejemplo de §5.3. Si el cupo se libera después → **`throttled`, como hoy** |
+| R2 | «su cuota venció el 6, para ponerse al día: $X» | **sin fecha**: mientras siga en mora por esa cuota | La mora sigue siendo verdad días después, y es el aviso que el cliente más necesita. Lo acota la re-verificación (punto 3), no un calendario. El monto se recalcula al enviar |
+| R3 | «su contrato entró en prórroga el …» | **sin fecha**: mientras siga en esa prórroga | Igual que R2: es un cambio de estado que sigue en pie. Si pasa a otra cosa, la re-verificación lo calla |
+| R4 | «su prórroga vence el 3» | hasta **el fin de la prórroga**, inclusive | Mismo razonamiento que R1: anuncia una fecha. Después del fin, el contrato es candidato a remate y el aviso que corresponde es R5 |
+
+Se decide **dos veces**: al frenarlo (si el cupo se libera después del límite → `throttled`, con el motivo en
+`last_error`) y al enviarlo (si el job llegó tarde a la hora que se le dio y ya pasó el límite → `skipped_stale`, que
+aquí sí es la señal de un job atrasado). Test `test_an_R1_that_would_free_up_after_the_due_date_stays_throttled`.
+
+**3. Vigencia al enviar: el mismo planificador, no una regla nueva.** Antes de esto **no existía** re-verificación: el
+job decide el hecho una vez, al registrar el evento, y lo que quedaba `pending` salía tal cual — con horas de espera
+daba igual; con una semana, un cliente que pagó el lunes recibiría el martes «su cuota venció». Se construyó así
+(`reminders.still_true`): el despachador trae los contratos **de ese cliente** (`list_reminder_contracts` con
+`customer_id`, una consulta chica) y le pregunta a **`plan_reminders`** —el mismo que usa el job— si con los contratos
+como están hoy el evento de **esa llave** volvería a nacer.
+
+- **Por qué funciona:** la llave lleva el día objetivo, y el día objetivo se **deriva del ancla** (§20.3-1). Un abono
+  que avanza `interest_paid_until` mueve el día derivado, y la llave vieja ya no nace. Pagó → el aviso de mora no
+  corresponde. Pasó a prórroga → R2 no nace (lo lleva R3). Lo mismo para R1, R3 y R4.
+- **Por qué no una segunda regla:** una copia de «¿sigue en mora?» en el despachador terminaría divergiendo de la del
+  job — el defecto de E2 existió justamente por derivar la misma fecha en dos lugares (§20.5).
+- **Si ya no corresponde → `suppressed`**, con el motivo en `last_error` (*«el hecho ya no es cierto: el cliente se
+  puso al día o el contrato cambió de estado»*). Es el precedente de la invitación que ya no aplica (§16), no
+  `skipped_stale`: no llegó tarde, dejó de ser verdad — y ensuciar `skipped_stale` con abonos arruinaría la alarma
+  del job caído. Test `test_a_rescheduled_R2_whose_customer_paid_meanwhile_does_not_go_out`.
+- **Solo quita, nunca agrega:** de un aviso agrupado (§2.3) quedan los contratos que siguen en el hecho, con sus
+  montos de hoy (lo que cuesta ponerse al día cambia con los días). Si pagó uno de dos, el correo nombra solo el otro
+  (test `test_a_rescheduled_R2_only_names_the_contracts_still_in_arrears`). Si no queda ninguno, `suppressed`.
+- **Solo a las reprogramadas.** Una entrega que el tope nunca frenó sale dentro de su rezago (≤ 2 días, más la hora
+  hábil) sin re-verificar, como hasta hoy: esa espera es de horas, y la plantilla ya dice «si ya pagó, no tenga en
+  cuenta este mensaje». Extenderla a todas es una línea (quitar la condición `deferred`), pero exige reescribir los
+  tests que fabrican un R1 sin contratos detrás; no se hizo sin necesidad.
+
+**4. El tope DIARIO: el mismo criterio, porque no cuesta nada.** `cap_release_moment` mira las dos ventanas con la
+misma función (24 h y 7 días) y devuelve el instante en que **las dos** lo permiten. Para un recordatorio el caso
+existe: tres comprobantes en un día (que no cuentan en el semanal, §18.1-1) llenan el diario, y sin esto el R2 de ese
+día se perdía por la misma razón que el de §20.4. **Los comprobantes siguen como estaban:** el cuarto del día queda
+`throttled` (§18.4 dejó abierta esa pregunta de producto; no se toca acá).
+
+**5. Los transaccionales no cambian.** No cuentan contra el tope semanal (`transactional_in_weekly_cap = false`) y, si
+los frena el diario, siguen `throttled`: `deferrable_until` devuelve `None` para todo lo que no sea R1–R4.
+
+**6. Idempotencia: se mueve la entrega, no se crea otra.** Es un `update` de la misma fila (`status`, `scheduled_at`,
+`last_error`, y `deferred_at` solo la primera vez — `coalesce`). El evento y su `dedupe_key` no se tocan, así que una
+segunda corrida del job esa noche choca con la llave como siempre (§6.2), y un segundo despacho no encuentra nada que
+tomar hasta la hora nueva. Test `test_running_the_job_twice_does_not_duplicate_a_rescheduled_reminder`: dos corridas
+el jueves, dos despachos el martes → un evento, una entrega, un correo de mora.
+
+**Qué cambió en el código.** `limits.cap_release_moment` (puro), `reminders.DEFERRABLE` / `deferrable_until` /
+`still_true`, `repository.sent_times_to` (reemplaza a `count_sent_to`: además de cuántos, cuándo), el despachador
+(`_prepare` y el `_finish` de la reprogramación) y el filtro `customer_id` de `contracts.integration.list_reminder_contracts`.
+`GET /notifications/deliveries` devuelve `deferred_at` (aditivo, `API_GUIDE.md` §13-ter). Tests: cinco nuevos de
+integración en `test_customer_reminders.py` y el de §20.4 actualizado; siete unitarios en
+`test_notification_limits.py` y `test_notification_reminders.py`. Cada uno se vio fallar antes de implementar.
+
+**Migración `00060_notification_delivery_deferred_at.sql`** (aplicada y probada **solo en local**): una columna
+nullable en `notification_delivery`, sin default ni backfill — lo ya `throttled` se queda así, no se resucitan avisos
+viejos. **Por qué una columna y no `scheduled_at`:** la hora hábil también mueve `scheduled_at`, y no debe saltarse el
+rezago ni disparar la re-verificación; sin un dato propio las dos esperas son indistinguibles. Aditiva: **va en dev
+antes del deploy** (el código nuevo la lee en el `returning` del despacho; sin ella, el despachador falla).
+
+**Lo dudoso.**
+- **R5 (`auction_ready_customer`) sigue quedando `throttled`.** También es cobranza y cuenta contra el tope, pero lo
+  produce el paso del resumen, no `plan_reminders`, y su hecho («la prórroga venció y el contrato puede rematarse»)
+  necesita su propia re-verificación. Está apagado y con advertencia; se deja para cuando alguien lo encienda.
+- **Un cambio de configuración mientras espera** (otros días de antelación, o encender R2 cuando R1 tenía el 0) puede
+  hacer que la llave ya no nazca, y el aviso queda `suppressed` aunque el cliente no haya pagado. Es la consecuencia
+  de preguntarle al planificador en vez de copiar la regla; el motivo en `last_error` lo nombra como «cambió de
+  estado», no como un pago.
+- **Varios avisos esperando el mismo cupo** se reprograman al mismo instante; sale el primero que tome el despachador
+  y los demás esperan otra semana (y un R1/R4 puede perderse en esa segunda espera). La prioridad entre ellos sigue
+  sin definirse (§20.4).
+- **La revisión legal** de §12.3 sigue en pie: reprogramar no cambia cuántos contactos hay por semana, pero sí que la
+  cobranza llega **después** del hecho que anuncia; es la lectura del dueño, no un concepto.

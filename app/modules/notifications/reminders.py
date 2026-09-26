@@ -10,6 +10,10 @@ registra y no tumba el job.
 y lo registra con `service.record_event` — que decide la base legal, el
 apagado y el rezago, igual que para todo lo demás. La hora hábil y el tope de
 la Ley 2300 NO se miran acá: son del despachador, en un solo lugar (§14).
+Lo que este módulo sí le presta al despachador (§20.6) es el CONOCIMIENTO de
+qué dice cada recordatorio: hasta qué día un aviso frenado por el tope puede
+esperar cupo sin mentir (`deferrable_until`), y si el hecho sigue en pie al
+enviarlo (`still_true`, que re-usa este mismo planificador en vez de copiarlo).
 
 **Tres decisiones que el código tomó sobre el diseño** (detalle en §20):
 
@@ -67,6 +71,12 @@ KEY_PREFIX = {
 
 #: Igual que el resumen (`digest.MAX_LOOKBACK_DAYS`): más atrás no se busca.
 MAX_LOOKBACK_DAYS = 7
+
+#: Los que el tope de contactos REPROGRAMA en vez de dejar `throttled`
+#: (§20.6, Mateo, 26/09/2026). R5 (`auction_ready_customer`) también es
+#: cobranza pero no está: lo produce otro paso, con otro hecho que
+#: re-verificar (§20.6, lo dudoso).
+DEFERRABLE = frozenset(KEY_PREFIX)
 
 
 def reminder_key(event_type: str, customer_id: UUID, target_date: date) -> str:
@@ -245,3 +255,90 @@ async def build_all_reminders(
             stats.errors += 1
             logger.exception("recordatorios_empresa_fallo: company_id=%s", company._mapping["id"])
     return stats
+
+
+# ---------------------------------------- el tope reprograma (§20.6) ----
+
+
+def _dates(payload: dict[str, Any], field_name: str) -> list[date]:
+    out: list[date] = []
+    for row in payload.get("contracts") or []:
+        if row.get(field_name):
+            out.append(date.fromisoformat(row[field_name]))
+    if not out and payload.get(field_name):
+        # El formato de la fase 1: la fecha arriba, no por contrato (§20.3-7).
+        out.append(date.fromisoformat(payload[field_name]))
+    return out
+
+
+def deferrable_until(event_type: str, payload: dict[str, Any]) -> date | None:
+    """El último día (de la empresa) en que este recordatorio, mandado, sigue
+    diciendo la verdad. Es lo que acota cuánto puede esperar cupo (§20.6).
+
+    - **R1 y R4 anuncian una fecha** («su cuota vence el 6», «su prórroga
+      vence el 3»): valen hasta ESE día inclusive. El 7, «vence el 6» es
+      desinformación — §5.3, *«un recordatorio atrasado no es un
+      recordatorio»*. Con varios contratos, manda el que vence primero: el
+      correo nombra a todos. Sin fecha legible: `None`.
+    - **R2 y R3 anuncian un estado** («venció», «entró en prórroga»), que
+      sigue siendo cierto días después mientras el hecho siga en pie. No
+      caducan por fecha (`date.max`): los acota `still_true` al enviar.
+    - **Cualquier otro** (comprobantes, R5): `None`, no se reprograma.
+    """
+    if event_type == INSTALLMENT_DUE_SOON:
+        dates = _dates(payload, "due_date")
+    elif event_type == EXTENSION_ENDING_SOON:
+        dates = _dates(payload, "extension_ends_at")
+    elif event_type in (INSTALLMENT_OVERDUE, EXTENSION_STARTED):
+        return date.max
+    else:
+        return None
+    return min(dates) if dates else None
+
+
+async def still_true(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    event_type: str,
+    customer_id: UUID | None,
+    target_date: date | None,
+    dedupe_key: str,
+    payload: dict[str, Any],
+    today: date,
+    prefs: preferences.NotificationPrefs,
+) -> dict[str, Any] | None:
+    """¿El hecho que este recordatorio anuncia sigue en pie HOY? Devuelve el
+    payload con el que hay que redactarlo, o `None` si ya no corresponde.
+
+    **No hay una segunda regla:** se le pregunta al MISMO planificador del
+    job (`plan_reminders`) si, con los contratos como están hoy, el evento de
+    esa llave volvería a nacer. Una copia de «¿sigue en mora?» acá terminaría
+    divergiendo de la del job — el defecto de E2 existió justamente por
+    derivar una fecha en dos lugares (§20.5). Como la llave lleva el día
+    objetivo y ese día se DERIVA del ancla, un abono que la mueve hace que la
+    llave ya no nazca: pagó → no hay aviso de mora.
+
+    **Solo quita, nunca agrega:** de los contratos que el aviso nombraba,
+    quedan los que siguen en el hecho, con sus montos de HOY (lo que cuesta
+    ponerse al día cambia con los días). Si no queda ninguno, `None`."""
+    if customer_id is None or target_date is None or target_date > today:
+        return None
+    contracts = await contracts_integration.list_reminder_contracts(
+        db, company_id=company_id, today=today, customer_id=customer_id
+    )
+    planned = plan_reminders(
+        contracts,
+        today=today,
+        schedule=prefs.reminders,
+        lookback_days=(today - target_date).days,
+        event_enabled=prefs.event_enabled,
+    )
+    match = next((p for p in planned if p.dedupe_key == dedupe_key), None)
+    if match is None:
+        return None
+    announced = {row.get("number") for row in payload.get("contracts") or []}
+    rows = [dict(row) for row in match.contracts if row["number"] in announced]
+    if not rows:
+        return None
+    return {**payload, "contracts": rows}

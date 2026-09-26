@@ -254,3 +254,34 @@ def test_payload_carries_numbers_dates_and_amounts_only() -> None:
         "amount": "50000.00",
         "capital_balance": "1000000.00",
     }
+
+
+# ------------------------- hasta cuándo se puede reprogramar uno (§20.6) ----
+
+
+def test_R1_and_R4_can_wait_only_until_the_date_they_announce() -> None:
+    """«Su cuota vence el 6» sigue siendo cierto el 6; el 7 es desinformación.
+    Con varios contratos, manda el que vence primero. Un payload del formato
+    viejo (la fecha arriba) también se lee; sin fecha, no se reprograma."""
+    r1 = {
+        "contracts": [
+            {"number": 1, "due_date": "2030-09-09"},
+            {"number": 2, "due_date": "2030-09-06"},
+        ]
+    }
+    assert reminders.deferrable_until(R1, r1) == date(2030, 9, 6)
+    old = {"due_date": "2030-09-05", "contracts": [{"number": 1, "amount": "50000"}]}
+    assert reminders.deferrable_until(R1, old) == date(2030, 9, 5)
+    assert reminders.deferrable_until(R1, {"contracts": []}) is None
+    r4 = {"contracts": [{"number": 3, "extension_ends_at": "2030-10-03"}]}
+    assert reminders.deferrable_until(R4, r4) == date(2030, 10, 3)
+
+
+def test_R2_and_R3_do_not_expire_by_date_and_the_rest_are_not_deferred() -> None:
+    """La mora y la prórroga siguen siendo ciertas días después: las acota la
+    re-verificación al enviar, no una fecha. Un comprobante o R5 no se
+    reprograman."""
+    assert reminders.deferrable_until(R2, {"contracts": []}) == date.max
+    assert reminders.deferrable_until(R3, {"contracts": []}) == date.max
+    assert reminders.deferrable_until("payment_registered", {}) is None
+    assert reminders.deferrable_until("auction_ready_customer", {}) is None
