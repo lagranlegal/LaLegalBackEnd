@@ -1197,3 +1197,33 @@ async def test_without_link_config_a_customer_mail_does_not_go_out(
     assert row.status == "dead"
     assert "baja" in row.last_error
     assert provider.outbox == []
+
+
+async def test_reminder_schedule_is_a_setting_with_the_decided_defaults(
+    client: TestClient, notif: dict[str, Any]
+) -> None:
+    """Fase 5 (§20): los días de antelación de R1 y R4 son parámetros por
+    empresa; de fábrica, los que fijó §12.2-1 (3 días antes y el día del
+    vencimiento) y 3 días antes del fin de la prórroga."""
+    headers = {"Authorization": f"Bearer {notif['admin_token']}"}
+    got = client.get("/api/v1/notifications/settings", headers=headers).json()
+    assert got["reminders"] == {"installment_days_before": [3, 0], "extension_days_before": [3]}
+
+    response = client.patch(
+        "/api/v1/notifications/settings",
+        headers=headers,
+        json={"reminders": {"installment_days_before": [0, 5]}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["reminders"] == {
+        "installment_days_before": [5, 0],
+        "extension_days_before": [3],
+    }
+    for bad in ([31], [-1], [2, 2], [1, 2, 3, 4, 5, 6]):
+        rejected = client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"reminders": {"installment_days_before": bad}},
+        )
+        assert rejected.status_code == 422, bad
+        assert rejected.json()["code"] == "VALIDATION_ERROR"

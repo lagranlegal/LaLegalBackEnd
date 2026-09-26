@@ -429,3 +429,95 @@ def test_alert_never_renders_customer_data_a_producer_slipped_in() -> None:
         assert "Juana" not in body
         assert "1032456789" not in body
         assert "Cadena" not in body
+
+
+# ------------------------------------------------ recordatorios R1–R5 (fase 5) ----
+_INFORMATIVE = "no reemplaza lo pactado en su contrato"
+
+
+def _reminder(event_type: str, contracts: list[dict[str, object]]) -> templates.RenderedEmail:
+    return templates.render(
+        event_type,
+        {"contracts": contracts, "first_name": "Juana Pérez", "unsubscribe_url": UNSUB},
+        BRAND,
+    )
+
+
+def test_grouped_installment_reminder_lists_each_contract_with_its_date_and_amount() -> None:
+    """§2.3: un correo por cliente y día; cada contrato con SU fecha — el mismo
+    día pueden tocar cuotas que vencen en fechas distintas."""
+    rendered = _reminder(
+        "installment_due_soon",
+        [
+            {"number": 1, "due_date": "2030-09-03", "amount": "50000.00"},
+            {"number": 2, "due_date": "2030-09-06", "amount": "40000.00"},
+        ],
+    )
+    assert "Contrato #1: cuota de $50.000, vence el 3 de septiembre de 2030." in rendered.text
+    assert "Contrato #2: cuota de $40.000, vence el 6 de septiembre de 2030." in rendered.text
+    assert "Hola, Juana:" in rendered.text
+    assert rendered.subject == "LA GRAN LEGAL · Recordatorio de pago de sus cuotas"
+    single = _reminder(
+        "installment_due_soon", [{"number": 1, "due_date": "2030-09-06", "amount": "50000"}]
+    )
+    assert single.subject == "LA GRAN LEGAL · Su cuota vence el 6 de septiembre de 2030"
+
+
+def test_overdue_reminder_says_when_and_how_much() -> None:
+    rendered = _reminder(
+        "installment_overdue", [{"number": 9, "due_date": "2030-09-03", "amount": "50000.00"}]
+    )
+    assert "venció el 3 de septiembre de 2030" in rendered.text
+    assert "$50.000" in rendered.text
+    assert "Si ya pagó, no tenga en cuenta este mensaje." in rendered.text
+
+
+def test_extension_reminders_and_R5_say_they_do_not_replace_the_contract() -> None:
+    """§12.3: R3 y R4 son informativos; R5 es un aviso de CORTESÍA y lo dice en
+    lenguaje llano. Los tres, en el HTML y en el texto."""
+    started = _reminder(
+        "extension_started",
+        [{"number": 3, "extension_ends_at": "2030-10-03", "amount": "200000.00"}],
+    )
+    ending = _reminder(
+        "extension_ending_soon",
+        [{"number": 3, "extension_ends_at": "2030-10-03", "amount": "200000.00"}],
+    )
+    for rendered in (started, ending):
+        assert "informativo" in rendered.text
+        assert _INFORMATIVE in rendered.text
+        assert _INFORMATIVE in rendered.html
+    assert "3 de octubre de 2030" in started.text and "$200.000" in started.text
+    r5 = templates.render(
+        "auction_ready_customer",
+        {"contract_number": 4, "extension_ends_at": "2030-09-01", "unsubscribe_url": UNSUB},
+        BRAND,
+    )
+    assert "aviso de cortesía" in r5.text
+    assert "La notificación formal es la que establece su contrato" in r5.text
+    assert _INFORMATIVE in r5.text
+    assert "aviso de cortesía" in r5.html
+
+
+def test_reminders_never_render_an_item_or_a_document_a_producer_slipped_in() -> None:
+    for event_type in (
+        "installment_due_soon",
+        "installment_overdue",
+        "extension_started",
+        "extension_ending_soon",
+    ):
+        rendered = _reminder(
+            event_type,
+            [
+                {
+                    "number": 1,
+                    "due_date": "2030-09-03",
+                    "extension_ends_at": "2030-10-03",
+                    "amount": "1",
+                    "item_description": "Cadena de oro 18k",
+                    "doc_number": "1032456789",
+                }
+            ],
+        )
+        for body in (rendered.html, rendered.text, rendered.subject):
+            assert "Cadena" not in body and "1032456789" not in body, event_type

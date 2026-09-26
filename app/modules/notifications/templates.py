@@ -680,25 +680,8 @@ def _customer_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]
         return f"Su compra #{sale} fue anulada o devuelta", [
             f"Registramos la anulación o devolución de su compra #{sale} por {money(p['amount'])}.",
         ]
-    if event_type == "installment_due_soon":
-        contracts = p.get("contracts") or []
-        return f"Su cuota vence el {long_date(p['due_date'])}", [
-            f"Le recordamos que el {long_date(p['due_date'])} vence la cuota de:",
-            *[f"Contrato #{c['number']}: {money(c['amount'])}" for c in contracts],
-        ]
-    if event_type == "installment_overdue":
-        return f"Su contrato #{n} tiene una cuota vencida", [
-            f"La cuota de su contrato #{n} venció el {long_date(p['due_date'])}.",
-        ]
-    if event_type == "extension_started":
-        return f"Su contrato #{n} entró en prórroga", [
-            f"Su contrato #{n} entró en prórroga. Tiene hasta el "
-            f"{long_date(p['extension_ends_at'])} para ponerse al día.",
-        ]
-    if event_type == "extension_ending_soon":
-        return f"La prórroga de su contrato #{n} vence pronto", [
-            f"La prórroga de su contrato #{n} vence el {long_date(p['extension_ends_at'])}.",
-        ]
+    if event_type in _REMINDERS:
+        return _reminder_lines(event_type, p)
     if event_type == catalog.AUCTION_READY_CUSTOMER:
         return f"Su contrato #{n} está vencido", [
             f"La prórroga de su contrato #{n} venció el {long_date(p['extension_ends_at'])} "
@@ -706,6 +689,127 @@ def _customer_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]
             "Comuníquese con nosotros lo antes posible.",
         ]
     raise ValueError(f"Sin plantilla para el evento {event_type!r}")
+
+
+# ------------------------------------------------ recordatorios R1–R4 (fase 5) ----
+_REMINDERS = (
+    "installment_due_soon",
+    "installment_overdue",
+    "extension_started",
+    "extension_ending_soon",
+)
+
+#: §12.3 (decisión del 25/09/2026): R3 y R4 informan un cambio de estado; no
+#: pesan como el remate, y lo dicen. El texto va al cliente: llano, sin citar
+#: leyes.
+INFORMATIVE_NOTE = (
+    "Este aviso es informativo: le cuenta en qué estado está su contrato, y no reemplaza "
+    "lo pactado en su contrato, que es el que fija los plazos y las condiciones."
+)
+
+#: §12.3: R5 es un aviso de CORTESÍA. La notificación formal es la que diga el
+#: contrato, y un correo aceptado por un servidor no prueba que el titular lo
+#: leyó — por eso el texto no se presenta como la notificación.
+COURTESY_NOTE = (
+    "Este es un aviso de cortesía. La notificación formal es la que establece su contrato, "
+    "en la forma y los plazos que allí se pactaron: este correo no reemplaza lo pactado en "
+    "su contrato. Si tiene dudas sobre lo que sigue, comuníquese con nosotros."
+)
+
+_ALREADY_PAID = "Si ya pagó, no tenga en cuenta este mensaje."
+
+
+def _reminder_rows(p: dict[str, Any]) -> list[dict[str, Any]]:
+    """Los contratos del recordatorio (§2.3: uno por cliente y día, con todos
+    sus contratos). Un payload de antes de la fase 5 traía la fecha arriba y
+    los contratos sin ella: se completa, no se rompe."""
+    rows = []
+    for c in p.get("contracts") or []:
+        row = dict(c)
+        if "due_date" not in row and p.get("due_date"):
+            row["due_date"] = p["due_date"]
+        rows.append(row)
+    return rows
+
+
+def _reminder_lines(event_type: str, p: dict[str, Any]) -> tuple[str, list[str]]:
+    """R1–R4, agrupados. Solo número, fechas y montos (§9.1): la prenda no.
+
+    Todas las fechas son absolutas («vence el 6 de septiembre»), nunca
+    relativas («en 3 días»): un recordatorio que sale un día tarde, dentro de
+    la ventana de rezago (§5.3), tiene que seguir siendo cierto."""
+    rows = _reminder_rows(p)
+    single = len(rows) == 1
+    if event_type == "installment_due_soon":
+        dates = {r["due_date"] for r in rows}
+        subject = (
+            f"Su cuota vence el {long_date(next(iter(dates)))}"
+            if len(dates) == 1
+            else "Recordatorio de pago de sus cuotas"
+        )
+        return subject, [
+            "Le recordamos la fecha de pago de su cuota:"
+            if single
+            else "Le recordamos la fecha de pago de sus cuotas:",
+            *[
+                f"Contrato #{r['number']}: cuota de {money(r['amount'])}, "
+                f"vence el {long_date(r['due_date'])}."
+                for r in rows
+            ],
+            _ALREADY_PAID,
+        ]
+    if event_type == "installment_overdue":
+        subject = (
+            f"Su contrato #{rows[0]['number']} tiene una cuota vencida"
+            if single
+            else "Tiene cuotas vencidas"
+        )
+        return subject, [
+            *[
+                f"La cuota de su contrato #{r['number']} venció el {long_date(r['due_date'])}. "
+                f"Para ponerse al día: {money(r['amount'])}."
+                for r in rows
+            ],
+            "Puede acercarse a pagar en nuestro horario de atención.",
+            _ALREADY_PAID,
+        ]
+    if event_type == "extension_started":
+        subject = (
+            f"Su contrato #{rows[0]['number']} entró en prórroga"
+            if single
+            else "Sus contratos entraron en prórroga"
+        )
+        return subject, [
+            *[
+                f"Su contrato #{r['number']} entró en prórroga. Tiene hasta el "
+                f"{long_date(r['extension_ends_at'])} para ponerse al día; hoy son "
+                f"{money(r['amount'])}."
+                for r in rows
+            ],
+            _ALREADY_PAID,
+        ]
+    subject = (
+        f"La prórroga de su contrato #{rows[0]['number']} vence pronto"
+        if single
+        else "La prórroga de sus contratos vence pronto"
+    )
+    return subject, [
+        *[
+            f"La prórroga de su contrato #{r['number']} vence el "
+            f"{long_date(r['extension_ends_at'])}. Para ponerse al día: {money(r['amount'])}."
+            for r in rows
+        ],
+        _ALREADY_PAID,
+    ]
+
+
+def _customer_note(event_type: str) -> str | None:
+    """La aclaración que va en el recuadro, aparte del cuerpo (§12.3)."""
+    if event_type in ("extension_started", "extension_ending_soon"):
+        return INFORMATIVE_NOTE
+    if event_type == catalog.AUCTION_READY_CUSTOMER:
+        return COURTESY_NOTE
+    return None
 
 
 def _check_unsubscribe_url(url: Any) -> str:
@@ -742,7 +846,10 @@ def render_customer(event_type: str, payload: dict[str, Any], branding: Branding
     signature = " · ".join(x for x in (company, contact, branding.footer_note or "") if x)
     sent_by = f"Enviado por {PLATFORM_NAME} en nombre de {company}."
     optout = f"¿No quiere recibir más avisos de {company} por correo?"
+    note = _customer_note(event_type)
     rows = [_tr(_paragraphs([greeting, *paragraphs]), top=20)]
+    if note:
+        rows.append(_tr(_notice(_esc(note))))
     if contact or branding.footer_note:
         # La firma de la empresa, a la vista: es a quien el cliente le responde.
         rows.append(_tr(_notice(_esc(signature))))
@@ -768,6 +875,7 @@ def render_customer(event_type: str, payload: dict[str, Any], branding: Branding
                 subject_tail,
                 greeting,
                 *paragraphs,
+                *([note] if note else []),
                 "---",
                 signature,
                 sent_by,

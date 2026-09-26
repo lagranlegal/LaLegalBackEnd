@@ -30,6 +30,7 @@ from app.modules.notifications.schemas import (
     EventTypeSettingOut,
     NotificationSettingsOut,
     NotificationSettingsUpdateIn,
+    ReminderScheduleOut,
     ThresholdsOut,
     UnsubscribeOut,
 )
@@ -277,6 +278,7 @@ async def _settings_out(
         ),
         customer_contact_limits=_limits_out(prefs),
         stale_after_days=prefs.stale_after_days,
+        reminders=ReminderScheduleOut(**prefs.reminders.as_dict()),
         digest_recipients=[
             DigestRecipientOut(
                 user_id=r._mapping["id"],
@@ -359,6 +361,10 @@ async def update_settings_for_company(
         data["customer_contact_limits"] = limits
     if body.stale_after_days is not None:
         data["stale_after_days"] = body.stale_after_days
+    if body.reminders is not None:
+        schedule = dict(data["reminders"])
+        schedule.update(body.reminders.model_dump(exclude_none=True))
+        data["reminders"] = schedule
 
     after = preferences.parse({"notifications": data})
     stored_after = preferences.to_settings(after)

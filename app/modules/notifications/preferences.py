@@ -10,7 +10,8 @@ comporta exactamente como dicen los defaults de abajo.
       "events": {"auction_ready_customer": true},   # override sobre el catálogo
       "thresholds": {"discount_amount": "0", "cash_difference_amount": "0"},
       "customer_contact_limits": {...},       # Ley 2300 (§12.3), solo audience='customer'
-      "stale_after_days": 2                   # ventana de rezago (§5.3, §12.2-5)
+      "stale_after_days": 2,                  # ventana de rezago (§5.3, §12.2-5)
+      "reminders": {"installment_days_before": [3, 0], "extension_days_before": [3]}
     }
 
 **Por qué `enabled` nace en `false`, también para el resumen.** Encenderlo es
@@ -77,6 +78,36 @@ class ContactLimits:
         }
 
 
+#: §12.1-1 / §12.2-1: la cuota se recuerda 3 días antes y el día del
+#: vencimiento. R4 («la prórroga vence pronto») no tenía número en el diseño
+#: (§2.2 dice «N días»): se tomó el mismo 3 del recordatorio de cuota.
+DEFAULT_INSTALLMENT_DAYS_BEFORE: tuple[int, ...] = (3, 0)
+DEFAULT_EXTENSION_DAYS_BEFORE: tuple[int, ...] = (3,)
+MAX_DAYS_BEFORE = 30
+MAX_REMINDER_POINTS = 5
+
+
+@dataclass(frozen=True)
+class ReminderSchedule:
+    """Cuántos días antes salen los recordatorios por fecha (R1 y R4,
+    docs/NOTIFICACIONES.md §20). Parámetros por empresa, como pidió §12.2-1;
+    los valores de fábrica son los que fijó esa decisión.
+
+    **Ojo con el tope semanal (Ley 2300):** con un contacto por semana, dos
+    puntos a menos de 7 días uno del otro no salen los dos — el segundo queda
+    `throttled`. Es la ley aplicada tal cual (§12.3), no un defecto; §20.4 lo
+    discute."""
+
+    installment_days_before: tuple[int, ...] = DEFAULT_INSTALLMENT_DAYS_BEFORE
+    extension_days_before: tuple[int, ...] = DEFAULT_EXTENSION_DAYS_BEFORE
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "installment_days_before": list(self.installment_days_before),
+            "extension_days_before": list(self.extension_days_before),
+        }
+
+
 @dataclass(frozen=True)
 class NotificationPrefs:
     enabled: bool = False
@@ -88,6 +119,7 @@ class NotificationPrefs:
     cash_difference_threshold: Decimal = Decimal("0.00")
     customer_contact_limits: ContactLimits = field(default_factory=ContactLimits)
     stale_after_days: int = DEFAULT_STALE_AFTER_DAYS
+    reminders: ReminderSchedule = field(default_factory=ReminderSchedule)
 
     def above_discount_threshold(self, amount: Decimal) -> bool:
         """¿Este descuento pasa el umbral? Estricto (`>`), así que con el
@@ -175,6 +207,36 @@ def parse_limits(raw: Any) -> ContactLimits:
     )
 
 
+def parse_days(raw: Any, default: tuple[int, ...]) -> tuple[int, ...]:
+    """Una lista de días antes: enteros entre 0 y 30, sin repetir, de mayor a
+    menor. Lo que no se entienda cae al default — leer tiene que ser tan
+    estricto como escribir (el jsonb se puede tocar por otros caminos)."""
+    if not isinstance(raw, list | tuple):
+        return default
+    days: set[int] = set()
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return default
+        if not 0 <= value <= MAX_DAYS_BEFORE:
+            return default
+        days.add(value)
+    if len(days) > MAX_REMINDER_POINTS:
+        return default
+    return tuple(sorted(days, reverse=True))
+
+
+def parse_reminders(raw: Any) -> ReminderSchedule:
+    d = raw if isinstance(raw, dict) else {}
+    return ReminderSchedule(
+        installment_days_before=parse_days(
+            d.get("installment_days_before"), DEFAULT_INSTALLMENT_DAYS_BEFORE
+        ),
+        extension_days_before=parse_days(
+            d.get("extension_days_before"), DEFAULT_EXTENSION_DAYS_BEFORE
+        ),
+    )
+
+
 def parse(settings: dict[str, Any] | None) -> NotificationPrefs:
     """`settings` es el jsonb COMPLETO de `company.settings`."""
     raw = (settings or {}).get("notifications") or {}
@@ -199,6 +261,7 @@ def parse(settings: dict[str, Any] | None) -> NotificationPrefs:
         stale_after_days=(
             int(stale) if isinstance(stale, int) and stale >= 0 else DEFAULT_STALE_AFTER_DAYS
         ),
+        reminders=parse_reminders(raw.get("reminders")),
     )
 
 
@@ -213,4 +276,5 @@ def to_settings(prefs: NotificationPrefs) -> dict[str, Any]:
         },
         "customer_contact_limits": prefs.customer_contact_limits.as_dict(),
         "stale_after_days": prefs.stale_after_days,
+        "reminders": prefs.reminders.as_dict(),
     }

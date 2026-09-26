@@ -57,6 +57,16 @@ class ContactLimitsOut(BaseModel):
     transactional_in_weekly_cap: bool
 
 
+class ReminderScheduleOut(BaseModel):
+    """Cuántos días antes salen los recordatorios por fecha (NOTIFICACIONES §20).
+    De mayor a menor; `0` es el mismo día."""
+
+    #: R1 · la cuota. De fábrica `[3, 0]`: 3 días antes y el día del vencimiento.
+    installment_days_before: list[int]
+    #: R4 · el fin de la prórroga. De fábrica `[3]`.
+    extension_days_before: list[int]
+
+
 class DigestRecipientOut(BaseModel):
     user_id: UUID
     full_name: str
@@ -74,6 +84,9 @@ class NotificationSettingsOut(BaseModel):
     thresholds: ThresholdsOut
     customer_contact_limits: ContactLimitsOut
     stale_after_days: int
+    #: Aditivo (fase 5). Con el tope semanal de la Ley 2300 (1 por semana), dos
+    #: puntos a menos de 7 días no salen los dos: el segundo queda `throttled`.
+    reminders: ReminderScheduleOut
     #: A quién le llega hoy el resumen: usuarios activos con el permiso
     #: `notifications.receive_digest`.
     digest_recipients: list[DigestRecipientOut]
@@ -120,6 +133,26 @@ class ContactLimitsIn(BaseModel):
         return start, end
 
 
+def _check_days(value: list[int] | None) -> list[int] | None:
+    if value is None:
+        return None
+    if len(set(value)) != len(value):
+        raise ValueError("Los días no se pueden repetir.")
+    return sorted(value, reverse=True)
+
+
+class ReminderScheduleIn(BaseModel):
+    installment_days_before: list[int] | None = Field(default=None, max_length=5)
+    extension_days_before: list[int] | None = Field(default=None, max_length=5)
+
+    @field_validator("installment_days_before", "extension_days_before")
+    @classmethod
+    def _days(cls, value: list[int] | None) -> list[int] | None:
+        if value is not None and any(d < 0 or d > 30 for d in value):
+            raise ValueError("Cada valor va entre 0 y 30 días.")
+        return _check_days(value)
+
+
 class NotificationSettingsUpdateIn(BaseModel):
     """PATCH parcial: lo que no viene no cambia.
 
@@ -132,6 +165,7 @@ class NotificationSettingsUpdateIn(BaseModel):
     thresholds: ThresholdsIn | None = None
     customer_contact_limits: ContactLimitsIn | None = None
     stale_after_days: int | None = Field(default=None, ge=0, le=30)
+    reminders: ReminderScheduleIn | None = None
 
 
 class DeliveryOut(BaseModel):
