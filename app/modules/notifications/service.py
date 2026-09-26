@@ -34,12 +34,6 @@ from app.modules.notifications.schemas import (
     UnsubscribeOut,
 )
 
-#: Qué permiso hace destinatario a un usuario, por familia de evento (§4.3).
-_RECIPIENT_PERMISSION = {
-    "digest": "notifications.receive_digest",
-    "alert": "notifications.receive_alerts",
-}
-
 
 @dataclass(frozen=True)
 class RecordOutcome:
@@ -119,6 +113,7 @@ async def record_event(
     deliver: bool = True,
     recipient_email: str | None = None,
     recipient_user_id: UUID | None = None,
+    actor_user_id: UUID | None = None,
 ) -> RecordOutcome:
     """Registra el hecho y planifica sus entregas en la MISMA transacción.
 
@@ -129,6 +124,12 @@ async def record_event(
     `recipient_email`/`recipient_user_id` solo para `audience='platform'`: ahí
     el destinatario no sale de un permiso ni de un cliente, lo trae el
     productor (la invitación sabe a quién invitó).
+
+    `actor_user_id` solo para las alertas (§2.5, fase 7): quien hizo el acto
+    NO recibe su propia alerta (§3: «un hecho cuyo destinatario es la persona
+    que acaba de hacer clic no es un correo»). Si era el único con el permiso,
+    el hecho queda registrado sin entregas — y sigue en `audit_log` y en el
+    resumen, que es lo que existía antes de la alerta.
     """
     et = catalog.get(event_type)
     event_id = await repository.insert_event(
@@ -178,10 +179,18 @@ async def record_event(
     stale = is_stale(target_date=target_date, today=today, stale_after_days=prefs.stale_after_days)
 
     if et.audience == "company":
-        permission = _RECIPIENT_PERMISSION.get(et.family)
-        if permission != "notifications.receive_digest":
-            # Las alertas (fase 7) todavía no tienen productor: nada que planificar.
-            return RecordOutcome(created=True, event_id=event_id, deliveries={})
+        if et.family == "alert":
+            # Fase 7 (§19): una entrega por destinatario, sin rezago (un acto
+            # de hoy no caduca) y `pending` para mandarla ya, después del
+            # commit — el valor de la alerta es que llegue el mismo día.
+            for user in await repository.list_alert_recipients(db, company_id=company_id):
+                m = user._mapping
+                if actor_user_id is not None and m["id"] == actor_user_id:
+                    continue
+                await _add(m["email"], "pending", m["id"], None)
+            return RecordOutcome(
+                created=True, event_id=event_id, deliveries=counts, pending_ids=tuple(pending)
+            )
         for user in await repository.list_digest_recipients(db, company_id=company_id):
             m = user._mapping
             await _add(m["email"], "skipped_stale" if stale else "pending", m["id"], None)
@@ -244,6 +253,7 @@ async def _settings_out(
     db: AsyncSession, *, company_id: UUID, prefs: NotificationPrefs
 ) -> NotificationSettingsOut:
     recipients = await repository.list_digest_recipients(db, company_id=company_id)
+    alert_recipients = await repository.list_alert_recipients(db, company_id=company_id)
     return NotificationSettingsOut(
         enabled=prefs.enabled,
         provider_configured=bool(get_settings().resend_api_key),
@@ -274,6 +284,14 @@ async def _settings_out(
                 email=r._mapping["email"],
             )
             for r in recipients
+        ],
+        alert_recipients=[
+            DigestRecipientOut(
+                user_id=r._mapping["id"],
+                full_name=r._mapping["full_name"],
+                email=r._mapping["email"],
+            )
+            for r in alert_recipients
         ],
     )
 

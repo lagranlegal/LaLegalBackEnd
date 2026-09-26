@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, decode_cursor
@@ -18,6 +18,7 @@ from app.modules.cashbox.schemas import (
     SessionReopenIn,
     SessionReportOut,
 )
+from app.modules.notifications import dispatcher as notifications_dispatcher
 
 router = APIRouter(prefix="/api/v1/cashbox", tags=["cashbox"])
 
@@ -149,10 +150,14 @@ async def reopen_session(
     body: SessionReopenIn,
     user: Annotated[CurrentUser, Depends(_reopen)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    background: BackgroundTasks,
 ) -> SessionOut:
-    return await service.reopen_session(
+    out, deliveries = await service.reopen_session(
         db, company_id=user.company_id, session_id=session_id, reason=body.reason, actor_id=user.id
     )
+    # Al FINAL: la alerta A4 a la empresa (NOTIFICACIONES §19, §16.2-1).
+    await notifications_dispatcher.send_after_commit(db, background, *deliveries)
+    return out
 
 
 @router.get("/expense-categories", response_model=list[ExpenseCategoryOut])

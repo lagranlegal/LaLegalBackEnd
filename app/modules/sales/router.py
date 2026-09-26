@@ -36,12 +36,12 @@ async def create_sale(
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     background: BackgroundTasks,
 ) -> SaleOut:
-    out, notice = await service.create_sale(
+    out, deliveries = await service.create_sale(
         db, company_id=user.company_id, body=body, user=user, idempotency_key=idempotency_key
     )
-    # Al FINAL: commit explícito y el aviso en segundo plano (NOTIFICACIONES §16.2-1).
-    if notice is not None:
-        await notifications_dispatcher.send_after_commit(db, background, notice)
+    # Al FINAL: commit explícito y los avisos en segundo plano (NOTIFICACIONES
+    # §16.2-1): el comprobante C6 y, con descuento, la alerta A2 (§19).
+    await notifications_dispatcher.send_after_commit(db, background, *deliveries)
     return out
 
 
@@ -89,11 +89,11 @@ async def void_sale(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     background: BackgroundTasks,
 ) -> SaleOut:
-    out, notice = await service.void_sale(
+    out, deliveries = await service.void_sale(
         db, company_id=user.company_id, sale_id=sale_id, reason=body.reason, actor_id=user.id
     )
-    if notice is not None:
-        await notifications_dispatcher.send_after_commit(db, background, notice)
+    # El aviso C7 al cliente y la alerta A1 a la empresa (§19).
+    await notifications_dispatcher.send_after_commit(db, background, *deliveries)
     return out
 
 

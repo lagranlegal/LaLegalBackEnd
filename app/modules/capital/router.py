@@ -2,7 +2,7 @@ from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.idempotency import require_idempotency_key
@@ -15,6 +15,7 @@ from app.modules.capital.schemas import (
     ContributionIn,
     WithdrawalIn,
 )
+from app.modules.notifications import dispatcher as notifications_dispatcher
 
 router = APIRouter(prefix="/api/v1/capital", tags=["capital"])
 
@@ -64,6 +65,7 @@ async def create_withdrawal(
     user: Annotated[CurrentUser, Depends(_withdraw)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    background: BackgroundTasks,
 ) -> CapitalMovementOut:
     """**Retiro del dueño**: utilidades o devolución de capital.
 
@@ -84,13 +86,16 @@ async def create_withdrawal(
     `notes` es obligatorio. Un retiro sin motivo es la clase de línea que
     nadie puede explicar seis meses después, y es plata que salió.
     """
-    return await service.create_withdrawal(
+    out, deliveries = await service.create_withdrawal(
         db,
         company_id=user.company_id,
         body=body,
         actor_id=user.id,
         idempotency_key=idempotency_key,
     )
+    # Al FINAL: la alerta A3 a la empresa (NOTIFICACIONES §19, §16.2-1).
+    await notifications_dispatcher.send_after_commit(db, background, *deliveries)
+    return out
 
 
 @router.get("/position", response_model=CapitalPositionOut)

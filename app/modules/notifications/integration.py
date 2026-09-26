@@ -2,14 +2,19 @@
 (CLAUDE.md regla 2: un módulo no importa el service de otro).
 
 Las usan `identity` para la invitación de usuario (P1, docs/NOTIFICACIONES.md
-§16) y, desde las fases 4 y 6 (§18), `contracts` y `sales` para los avisos
-transaccionales al cliente (C1–C7). En los dos casos el aviso se registra
-DENTRO de la transacción del documento, y el envío inmediato no está acá sino
-en `dispatcher.send_after_commit`, que el router llama al FINAL del endpoint.
+§16); desde las fases 4 y 6 (§18), `contracts` y `sales` para los avisos
+transaccionales al cliente (C1–C7); y desde la fase 7 (§19), `sales`,
+`contracts`, `capital` y `cashbox` para las alertas inmediatas a la empresa
+(A1–A4). En todos los casos el aviso se registra DENTRO de la transacción del
+documento, y el envío inmediato no está acá sino en
+`dispatcher.send_after_commit`, que el router llama al FINAL del endpoint.
 """
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,3 +160,86 @@ async def record_customer_notice(
         entity_id=entity_id,
     )
     return outcome.pending_ids[0] if outcome.pending_ids else None
+
+
+# --------------------------------------------- alertas inmediatas a la empresa ----
+
+ALERT_SALE_VOIDED = "alert_sale_voided"
+ALERT_DISCOUNT = "alert_discount"
+ALERT_CAPITAL_WITHDRAWAL = "alert_capital_withdrawal"
+ALERT_CASH_REOPENED = "alert_cash_reopened"
+
+
+def _local_now(tz_name: str) -> datetime:
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+    return datetime.now(UTC).astimezone(tz)
+
+
+async def record_company_alert(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    actor_id: UUID,
+    event_type: str,
+    dedupe_key: str,
+    entity_type: str,
+    entity_id: UUID,
+    payload: dict[str, Any],
+    discount_amount: Decimal | None = None,
+) -> tuple[UUID, ...]:
+    """Registra una alerta inmediata a la empresa (A1–A4, §2.5) EN LA
+    TRANSACCIÓN de quien llama, y devuelve las entregas que nacieron `pending`
+    —una por destinatario— para mandarlas ya con `dispatcher.send_after_commit`.
+
+    Mismo contrato que `record_customer_notice`: se llama como ÚLTIMO paso de
+    la operación, después del documento, la caja, la auditoría y el aviso al
+    cliente; si algo falla después, se revierte con todo lo demás (§5.1).
+
+    - **Destinatarios**: usuarios activos con `notifications.receive_alerts`,
+      MENOS quien hizo el acto (`actor_id`, §19.1-1).
+    - **A2 y el umbral** (§12.2-4): `discount_amount` por debajo o igual al
+      umbral de la empresa no es este evento — «descuento por encima del
+      umbral» — y no se registra nada. El descuento sigue en el documento, en
+      `audit_log` y en el resumen diario, que lista todos (§19.1-4).
+    - **Payload**: quién (el nombre, resuelto acá), cuándo (hora local de la
+      empresa), y lo que pasa quien llama: números de documento, montos y el
+      motivo. Nunca el cliente (§9.1) — ni su nombre: el número del documento
+      alcanza para preguntar.
+    - Sin ventana horaria ni límites de la Ley 2300: el destinatario es un
+      usuario de la empresa, no un deudor (§12.3). Sí mandan el interruptor
+      general y la casilla del evento (`record_event`).
+    """
+    company = await repository.get_company(db, company_id=company_id)
+    settings = (company._mapping["settings"] if company else None) or {}
+    prefs = preferences.parse(settings)
+    if event_type == ALERT_DISCOUNT:
+        if not prefs.above_discount_threshold(
+            discount_amount if discount_amount is not None else Decimal("0")
+        ):
+            return ()
+        # El umbral de ESE día, para que el correo diga contra qué se midió.
+        payload = {**payload, "threshold": str(prefs.discount_threshold)}
+    tz_name = settings.get("timezone") or DEFAULT_TIMEZONE
+    today = today_in(tz_name)
+    actor = await repository.get_app_user(db, company_id=company_id, user_id=actor_id)
+    outcome = await service.record_event(
+        db,
+        company_id=company_id,
+        event_type=event_type,
+        dedupe_key=dedupe_key,
+        occurred_on=today,
+        today=today,
+        prefs=prefs,
+        payload={
+            **payload,
+            "actor_name": actor._mapping["full_name"] if actor is not None else None,
+            "at": _local_now(tz_name).isoformat(timespec="minutes"),
+        },
+        entity_type=entity_type,
+        entity_id=entity_id,
+        actor_user_id=actor_id,
+    )
+    return outcome.pending_ids

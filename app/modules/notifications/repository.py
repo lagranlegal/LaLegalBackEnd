@@ -78,9 +78,17 @@ async def update_notification_settings(
     )
 
 
-async def list_digest_recipients(db: AsyncSession, *, company_id: UUID) -> list[Row[Any]]:
-    """Usuarios ACTIVOS cuyo rol tiene `notifications.receive_digest` (§4.3:
-    el destinatario lo decide un permiso, no una columna)."""
+async def list_recipients_with_permission(
+    db: AsyncSession, *, company_id: UUID, permission: str
+) -> list[Row[Any]]:
+    """Usuarios ACTIVOS cuyo rol tiene `permission` (§4.3: el destinatario lo
+    decide un permiso, no una columna). Un usuario `invited` o `inactive` no
+    recibe nada: el primero todavía no entró, y el segundo ya no trabaja ahí.
+
+    La usan el resumen (`notifications.receive_digest`, con la sesión de bypass
+    del job) y las alertas (`notifications.receive_alerts`, fase 7, con la
+    sesión TENANT del endpoint que dispara — RLS encima, y el `company_id`
+    explícito de todos modos)."""
     result = await db.execute(
         text(
             """
@@ -88,14 +96,26 @@ async def list_digest_recipients(db: AsyncSession, *, company_id: UUID) -> list[
             from public.app_user u
             join public.role_permission rp on rp.role_id = u.role_id
             join public.permission p on p.id = rp.permission_id
-                                    and p.code = 'notifications.receive_digest'
+                                    and p.code = :permission
             where u.company_id = :company_id and u.status = 'active'
             order by u.email
             """
         ),
-        {"company_id": str(company_id)},
+        {"company_id": str(company_id), "permission": permission},
     )
     return list(result.all())
+
+
+async def list_digest_recipients(db: AsyncSession, *, company_id: UUID) -> list[Row[Any]]:
+    return await list_recipients_with_permission(
+        db, company_id=company_id, permission="notifications.receive_digest"
+    )
+
+
+async def list_alert_recipients(db: AsyncSession, *, company_id: UUID) -> list[Row[Any]]:
+    return await list_recipients_with_permission(
+        db, company_id=company_id, permission="notifications.receive_alerts"
+    )
 
 
 # ----------------------------------------------------------- eventos/entregas ----

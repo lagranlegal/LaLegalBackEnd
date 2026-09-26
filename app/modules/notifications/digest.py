@@ -193,7 +193,7 @@ async def _sections(
                 "kind": d._mapping["kind"],
                 "number": d._mapping["number"],
                 "amount": str(d._mapping["amount"]),
-                "above_threshold": _above(Decimal(d._mapping["amount"]), prefs.discount_threshold),
+                "above_threshold": prefs.above_discount_threshold(Decimal(d._mapping["amount"])),
             }
             for d in discount_rows
         ],

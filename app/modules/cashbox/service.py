@@ -1,6 +1,7 @@
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,7 @@ from app.modules.cashbox.schemas import (
     SessionReportOut,
 )
 from app.modules.identity import repository as identity_repo
+from app.modules.notifications import integration as notifications_integration
 from app.modules.platform import integration as platform_integration
 
 
@@ -414,7 +416,10 @@ async def close_session(
 
 async def reopen_session(
     db: AsyncSession, *, company_id: UUID, session_id: UUID, reason: str, actor_id: UUID
-) -> SessionOut:
+) -> tuple[SessionOut, tuple[UUID, ...]]:
+    """Devuelve la sesión reabierta y las entregas de la alerta A4 que nacieron
+    `pending` (NOTIFICACIONES §19). Reabrir dos veces seguidas es `409`
+    (`CASH_SESSION_NOT_CLOSED`), así que el reintento no llega a la alerta."""
     row = await repository.get_session(db, company_id=company_id, session_id=session_id)
     if row is None:
         raise NotFoundError("La sesión de caja no existe en esta empresa.")
@@ -476,6 +481,7 @@ async def reopen_session(
             notes=f"Reversa del descuadre de cierre al reabrir la sesión: {reason}",
         )
 
+    tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
     await repository.reopen_session(db, company_id=company_id, session_id=session_id)
     await identity_repo.insert_audit_log(
         db,
@@ -495,7 +501,35 @@ async def reopen_session(
         },
         after={"status": "open", "reason": reason},
     )
-    return await get_session(db, company_id=company_id, session_id=session_id)
+
+    # A4 (NOTIFICACIONES §2.5, §19): la reapertura, a la empresa, con lo que
+    # decía el cierre que se deshace — es justo lo que el acta pierde.
+    # La llave NO puede ser solo la sesión: una caja se puede cerrar y reabrir
+    # varias veces, y cada reapertura es un hecho nuevo. Lo que la hace única
+    # es el CIERRE que deshace (`closed_at`, que el cierre siguiente cambia):
+    # la misma reapertura da la misma llave, la siguiente otra.
+    closed_at = m["closed_at"]
+    alerts = await notifications_integration.record_company_alert(
+        db,
+        company_id=company_id,
+        actor_id=actor_id,
+        event_type=notifications_integration.ALERT_CASH_REOPENED,
+        dedupe_key=f"alert:reopen:{session_id}:{closed_at.isoformat() if closed_at else ''}",
+        entity_type="cash_session",
+        entity_id=session_id,
+        payload={
+            "session_date": m["session_date"].isoformat(),
+            "closed_at": (
+                closed_at.astimezone(ZoneInfo(tz_name)).isoformat(timespec="minutes")
+                if closed_at
+                else None
+            ),
+            "counted_cash": str(m["counted_cash"]) if m["counted_cash"] is not None else None,
+            "difference": str(difference) if difference is not None else None,
+            "reason": reason,
+        },
+    )
+    return await get_session(db, company_id=company_id, session_id=session_id), alerts
 
 
 async def create_expense_category(

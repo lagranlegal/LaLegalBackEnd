@@ -89,6 +89,13 @@ class NotificationPrefs:
     customer_contact_limits: ContactLimits = field(default_factory=ContactLimits)
     stale_after_days: int = DEFAULT_STALE_AFTER_DAYS
 
+    def above_discount_threshold(self, amount: Decimal) -> bool:
+        """¿Este descuento pasa el umbral? Estricto (`>`), así que con el
+        umbral en 0 —como nace, §12.2-4— TODO descuento lo pasa. Una sola
+        definición para las dos cosas que decide: la alerta inmediata A2
+        (fase 7) y la marca «sobre el umbral» del resumen."""
+        return abs(amount) > self.discount_threshold
+
     def event_enabled(self, code: str) -> bool:
         """El interruptor efectivo de un evento: el de la empresa Y el del evento
         (override por empresa, o el `default_enabled` del catálogo).

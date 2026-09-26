@@ -488,8 +488,7 @@ async def dispatch_delivery(
 async def send_after_commit(
     db: AsyncSession,
     background: BackgroundTasks,
-    delivery_id: UUID,
-    *,
+    *delivery_ids: UUID | None,
     secrets: dict[str, str] | None = None,
 ) -> None:
     """Commit EXPLÍCITO de la operación y, después, el envío en segundo plano
@@ -506,6 +505,15 @@ async def send_after_commit(
 
     Llamarlo al FINAL del endpoint: commitear no parte la operación porque ya
     se escribió todo; lo único que queda es serializar la respuesta.
+
+    Acepta varias entregas (fase 7: una alerta a la empresa es una entrega por
+    destinatario, y la misma operación puede traer además el aviso al
+    cliente): UN commit y una tarea por entrega. Los `None` se ignoran, y sin
+    ninguna entrega no commitea — eso lo hace la dependencia, como siempre.
     """
+    ids = [d for d in delivery_ids if d is not None]
+    if not ids:
+        return
     await db.commit()
-    background.add_task(dispatch_delivery, delivery_id, secrets=secrets)
+    for delivery_id in ids:
+        background.add_task(dispatch_delivery, delivery_id, secrets=secrets)

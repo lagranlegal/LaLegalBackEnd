@@ -33,6 +33,7 @@ from app.modules.capital.schemas import (
 )
 from app.modules.cashbox import integration as cashbox_integration
 from app.modules.identity import repository as identity_repo
+from app.modules.notifications import integration as notifications_integration
 from app.modules.platform import integration as platform_integration
 from app.modules.reports import integration as reports_integration
 
@@ -106,7 +107,7 @@ async def _registrar(
     notes: str | None,
     actor_id: UUID,
     idempotency_key: str,
-) -> CapitalMovementOut:
+) -> tuple[CapitalMovementOut, tuple[UUID, ...]]:
     """El camino común del aporte y del retiro.
 
     Son el mismo documento en dos sentidos —igual que un traslado es una
@@ -120,7 +121,10 @@ async def _registrar(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     if existente is not None:
-        return await get_movement(db, company_id=company_id, movement_id=existente._mapping["id"])
+        movimiento = await get_movement(
+            db, company_id=company_id, movement_id=existente._mapping["id"]
+        )
+        return movimiento, ()
 
     cuenta = await _validar_cuenta(db, company_id=company_id, account_id=account_id)
     fecha = await _fecha_del_documento(db, company_id=company_id, pedida=movement_date)
@@ -209,7 +213,32 @@ async def _registrar(
             "notes": notes or "",
         },
     )
-    return await get_movement(db, company_id=company_id, movement_id=movement_id)
+
+    # A3 (NOTIFICACIONES §2.5, §19): el retiro, a la empresa. Es la única
+    # operación que le quita capital al negocio sin nada a cambio (00054), y
+    # el motivo es obligatorio justo para que alguien pueda preguntar por él.
+    # El aporte no alerta: meter plata no necesita un control el mismo día.
+    alertas: tuple[UUID, ...] = ()
+    if direction == "withdrawal":
+        alertas = await notifications_integration.record_company_alert(
+            db,
+            company_id=company_id,
+            actor_id=actor_id,
+            event_type=notifications_integration.ALERT_CAPITAL_WITHDRAWAL,
+            dedupe_key=f"alert:withdrawal:{movement_id}",
+            entity_type="capital_movement",
+            entity_id=movement_id,
+            payload={
+                "movement_number": number,
+                "amount": str(amount),
+                "account_name": cuenta.name,
+                "kind": kind,
+                "movement_date": fecha.isoformat(),
+                "reason": notes,
+            },
+        )
+    movimiento = await get_movement(db, company_id=company_id, movement_id=movement_id)
+    return movimiento, alertas
 
 
 async def create_contribution(
@@ -227,7 +256,7 @@ async def create_contribution(
     cuadraba), un traslado (que solo sirve si la plata ya está en una cuenta
     de la empresa) o nada, que deja plata en el cajón sin documento.
     """
-    return await _registrar(
+    movimiento, _ = await _registrar(
         db,
         company_id=company_id,
         direction="contribution",
@@ -239,6 +268,7 @@ async def create_contribution(
         actor_id=actor_id,
         idempotency_key=idempotency_key,
     )
+    return movimiento
 
 
 async def create_withdrawal(
@@ -248,8 +278,9 @@ async def create_withdrawal(
     body: WithdrawalIn,
     actor_id: UUID,
     idempotency_key: str,
-) -> CapitalMovementOut:
-    """El dueño saca plata del negocio.
+) -> tuple[CapitalMovementOut, tuple[UUID, ...]]:
+    """El dueño saca plata del negocio. Devuelve el retiro y las entregas de
+    la alerta A3 que nacieron `pending` (NOTIFICACIONES §19).
 
     **No bloquea si no hay utilidad.** El dueño puede retirar su propio
     capital y está en su derecho; lo que la app hace es decirle qué está

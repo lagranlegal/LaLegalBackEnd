@@ -145,7 +145,7 @@ async def create_payment(
     idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     background: BackgroundTasks,
 ) -> PaymentOut:
-    out, notice = await service.create_payment(
+    out, deliveries = await service.create_payment(
         db,
         company_id=user.company_id,
         contract_id=contract_id,
@@ -153,8 +153,8 @@ async def create_payment(
         user=user,
         idempotency_key=idempotency_key,
     )
-    if notice is not None:
-        await notifications_dispatcher.send_after_commit(db, background, notice)
+    # El aviso al cliente (C2/C3) y, con descuento, la alerta A2 (§19).
+    await notifications_dispatcher.send_after_commit(db, background, *deliveries)
     return out
 
 

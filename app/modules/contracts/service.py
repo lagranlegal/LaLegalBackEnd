@@ -670,15 +670,17 @@ async def create_payment(
     body: PaymentCreateIn,
     user: CurrentUser,
     idempotency_key: str,
-) -> tuple[PaymentOut, UUID | None]:
-    """Devuelve el abono y la entrega de su aviso (C2, o C3 si lo saldó) que
-    nació `pending`, o None. Un reintento con la misma llave: el mismo abono y
-    ningún aviso nuevo (NOTIFICACIONES §18.1-2)."""
+) -> tuple[PaymentOut, tuple[UUID | None, ...]]:
+    """Devuelve el abono y las entregas que nacieron `pending`: la de su aviso
+    al cliente (C2, o C3 si lo saldó; o None) y, si hubo descuento por encima
+    del umbral, las de la alerta A2 a la empresa (NOTIFICACIONES §19). Un
+    reintento con la misma llave: el mismo abono y ningún aviso nuevo
+    (§18.1-2)."""
     existing = await repository.find_payment_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     if existing is not None:
-        return _row_to_payment(existing), None
+        return _row_to_payment(existing), ()
 
     contract_row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
     if contract_row is None:
@@ -903,11 +905,37 @@ async def create_payment(
         },
     )
 
+    # A2 (NOTIFICACIONES §2.5, §19): el descuento, a la empresa, si pasa el
+    # umbral. La llave es el ABONO, en su propio espacio (`payment:`) para que
+    # no pueda chocar con la del descuento de una venta. Al cliente no se le
+    # dice nada del descuento: su aviso trae lo que pagó, que ya es neto.
+    alerts: tuple[UUID, ...] = ()
+    if discount_amount > 0:
+        alerts = await notifications_integration.record_company_alert(
+            db,
+            company_id=company_id,
+            actor_id=user.id,
+            event_type=notifications_integration.ALERT_DISCOUNT,
+            dedupe_key=f"alert:discount:payment:{payment_id}",
+            entity_type="contract_payment",
+            entity_id=payment_id,
+            discount_amount=discount_amount,
+            payload={
+                "kind": "payment",
+                "contract_number": m["number"],
+                "receipt_number": receipt_number,
+                "interest_amount": str(interest_amount),
+                "discount_amount": str(discount_amount),
+                "total": str(total),
+                "reason": body.discount_reason,
+            },
+        )
+
     row = await repository.find_payment_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     assert row is not None
-    return _row_to_payment(row), notice
+    return _row_to_payment(row), (notice, *alerts)
 
 
 async def list_payments(

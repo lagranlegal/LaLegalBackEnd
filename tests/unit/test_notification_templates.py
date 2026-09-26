@@ -303,3 +303,129 @@ def test_a_note_only_return_keeps_its_old_wording() -> None:
     text = _render("credit_note_issued", credit_note_number=5, amount="450000.00", sale_number=12)
     assert "nota crédito #5 por $450.000." in text
     assert "efectivo" not in text
+
+
+# ------------------------------------------ alertas a la empresa (A1–A4, §19) ----
+
+_ALERT_BASE = {"actor_name": "Cajero Díaz", "at": "2030-09-01T23:05-05:00"}
+
+
+def test_alert_is_from_prendo_and_names_the_company_in_the_subject() -> None:
+    rendered = templates.render(
+        "alert_sale_voided",
+        {
+            **_ALERT_BASE,
+            "sale_number": 12,
+            "total": "800000.00",
+            "refunded_amount": "800000.00",
+            "sold_at": "2030-09-01",
+            "reason": "Cobro doble",
+        },
+        BRAND,
+    )
+    # §8: el destinatario es un usuario de Prendo; la empresa, en el asunto.
+    assert rendered.from_name == "Prendo"
+    assert rendered.reply_to is None
+    assert rendered.subject == "Alerta · LA GRAN LEGAL · Venta #12 anulada"
+    assert "Cajero Díaz anuló la venta #12." in rendered.text
+    assert "1 sep 2030, 23:05" in rendered.text
+    assert "«Cobro doble»" in rendered.text
+    # Sin `Reply-To` ni teléfono del inquilino: no es un correo de la empresa.
+    assert "300 000 0000" not in rendered.html
+
+
+def test_alert_reason_is_escaped_in_html() -> None:
+    rendered = templates.render(
+        "alert_capital_withdrawal",
+        {
+            **_ALERT_BASE,
+            "movement_number": 3,
+            "amount": "1000000.00",
+            "account_name": "Caja <principal>",
+            "kind": "profit",
+            "movement_date": "2030-09-01",
+            "reason": "<script>alert(1)</script>",
+        },
+        BRAND,
+    )
+    assert "<script>" not in rendered.html
+    assert "&lt;script&gt;" in rendered.html
+    assert "Caja &lt;principal&gt;" in rendered.html
+    assert "Reparto de utilidad" in rendered.text
+
+
+def test_discount_alert_tells_sale_from_payment_and_shows_a_nonzero_threshold() -> None:
+    sale = templates.render(
+        "alert_discount",
+        {
+            **_ALERT_BASE,
+            "kind": "sale",
+            "sale_number": 7,
+            "subtotal": "1000000.00",
+            "discount_amount": "100000.00",
+            "total": "900000.00",
+            "reason": "Frecuente",
+            "threshold": "0.00",
+        },
+        BRAND,
+    )
+    assert sale.subject.endswith("Descuento de $100.000 en la venta #7")
+    # Con umbral 0 no se muestra: «umbral $0» no le dice nada a nadie.
+    assert "Umbral" not in sale.text
+    payment = templates.render(
+        "alert_discount",
+        {
+            **_ALERT_BASE,
+            "kind": "payment",
+            "contract_number": 40,
+            "receipt_number": 91,
+            "interest_amount": "50000.00",
+            "discount_amount": "20000.00",
+            "total": "30000.00",
+            "reason": "Puntual",
+            "threshold": "10000.00",
+        },
+        BRAND,
+    )
+    assert payment.subject.endswith("Descuento de $20.000 en un abono al contrato #40")
+    assert "Recibo: #91" in payment.text
+    assert "Umbral de alerta: $10.000" in payment.text
+
+
+def test_reopen_alert_says_what_the_undone_close_said() -> None:
+    rendered = templates.render(
+        "alert_cash_reopened",
+        {
+            **_ALERT_BASE,
+            "session_date": "2030-09-01",
+            "closed_at": "2030-09-01T19:02-05:00",
+            "counted_cash": "480000.00",
+            "difference": "-20000.00",
+            "reason": "Faltó un gasto",
+        },
+        BRAND,
+    )
+    assert rendered.subject.endswith("Caja del 1 sep 2030 reabierta")
+    assert "Se había cerrado el: 1 sep 2030, 19:02" in rendered.text
+    assert "Faltante de ese cierre (se revierte): $20.000" in rendered.text
+    assert "Contado en ese cierre: $480.000" in rendered.text
+
+
+def test_alert_never_renders_customer_data_a_producer_slipped_in() -> None:
+    rendered = templates.render(
+        "alert_sale_voided",
+        {
+            **_ALERT_BASE,
+            "sale_number": 1,
+            "total": "10.00",
+            "reason": "x",
+            "customer_name": "Juana Pérez",
+            "doc_number": "1032456789",
+            "item_description": "Cadena de oro 18k",
+        },
+        BRAND,
+    )
+    for body in (rendered.html, rendered.text, rendered.subject):
+        assert "Juana" not in body
+        assert "1032456789" not in body
+        assert "Cadena" not in body

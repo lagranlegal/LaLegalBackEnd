@@ -77,6 +77,10 @@ class NotificationSettingsOut(BaseModel):
     #: A quién le llega hoy el resumen: usuarios activos con el permiso
     #: `notifications.receive_digest`.
     digest_recipients: list[DigestRecipientOut]
+    #: A quién le llegan hoy las alertas inmediatas (A1–A4, §2.5, fase 7):
+    #: usuarios activos con `notifications.receive_alerts`. Aditivo. Ojo: la
+    #: alerta NO le llega a quien hizo el acto, aunque esté en esta lista.
+    alert_recipients: list[DigestRecipientOut]
 
 
 class ThresholdsIn(BaseModel):

@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,10 +93,11 @@ async def create_sale(
     body: SaleCreateIn,
     user: CurrentUser,
     idempotency_key: str,
-) -> tuple[SaleOut, UUID | None]:
-    """Devuelve la venta y la entrega del comprobante C6 que nació `pending`,
-    o None (sin cliente no hay aviso; un reintento tampoco genera otro —
-    NOTIFICACIONES §18)."""
+) -> tuple[SaleOut, tuple[UUID | None, ...]]:
+    """Devuelve la venta y las entregas que nacieron `pending`: la del
+    comprobante C6 (o None: sin cliente no hay aviso, NOTIFICACIONES §18) y,
+    si hubo descuento por encima del umbral, las de la alerta A2 a la empresa
+    (§19). Un reintento no genera ninguna: devuelve la venta que ya existía."""
     existing = await repository.find_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
@@ -110,7 +112,7 @@ async def create_sale(
             _row_to_sale(
                 existing, [_row_to_line(r) for r in lines], credit_note_redeemed_amount=redeemed
             ),
-            None,
+            (),
         )
 
     items = []
@@ -343,13 +345,37 @@ async def create_sale(
         payload={"sale_number": number, "total": str(total)},
     )
 
+    # A2 (NOTIFICACIONES §2.5, §19): el descuento, a la empresa, si pasa el
+    # umbral. Después del aviso al cliente: la alerta es lo ÚLTIMO de la
+    # transacción, y si algo la hiciera fallar no queda ni la venta.
+    alerts: tuple[UUID, ...] = ()
+    if discount_amount > 0:
+        alerts = await notifications_integration.record_company_alert(
+            db,
+            company_id=company_id,
+            actor_id=user.id,
+            event_type=notifications_integration.ALERT_DISCOUNT,
+            dedupe_key=f"alert:discount:sale:{sale_id}",
+            entity_type="sale",
+            entity_id=sale_id,
+            discount_amount=discount_amount,
+            payload={
+                "kind": "sale",
+                "sale_number": number,
+                "subtotal": str(subtotal_sum),
+                "discount_amount": str(discount_amount),
+                "total": str(total),
+                "reason": body.discount_reason,
+            },
+        )
+
     row = await repository.get_sale(db, company_id=company_id, sale_id=sale_id)
     assert row is not None
     lines = await repository.list_sale_lines(db, company_id=company_id, sale_id=sale_id)
     redeemed = redeemed_amount if body.credit_note_id is not None else None
     return (
         _row_to_sale(row, [_row_to_line(r) for r in lines], credit_note_redeemed_amount=redeemed),
-        notice,
+        (notice, *alerts),
     )
 
 
@@ -422,10 +448,11 @@ async def list_sales(
 
 async def void_sale(
     db: AsyncSession, *, company_id: UUID, sale_id: UUID, reason: str, actor_id: UUID
-) -> tuple[SaleOut, UUID | None]:
-    """Devuelve la venta anulada y la entrega del aviso C7 que nació `pending`,
-    o None (NOTIFICACIONES §18). Anular dos veces es `409` (la venta ya no
-    está `completed`), así que el reintento no llega al aviso."""
+) -> tuple[SaleOut, tuple[UUID | None, ...]]:
+    """Devuelve la venta anulada y las entregas que nacieron `pending`: la del
+    aviso C7 al cliente (o None, NOTIFICACIONES §18) y las de la alerta A1 a
+    la empresa (§19). Anular dos veces es `409` (la venta ya no está
+    `completed`), así que el reintento no llega a ninguno de los dos."""
     row = await repository.get_sale_for_update(db, company_id=company_id, sale_id=sale_id)
     if row is None:
         raise NotFoundError("La venta no existe en esta empresa.")
@@ -609,7 +636,32 @@ async def void_sale(
         },
     )
 
-    return await get_sale(db, company_id=company_id, sale_id=sale_id), notice
+    # A1 (NOTIFICACIONES §2.5, §19): la anulación, a la empresa. El motivo SÍ
+    # va (al cliente no, C7 de arriba): quien la recibe es quien puede
+    # preguntar por él. Un venta se anula una sola vez, así que la venta es la
+    # llave.
+    # El día de la venta, en la zona de la EMPRESA (una venta de las 8 p. m.
+    # en Bogotá ya es «mañana» en UTC).
+    tz = ZoneInfo(await platform_integration.get_company_timezone(db, company_id=company_id))
+    sold_at = row._mapping["sold_at"]
+    alerts = await notifications_integration.record_company_alert(
+        db,
+        company_id=company_id,
+        actor_id=actor_id,
+        event_type=notifications_integration.ALERT_SALE_VOIDED,
+        dedupe_key=f"alert:void:{sale_id}",
+        entity_type="sale",
+        entity_id=sale_id,
+        payload={
+            "sale_number": row._mapping["number"],
+            "total": str(row._mapping["total"]),
+            "refunded_amount": str(refunded),
+            "sold_at": sold_at.astimezone(tz).date().isoformat() if sold_at else None,
+            "reason": reason,
+        },
+    )
+
+    return await get_sale(db, company_id=company_id, sale_id=sale_id), (notice, *alerts)
 
 
 # =========================================================================

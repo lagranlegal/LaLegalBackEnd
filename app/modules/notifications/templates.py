@@ -16,7 +16,7 @@ renderiza. Un test lo verifica sobre el render, no sobre la plantilla.
 
 import html
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -778,6 +778,146 @@ def render_customer(event_type: str, payload: dict[str, Any], branding: Branding
     )
 
 
+# ------------------------------------------- alertas a la empresa (A1–A4) ----
+_WITHDRAWAL_KIND = {"profit": "Reparto de utilidad", "capital_return": "Devolución de capital"}
+
+
+def _when(value: Any) -> str:
+    """`2030-09-03T10:00-05:00` → `3 sep 2030, 10:00`. La hora ya viene en la
+    zona de la empresa (la pone `record_company_alert`): acá no se convierte."""
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return str(value)
+    return f"{short_date(moment.date())}, {moment.strftime('%H:%M')}"
+
+
+def _alert_lines(event_type: str, p: dict[str, Any]) -> tuple[str, str, list[DigestRow]]:
+    """(titular, frase, renglones «dato: valor»). Solo lee claves conocidas —
+    ni el cliente ni los artículos llegan acá (§9.1): el número del documento
+    es con lo que se pregunta."""
+    who = str(p.get("actor_name") or "Un usuario")
+    if event_type == "alert_sale_voided":
+        n = p["sale_number"]
+        rows = [DigestRow("Total de la venta", amount=money(p["total"]))]
+        if _positive(p.get("refunded_amount")):
+            rows.append(DigestRow("Salió de la caja", amount=money(p["refunded_amount"])))
+        if p.get("sold_at"):
+            rows.append(DigestRow("Vendida el", amount=short_date(p["sold_at"])))
+        return f"Venta #{n} anulada", f"{who} anuló la venta #{n}.", rows
+    if event_type == "alert_discount":
+        amount = money(p["discount_amount"])
+        if p.get("kind") == "payment":
+            n = p["contract_number"]
+            rows = [
+                DigestRow("Recibo", amount=f"#{p['receipt_number']}"),
+                DigestRow("Interés del abono", amount=money(p["interest_amount"])),
+                DigestRow("Descuento", amount=amount),
+                DigestRow("Cobrado", amount=money(p["total"])),
+            ]
+            headline = f"Descuento de {amount} en un abono al contrato #{n}"
+            sentence = f"{who} concedió un descuento de {amount} en un abono al contrato #{n}."
+        else:
+            n = p["sale_number"]
+            rows = [
+                DigestRow("Antes del descuento", amount=money(p["subtotal"])),
+                DigestRow("Descuento", amount=amount),
+                DigestRow("Cobrado", amount=money(p["total"])),
+            ]
+            headline = f"Descuento de {amount} en la venta #{n}"
+            sentence = f"{who} concedió un descuento de {amount} en la venta #{n}."
+        if _positive(p.get("threshold")):
+            rows.append(DigestRow("Umbral de alerta", amount=money(p["threshold"]), muted=True))
+        return headline, sentence, rows
+    if event_type == "alert_capital_withdrawal":
+        amount = money(p["amount"])
+        rows = [
+            DigestRow("Retiro", amount=f"#{p['movement_number']}"),
+            DigestRow("Monto", amount=amount),
+            DigestRow("Cuenta", amount=str(p["account_name"])),
+            DigestRow("Clase", amount=_WITHDRAWAL_KIND.get(str(p.get("kind")), str(p.get("kind")))),
+            DigestRow("Fecha del retiro", amount=short_date(p["movement_date"])),
+        ]
+        return (
+            f"Retiro de capital por {amount}",
+            f"{who} registró un retiro de capital del dueño por {amount}.",
+            rows,
+        )
+    if event_type == "alert_cash_reopened":
+        day = short_date(p["session_date"])
+        rows = [DigestRow("Caja del", amount=day)]
+        if p.get("closed_at"):
+            rows.append(DigestRow("Se había cerrado el", amount=_when(p["closed_at"])))
+        if p.get("counted_cash") is not None:
+            rows.append(DigestRow("Contado en ese cierre", amount=money(p["counted_cash"])))
+        if p.get("difference") is not None and Decimal(str(p["difference"])) != 0:
+            diff = Decimal(str(p["difference"]))
+            kind = "Sobrante" if diff > 0 else "Faltante"
+            rows.append(DigestRow(f"{kind} de ese cierre (se revierte)", amount=money(abs(diff))))
+        return (
+            f"Caja del {day} reabierta",
+            f"{who} reabrió la caja del {day}. El cierre y su acta quedaron sin efecto "
+            "hasta que se vuelva a cerrar.",
+            rows,
+        )
+    raise ValueError(f"Sin plantilla para la alerta {event_type!r}")
+
+
+def render_alert(event_type: str, payload: dict[str, Any], branding: Branding) -> RenderedEmail:
+    """A1–A4 (docs/NOTIFICACIONES.md §2.5, §19). **Remitente y marca: Prendo**,
+    como el resumen (§8): el destinatario es un usuario de Prendo. La empresa va
+    en el asunto, porque quien trabaja en dos compraventas tiene que saber de
+    cuál es la alerta.
+
+    Lo que dice es lo que alguien necesita para PREGUNTAR el mismo día: quién,
+    qué, cuánto, cuándo y el motivo que escribió. El motivo va porque acá el
+    lector es la empresa —al cliente no se le dice (C7, §18.2)—, y va
+    escapado y entre comillas: es texto libre de un empleado."""
+    company = branding.company_name
+    headline, sentence, rows = _alert_lines(event_type, payload)
+    rows = (
+        [DigestRow("Quién", amount=str(payload.get("actor_name") or "—"))]
+        + ([DigestRow("Cuándo", amount=_when(payload["at"]))] if payload.get("at") else [])
+        + rows
+    )
+    reason = str(payload.get("reason") or "").strip()
+    subject = f"Alerta · {company} · {headline}"
+    why = (
+        f"La recibe porque su rol en {company} tiene el permiso «Recibir por correo las "
+        "alertas inmediatas». A quien hizo el acto no le llega. Quien administra la empresa "
+        "puede quitar el permiso en Identidad → Roles o apagar esta alerta en Configuración."
+    )
+    table = "".join(_digest_row_html(r, first=i == 0) for i, r in enumerate(rows))
+    html_rows = [
+        _tr(_p(sentence, last=True), top=20),
+        _tr(
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+            f"{table}</table>"
+        ),
+    ]
+    if reason:
+        html_rows.append(_tr(_notice(f"{_strong('Motivo:')} «{_esc(reason)}»")))
+    text_lines = [PLATFORM_NAME.upper(), "", headline, company, "", sentence, ""]
+    text_lines.extend(f"- {r.plain()}" for r in rows)
+    if reason:
+        text_lines.extend(["", f"Motivo: «{reason}»"])
+    text_lines.extend(["", "---", why, "", f"{PLATFORM_TAGLINE} · prendo.com.co"])
+    return RenderedEmail(
+        from_name=PLATFORM_NAME,
+        subject=subject,
+        html=_layout(
+            brand_label=PLATFORM_NAME,
+            title=headline,
+            meta=company,
+            rows_html=html_rows,
+            footer_html=[_esc(why)],
+            tagline=PLATFORM_TAGLINE,
+        ),
+        text="\n".join(text_lines),
+        reply_to=None,
+    )
+
+
 # ------------------------------------------------ de la plataforma (P1) ----
 
 #: Lo único que puede llevar el enlace de un correo de invitación. Es la forma
@@ -888,6 +1028,8 @@ def render(event_type: str, payload: dict[str, Any], branding: Branding) -> Rend
         return render_digest(event_type, payload, branding)
     if et.audience == "customer":
         return render_customer(event_type, payload, branding)
+    if et.family == "alert":
+        return render_alert(event_type, payload, branding)
     if event_type == "user_invitation":
         return render_user_invitation(payload, branding)
     raise ValueError(f"El evento {event_type!r} todavía no tiene plantilla (fase posterior).")
