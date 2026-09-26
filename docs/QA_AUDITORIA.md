@@ -45,6 +45,41 @@
 
 ---
 
+## ✅ F21-38 · MEDIO — «Solo se puede ampliar una vez el contrato»: la pantalla escondía la ampliación que el backend aceptaba (25/09/2026 · cerrado)
+
+**Lo que reportó el dueño:** un contrato ampliado ya no se deja ampliar otra vez.
+
+**Qué NO era.** El backend nunca lo prohibió: `service.quote_extension` (`app/modules/contracts/service.py`) no mira
+si el contrato es un sucesor, y `RECARGOS.md` §9.6 recomienda expresamente cadenas «sin límite». La cadena
+A → B → C ya tenía test (`test_la_cadena_conserva_la_raiz_al_encadenar_recargos`) y ahora hay uno que además fija
+que todos quedan `superseded` salvo el último (`test_una_cadena_A_B_C_deja_superseded_todo_menos_el_ultimo`), que
+es lo que `scripts/qa/verificar_cadenas.py` vigila en los datos vivos (F21-10).
+
+**Lo que sí lo producía — dos caminos, uno defecto y uno diseño:**
+
+1. **Defecto (el frente).** La primera ampliación casi siempre se lleva el cupo ENTERO, así que el sucesor llega con
+   `blocked_reason = EXTENSION_NO_HEADROOM`. `ExtendLoanPanel` trataba los cinco motivos igual y escondía el
+   formulario — **también para quien tiene `contracts.override_ltv`**, que por §8.1 puede prestar por encima del
+   avalúo con advertencia, y a quien `extend_loan` le acepta el `POST` (solo rechaza `CONTRACT_CLOSED`,
+   `EXTENSION_WINDOW_CLOSED`, `CONTRACT_INTEREST_OVERDUE` y `CONTRACT_WITHOUT_APPRAISAL`; el cupo lo gobierna el
+   permiso). La misma regla se comportaba distinto en la pantalla y en la API, que es exactamente lo que §8.1 quería
+   evitar. **Arreglo:** la decisión salió a `frontend-starter/src/features/contracts/extensionBlock.ts`; con el
+   permiso y sin cupo el formulario sigue abierto con la advertencia. Test que falló primero con la lógica vieja
+   (5 de 8): `frontend-starter/tests/extend-loan-block.test.ts`. Del lado del backend,
+   `test_sin_cupo_el_sucesor_se_amplia_con_override_ltv` fija el contrato: con el permiso `201` y `ltv_warning`, sin
+   él `403` que nombra el permiso.
+2. **Diseño, y se queda.** La ventana se cuenta desde el contrato **original** de la cadena (§3,
+   `rules.quote_extension`, `service.quote_extension` vía `repository.get_root_start_date`): si ampliar la
+   reiniciara, un recargo de $1 el último día abriría otra, y así sin fin. Es el caso del ejemplo vivo de ZZ QA
+   (#9 → #10: ventana del 22/08 al 19/09). **Lo que estaba mal era el mensaje**: «Pasó el plazo para ampliar este
+   préstamo», dicho en un contrato nacido el 11/09, se leía como «solo una vez». Ahora nombra al original, su fecha,
+   cuándo venció y por qué ampliar no la reinicia.
+
+**Qué hace falta para desplegarlo:** solo el front. El nombre del contrato original en el mensaje sale de
+`GET /contracts/{id}/chain` (nuevo, mismo día); con un backend viejo el mensaje cae a la versión sin nombre, sin error.
+
+---
+
 ## ✅ F21-05 · BAJO — No había botón para volver al documento de fábrica (25/09/2026 · cerrado)
 
 **Cerrado como feature, que es lo que era** (ver «Corregido: F21-05 estaba mal descrito» más abajo): el backend emite

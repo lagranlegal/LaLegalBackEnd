@@ -271,3 +271,41 @@ Ninguna se puede elegir hoy: **hasta que no haya recargos reales no hay con qué
 - **Integración:** recargo sin caja abierta → `409 CASH_SESSION_NOT_OPEN`; con meses adeudados → `409 CONTRACT_INTEREST_OVERDUE`; fuera de ventana → `409`; el `cash_movement` es **solo** el delta; las prendas viejas quedan `transferred` y las del sucesor `in_custody`; reintento con la misma `Idempotency-Key` → el mismo contrato sucesor; `GET /settlement` sobre un `superseded` → 404.
 - **Permiso:** rol sin `contracts.extend_loan` → 403 (y el endpoint aparece en el mapa de `scripts/qa/map_endpoints.py`).
 - **Auditoría:** verificada en test, con el código de error en `API_GUIDE.md` §15 — el catálogo se compara con el código en las dos direcciones (`tests/unit/test_error_catalog.py`), así que un código nuevo sin documentar rompe la suite.
+
+## 12. La cadena, recorrible — y «solo se puede ampliar una vez» (25/09/2026)
+
+Dos reportes del dueño el mismo día, los dos sobre la cadena.
+
+### 12.1 · El contrato ampliado no decía a cuál pasó la deuda
+
+§6 pedía *«Ampliado el 09/09/2026 → contrato #28»*, con enlace. Lo construido decía *«fue ampliado… la deuda vive
+en el contrato que lo sucede»* y nada más, porque **`ContractOut` solo mira hacia atrás**: el sucesor tiene
+`parent_contract_id`, el viejo no tiene ningún puntero al nuevo.
+
+**`GET /contracts/{id}/chain`** (aditivo, sin migración): la cadena entera de la raíz al último, cada eslabón con
+número, estado efectivo, `extended_on` y `extension_amount`. Se arma por `root_contract_id` en **una** consulta.
+Se eligió un endpoint y no agregar `successor_*` a `ContractOut` porque con A → B → C nombrar al vecino no alcanza:
+desde A, «pasó a B» manda al usuario a otro contrato cerrado. La pantalla dice a cuál pasó, cuándo, por cuánto, en
+qué estado está, **y dónde vive la deuda hoy** si la cadena siguió; debajo, la historia completa con enlaces.
+
+El sucesor de un eslabón es **el que lo tiene como `parent_contract_id`**, no «el siguiente de la lista»: es la
+misma lección de F21-10 (`root_contract_id` no sirve para eso). Ante dos hijos —bifurcación, hoy en cero— gana el
+último, igual que `find_successor_contract`.
+
+### 12.2 · «Solo se puede ampliar una vez»: no lo prohíbe el diseño, lo parecía la pantalla (F21-38)
+
+El backend nunca limitó la cadena (§9.6: sin límite). Lo que el dueño vio salía de dos motivos de
+`extension-options`, que **no son del mismo tipo**:
+
+- **`EXTENSION_NO_HEADROOM` es consultivo.** La primera ampliación casi siempre se lleva el cupo entero, así que el
+  sucesor llega sin cupo. Por §8.1, quien tiene `contracts.override_ltv` presta por encima con advertencia — y el
+  `POST` siempre lo aceptó. El panel escondía el formulario igual. **Era un defecto y se corrigió en el front.**
+- **`EXTENSION_WINDOW_CLOSED` es un bloqueo duro, y se queda.** La ventana se mide desde la raíz (§3): ampliar no la
+  reinicia, o un recargo de $1 el último día abriría otra para siempre. Lo que faltaba era decirlo: desde un
+  sucesor nacido hace dos días, «pasó el plazo» se lee como «solo una vez». El mensaje ahora nombra al contrato
+  original, su fecha y cuándo venció.
+
+**Si el negocio quiere ventanas más largas**, la palanca ya existe y es por empresa y por contrato:
+`company.settings.extension_window_days` (el default) y el campo «Días para ampliar» al crear. No hace falta tocar
+la regla.
+
