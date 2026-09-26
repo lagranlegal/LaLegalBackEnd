@@ -302,6 +302,36 @@ async def find_successor_contract(
     return result.first()
 
 
+async def list_chain(db: AsyncSession, *, company_id: UUID, contract_id: UUID) -> list[Row[Any]]:
+    """Todos los contratos de la cadena a la que pertenece `contract_id`, de
+    la raíz al último.
+
+    Se arma por `root_contract_id` (que todo sucesor tiene apuntando al
+    PRIMERO) y no recorriendo `parent_contract_id` hacia atrás: una consulta
+    en vez de una por eslabón. Para un contrato que nunca se amplió devuelve
+    solo a él. El orden es por `created_at` —cada sucesor nace después de su
+    padre, en la misma transacción que lo cierra— con `number` de desempate.
+    """
+    result = await db.execute(
+        text(
+            f"""
+            with raiz as (
+              select coalesce(root_contract_id, id) as id
+              from public.contract
+              where company_id = :cid and id = :id
+            )
+            select {_CONTRACT_COLUMNS}
+            from public.contract c
+            where c.company_id = :cid
+              and (c.id = (select id from raiz) or c.root_contract_id = (select id from raiz))
+            order by c.created_at, c.number
+            """
+        ),
+        {"cid": str(company_id), "id": str(contract_id)},
+    )
+    return list(result.all())
+
+
 async def get_root_start_date(db: AsyncSession, *, company_id: UUID, contract_id: UUID) -> date:
     """`start_date` de la RAÍZ de la cadena — el ancla de la ventana de
     recargo. Para un contrato sin cadena es su propia fecha."""

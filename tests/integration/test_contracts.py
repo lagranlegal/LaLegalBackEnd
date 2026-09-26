@@ -4,6 +4,7 @@ ready-for-auction. Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -1470,3 +1471,248 @@ async def test_creating_a_contract_writes_the_contract_email_basis(
             )
         ).scalar_one()
     assert basis == "contract"
+
+
+# --------------------------------------------------------------------------
+# La cadena, recorrible (RECARGOS.md §6): A → B → C
+# --------------------------------------------------------------------------
+def _ampliar(
+    client: TestClient, tenant: dict, contract_id: str, amount: str, token: str = "full_token"
+):
+    return client.post(
+        f"/api/v1/contracts/{contract_id}/extend-loan",
+        headers=_headers(tenant[token], idempotency_key=str(uuid4())),
+        json={"amount": amount, "payment_method": "cash"},
+    )
+
+
+async def test_una_cadena_A_B_C_deja_superseded_todo_menos_el_ultimo(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Ampliar un contrato que YA es sucesor es un caso normal, no un borde:
+    la ventana anclada a la raíz (§3) es lo que acota la cadena, no un límite
+    de "una vez". Y cada eslabón queda `superseded` salvo el último — lo que
+    `scripts/qa/verificar_cadenas.py` vigila en los datos vivos (F21-10)."""
+    headers = _headers(contract_tenant["full_token"])
+    a = await _contrato_ampliable(client, contract_tenant)
+    b = _ampliar(client, contract_tenant, a["id"], "100000.00")
+    assert b.status_code == 201, b.text
+    c = _ampliar(client, contract_tenant, b.json()["id"], "150000.00")
+    assert c.status_code == 201, c.text
+    b, c = b.json(), c.json()
+
+    estados = {
+        x["id"]: client.get(f"/api/v1/contracts/{x['id']}", headers=headers).json()["status"]
+        for x in (a, b, c)
+    }
+    assert estados == {a["id"]: "superseded", b["id"]: "superseded", c["id"]: "active"}
+
+    # C todavía puede ampliarse: 2.000.000 × 70 % − 1.250.000 = 150.000.
+    cupo = client.get(f"/api/v1/contracts/{c['id']}/extension-options", headers=headers).json()
+    assert cupo["blocked_reason"] is None
+    assert cupo["available"] == "150000.00"
+
+    # La cadena se lee igual desde cualquier eslabón, de la raíz al último.
+    hoy = str(await get_company_today_for(contract_tenant["company_id"]))
+    for desde in (a, b, c):
+        cadena = client.get(f"/api/v1/contracts/{desde['id']}/chain", headers=headers)
+        assert cadena.status_code == 200, cadena.text
+        eslabones = cadena.json()
+        assert [e["id"] for e in eslabones] == [a["id"], b["id"], c["id"]]
+    raiz, medio, ultimo = eslabones
+    assert raiz["extended_on"] is None and raiz["parent_contract_id"] is None
+    assert medio["parent_contract_id"] == a["id"]
+    assert (medio["extended_on"], medio["extension_amount"]) == (hoy, "100000.00")
+    assert (ultimo["extended_on"], ultimo["extension_amount"]) == (hoy, "150000.00")
+    assert [e["status"] for e in eslabones] == ["superseded", "superseded", "active"]
+    assert [e["number"] for e in eslabones] == [a["number"], b["number"], c["number"]]
+
+
+async def test_la_cadena_de_un_contrato_sin_ampliar_es_el_mismo(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    solo = await _contrato_ampliable(client, contract_tenant)
+    cadena = client.get(
+        f"/api/v1/contracts/{solo['id']}/chain", headers=_headers(contract_tenant["full_token"])
+    )
+    assert cadena.status_code == 200, cadena.text
+    assert [e["id"] for e in cadena.json()] == [solo["id"]]
+    ajeno = client.get(
+        f"/api/v1/contracts/{uuid4()}/chain", headers=_headers(contract_tenant["full_token"])
+    )
+    assert ajeno.status_code == 404
+    assert ajeno.json()["code"] == "NOT_FOUND"
+
+
+async def test_sin_cupo_el_sucesor_se_amplia_con_override_ltv(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El caso que se reportó como «solo se puede ampliar una vez»: la primera
+    ampliación suele llevarse TODO el cupo, y el sucesor queda con
+    `EXTENSION_NO_HEADROOM`. Ese motivo no es un bloqueo duro: por §8.1 quien
+    tiene `contracts.override_ltv` presta por encima del avalúo con
+    advertencia, igual que al crear. Quien no lo tiene recibe el 403 que
+    nombra el permiso."""
+    a = await _contrato_ampliable(client, contract_tenant)
+    b = _ampliar(client, contract_tenant, a["id"], "400000.00").json()
+    cupo = client.get(
+        f"/api/v1/contracts/{b['id']}/extension-options",
+        headers=_headers(contract_tenant["full_token"]),
+    ).json()
+    assert cupo["blocked_reason"] == "EXTENSION_NO_HEADROOM"
+    assert cupo["available"] == "0.00"
+
+    sin_permiso = _ampliar(client, contract_tenant, b["id"], "100000.00", token="limited_token")
+    assert sin_permiso.status_code == 403, sin_permiso.text
+    assert sin_permiso.json()["code"] == "PERMISSION_DENIED"
+    assert sin_permiso.json()["details"]["permission"] == "contracts.override_ltv"
+
+    con_permiso = _ampliar(client, contract_tenant, b["id"], "100000.00")
+    assert con_permiso.status_code == 201, con_permiso.text
+    assert con_permiso.json()["ltv_warning"] is True
+    assert con_permiso.json()["parent_contract_id"] == b["id"]
+
+
+# --------------------------------------------------------------------------
+# La casilla de avisos al crear el contrato (NOTIFICACIONES §9.2-f)
+# --------------------------------------------------------------------------
+async def _cliente(customer_id) -> Any:
+    async with AsyncSessionLocal() as session:
+        return (
+            await session.execute(
+                text(
+                    "select email, email_basis, email_consent_at, email_consent_source "
+                    "from public.customer where id = :id"
+                ),
+                {"id": str(customer_id)},
+            )
+        ).first()
+
+
+async def _crear_con(client: TestClient, tenant: dict, abrir_caja: bool = True, **extra: object):
+    if abrir_caja:
+        await _open_cash_session(company_id=tenant["company_id"], register_id=tenant["register_id"])
+    return client.post(
+        "/api/v1/contracts",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(tenant, **extra),
+    )
+
+
+async def test_la_casilla_del_contrato_registra_consent_con_origen_contract_form(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """El correo se carga ahí mismo y la autorización queda en la MISMA
+    operación que el contrato, con su origen y auditada como una decisión de
+    persona (§7)."""
+    creado = await _crear_con(
+        client,
+        contract_tenant,
+        customer_email="cliente.nuevo@example.com",
+        customer_email_consent=True,
+    )
+    assert creado.status_code == 201, creado.text
+    fila = await _cliente(contract_tenant["customer_id"])
+    assert fila.email == "cliente.nuevo@example.com"
+    assert fila.email_basis == "consent"
+    assert fila.email_consent_source == "contract_form"
+    assert fila.email_consent_at is not None
+
+    async with AsyncSessionLocal() as session:
+        auditoria = (
+            await session.execute(
+                text(
+                    "select after from public.audit_log where company_id = :cid "
+                    "and action = 'update_customer' and entity_id = :id"
+                ),
+                {
+                    "cid": str(contract_tenant["company_id"]),
+                    "id": str(contract_tenant["customer_id"]),
+                },
+            )
+        ).scalar_one()
+    assert auditoria["email_consent_source"] == "contract_form"
+    assert auditoria["email"] == "cliente.nuevo@example.com"
+
+
+async def test_el_correo_sin_casilla_deja_la_base_contract(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Dar el correo no es autorizar: sin casilla, el cliente queda con la base
+    del contrato vivo que acaba de firmar, no con `consent`."""
+    creado = await _crear_con(client, contract_tenant, customer_email="solo.correo@example.com")
+    assert creado.status_code == 201, creado.text
+    fila = await _cliente(contract_tenant["customer_id"])
+    assert fila.email == "solo.correo@example.com"
+    assert fila.email_basis == "contract"
+    assert fila.email_consent_at is None and fila.email_consent_source is None
+
+
+async def test_la_casilla_sin_correo_se_rechaza_y_no_nace_el_contrato(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    rechazo = await _crear_con(client, contract_tenant, customer_email_consent=True)
+    assert rechazo.status_code == 422, rechazo.text
+    body = rechazo.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert any("customer_email_consent" in e["loc"] for e in body["details"]["errors"]), body
+    async with AsyncSessionLocal() as session:
+        cuantos = (
+            await session.execute(
+                text("select count(*) from public.contract where company_id = :cid"),
+                {"cid": str(contract_tenant["company_id"])},
+            )
+        ).scalar_one()
+    assert cuantos == 0
+    assert (await _cliente(contract_tenant["customer_id"])).email_basis is None
+
+
+async def test_el_formulario_del_contrato_no_cambia_un_correo_existente(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Cambiar la dirección de alguien es una edición de su ficha (con su
+    `before`), no un efecto lateral de prestarle plata. El MISMO correo, en
+    otras mayúsculas, sí pasa: no es un cambio."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.customer set email = 'ya@example.com' where id = :id"),
+            {"id": str(contract_tenant["customer_id"])},
+        )
+    otro = await _crear_con(client, contract_tenant, customer_email="otro@example.com")
+    assert otro.status_code == 422, otro.text
+    assert any("customer_email" in e["loc"] for e in otro.json()["details"]["errors"])
+
+    mismo = await _crear_con(
+        client,
+        contract_tenant,
+        abrir_caja=False,
+        customer_email="YA@example.com",
+        customer_email_consent=True,
+    )
+    assert mismo.status_code == 201, mismo.text
+    fila = await _cliente(contract_tenant["customer_id"])
+    assert fila.email == "ya@example.com"
+    assert fila.email_basis == "consent"
+
+
+async def test_una_autorizacion_previa_conserva_su_fecha_y_su_origen(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """La fecha de la autorización ES la prueba (§9.2-g): volver a marcar la
+    casilla en otro contrato no la reescribe."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "update public.customer set email = 'ya@example.com', email_basis = 'consent', "
+                "email_basis_at = now() - interval '30 days', "
+                "email_consent_at = now() - interval '30 days', email_consent_source = 'counter' "
+                "where id = :id"
+            ),
+            {"id": str(contract_tenant["customer_id"])},
+        )
+    antes = await _cliente(contract_tenant["customer_id"])
+    creado = await _crear_con(client, contract_tenant, customer_email_consent=True)
+    assert creado.status_code == 201, creado.text
+    despues = await _cliente(contract_tenant["customer_id"])
+    assert despues.email_consent_at == antes.email_consent_at
+    assert despues.email_consent_source == "counter"

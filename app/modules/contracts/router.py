@@ -9,6 +9,7 @@ from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.contracts import service
 from app.modules.contracts.schemas import (
+    ContractChainLinkOut,
     ContractCreateIn,
     ContractExtendIn,
     ContractImportIn,
@@ -187,6 +188,19 @@ async def get_settlement_info(
     return await service.get_settlement_info(
         db, company_id=user.company_id, contract_id=contract_id
     )
+
+
+@router.get("/{contract_id}/chain", response_model=list[ContractChainLinkOut])
+async def get_contract_chain(
+    contract_id: UUID,
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> list[ContractChainLinkOut]:
+    """La cadena de ampliaciones a la que pertenece el contrato, de la raíz
+    al último (docs/RECARGOS.md §6). Un contrato que nunca se amplió devuelve
+    una lista de uno: él mismo. El sucesor de un eslabón es el que lo tiene
+    como `parent_contract_id`."""
+    return await service.get_contract_chain(db, company_id=user.company_id, contract_id=contract_id)
 
 
 @router.get("/{contract_id}/extension-options", response_model=ExtensionQuoteOut)

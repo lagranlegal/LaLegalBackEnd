@@ -22,6 +22,7 @@ from app.modules.cashbox import integration as cashbox_integration
 from app.modules.catalogs import repository as catalogs_repo
 from app.modules.contracts import repository, rules
 from app.modules.contracts.schemas import (
+    ContractChainLinkOut,
     ContractCreateIn,
     ContractExtendIn,
     ContractImportIn,
@@ -180,6 +181,16 @@ async def create_contract(
     )
     if customer is None:
         raise NotFoundError("El cliente no existe en esta empresa.")
+    # El correo y la casilla de avisos del formulario (NOTIFICACIONES
+    # §9.2-f). Se validan PRIMERO: es lo que el asesor corrige en un segundo,
+    # y rechazarlo después del resto haría rehacer todo el préstamo.
+    await customers_integration.check_contract_form_email(
+        db,
+        company_id=company_id,
+        customer_id=body.customer_id,
+        email=body.customer_email,
+        consent=body.customer_email_consent,
+    )
 
     categories = []
     for item in body.items:
@@ -332,6 +343,18 @@ async def create_contract(
         entity_type="contract",
         entity_id=contract_id,
         after={"number": number, "principal": str(body.principal)},
+    )
+    # §9.2-f: lo que el formulario capturó del cliente, en ESTA transacción —
+    # si el contrato no nace, la autorización tampoco. Va antes de la base
+    # `contract` para que el correo recién cargado ya cuente, y antes del
+    # aviso C1 para que ese aviso tenga a quién salir.
+    await customers_integration.record_contract_form_email(
+        db,
+        company_id=company_id,
+        customer_id=body.customer_id,
+        email=body.customer_email,
+        consent=body.customer_email_consent,
+        acting_user_id=created_by,
     )
     # NOTIFICACIONES §9.2-a: un contrato vivo es la base `contract` del
     # correo del cliente — si tiene correo y todavía no tiene base.
@@ -541,6 +564,53 @@ async def get_contract(db: AsyncSession, *, company_id: UUID, contract_id: UUID)
 
     items = await repository.list_contract_items(db, company_id=company_id, contract_id=contract_id)
     return _row_to_contract(row, _row_to_items(items))
+
+
+async def get_contract_chain(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID
+) -> list[ContractChainLinkOut]:
+    """La cadena de ampliaciones de un contrato, de la raíz al último
+    (docs/RECARGOS.md §6).
+
+    Existe porque `ContractOut` solo mira hacia ATRÁS (`parent_contract_id`):
+    en un contrato ampliado la pantalla sabía que "fue ampliado" pero no a
+    cuál pasó la deuda, ni cuándo, ni por cuánto. Con la cadena entera, cada
+    eslabón nombra a su vecino y se puede recorrer aunque haya cinco.
+
+    El estado se RECALCULA con el hoy de la empresa pero no se persiste: es
+    una lectura de muchos contratos para pintar enlaces, y escribir acá
+    volvería una consulta de navegación en una que bloquea filas. Quien
+    persiste es `get_contract` (al abrir cada uno) y el job nocturno.
+    """
+    rows = await repository.list_chain(db, company_id=company_id, contract_id=contract_id)
+    if not rows:
+        raise NotFoundError("El contrato no existe en esta empresa.")
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    links: list[ContractChainLinkOut] = []
+    for row in rows:
+        m = row._mapping
+        status, _ = rules.compute_status(
+            current_status=m["status"],
+            interest_paid_until=m["interest_paid_until"],
+            arrears_window_months=m["arrears_window_months"],
+            extension_months=m["extension_months"],
+            extension_ends_at=m["extension_ends_at"],
+            today=today,
+        )
+        links.append(
+            ContractChainLinkOut(
+                id=m["id"],
+                number=m["number"],
+                status=status,
+                parent_contract_id=m["parent_contract_id"],
+                start_date=m["start_date"],
+                extended_on=m["extended_on"],
+                extension_amount=m["extension_amount"],
+                principal=m["principal"],
+                capital_balance=m["capital_balance"],
+            )
+        )
+    return links
 
 
 async def get_settlement_info(

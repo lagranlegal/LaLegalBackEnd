@@ -17,8 +17,9 @@ from app.modules.identity import repository as identity_repo
 
 _EMAIL = TypeAdapter(EmailStr)
 
-#: La casilla del mostrador (NOTIFICACIONES §9.2-f). Es el único origen que
-#: escribe hoy la API: `contract_form` (§1c) todavía no tiene pantalla.
+#: La casilla de la ficha del cliente (NOTIFICACIONES §9.2-f). La del
+#: formulario de crear contrato escribe `contract_form` desde
+#: `integration.record_contract_form_email`.
 _COUNTER = "counter"
 
 

@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from app.common.money import Money
 
@@ -47,6 +47,21 @@ class ContractCreateIn(BaseModel):
     #: Días para pedir un recargo. Si no viene, se toma la política de la
     #: empresa (`company.settings.extension_window_days`, default 28).
     extension_window_days: int | None = Field(default=None, ge=0)
+    #: El correo del cliente, capturado en el mismo mostrador donde se firma
+    #: el contrato (NOTIFICACIONES §1c y §9.2-f). **Solo llena un vacío:** si
+    #: el cliente ya tiene otro correo se rechaza (`VALIDATION_ERROR` con
+    #: `customer_email` en `loc`) — cambiar la dirección de alguien es una
+    #: edición de su ficha, con su `before` auditado, no un efecto lateral de
+    #: prestarle plata. El mismo que ya tiene es un no-op.
+    customer_email: EmailStr | None = None
+    #: La casilla «El cliente autoriza recibir avisos por correo», marcada al
+    #: crear el contrato: `true` deja la base en `consent` con origen
+    #: `contract_form`, en la MISMA transacción que el contrato. `false` u
+    #: omitido = no se toca — retirar una autorización se hace en la ficha,
+    #: nunca desmarcando algo que el formulario del contrato ni mostraba.
+    #: Exige correo (el que ya tenía o `customer_email`): autorizar a escribirle
+    #: a una dirección que no existe no es una autorización de nada.
+    customer_email_consent: bool | None = None
 
 
 class ContractImportIn(BaseModel):
@@ -163,6 +178,30 @@ class ContractOut(BaseModel):
     extended_on: date | None
     extension_amount: Decimal | None
     items: list[ContractItemOut]
+
+
+class ContractChainLinkOut(BaseModel):
+    """Un eslabón de la cadena de ampliaciones (docs/RECARGOS.md §6).
+
+    Lo justo para NOMBRAR cada contrato de la cadena y llevar a él: la
+    pantalla de un contrato ampliado tiene que decir a cuál pasó la deuda, y
+    la del sucesor de cuál viene. Sin eso un `superseded` parece un contrato
+    abandonado."""
+
+    id: UUID
+    number: int
+    #: El estado EFECTIVO (recalculado con la fecha de hoy de la empresa, como
+    #: `GET /contracts/{id}`), no la columna cruda: la columna la persiste el
+    #: job nocturno y puede venir con un día de atraso.
+    status: str
+    parent_contract_id: UUID | None
+    start_date: date
+    #: Cuándo se amplió para dar origen a ESTE eslabón y cuánto se entregó en
+    #: esa ampliación. `None` en la raíz (00053).
+    extended_on: date | None
+    extension_amount: Decimal | None
+    principal: Decimal
+    capital_balance: Decimal
 
 
 class PaymentOptionOut(BaseModel):
