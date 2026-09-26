@@ -23,7 +23,9 @@ la Ley 2300 NO se miran acá: son del despachador, en un solo lugar (§14).
    mismo día en que vence la cuota, así que ese día el contrato entra en mora
    (o en prórroga, con ventana 1). Si el evento de estado está encendido, él
    lleva el contrato; si no, lo lleva R1 «vence hoy». Es `choose_event` de
-   las fases 4 y 6 (§18.1-3) aplicado a los recordatorios.
+   las fases 4 y 6 (§18.1-3) aplicado a los recordatorios. **De fábrica ya
+   no pasa** —R1 sale solo 3 días antes desde el 25/09/2026—, pero el 0 sigue
+   siendo configurable por empresa, y ahí el choque vuelve.
 3. **La ventana de búsqueda es de 7 días hacia atrás**, re-evaluada cada
    noche; la `dedupe_key` hace que re-evaluar sea gratis (§6.2). Si el job
    estuvo caído, lo que cayó dentro de los 7 días se registra y el rezago
@@ -135,7 +137,8 @@ def plan_reminders(
             groups.setdefault((event_type, c.customer_id, day), []).append(c)
 
     for c in contracts:
-        # R1: la próxima cuota, N días antes (N = 0 es el día del vencimiento).
+        # R1: la próxima cuota, N días antes (N = 0 es el día del vencimiento:
+        # no viene de fábrica, pero una empresa lo puede configurar).
         for days_before in schedule.installment_days_before:
             day = c.next_due_date - timedelta(days=days_before)
             if days_before == 0 and event_enabled(_state_event_on_due_day(c)):

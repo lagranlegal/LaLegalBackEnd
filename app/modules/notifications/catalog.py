@@ -101,7 +101,7 @@ _TYPES: tuple[EventType, ...] = (
         "service",
         "reminder",
         False,
-        "R1 · Cuota por vencer (3 días antes y el día del vencimiento)",
+        "R1 · Cuota por vencer (3 días antes; los días se configuran)",
     ),
     EventType(
         "installment_overdue",

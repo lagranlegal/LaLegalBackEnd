@@ -11,7 +11,7 @@ comporta exactamente como dicen los defaults de abajo.
       "thresholds": {"discount_amount": "0", "cash_difference_amount": "0"},
       "customer_contact_limits": {...},       # Ley 2300 (§12.3), solo audience='customer'
       "stale_after_days": 2,                  # ventana de rezago (§5.3, §12.2-5)
-      "reminders": {"installment_days_before": [3, 0], "extension_days_before": [3]}
+      "reminders": {"installment_days_before": [3], "extension_days_before": [3]}
     }
 
 **Por qué `enabled` nace en `false`, también para el resumen.** Encenderlo es
@@ -81,7 +81,10 @@ class ContactLimits:
 #: §12.1-1 / §12.2-1: la cuota se recuerda 3 días antes y el día del
 #: vencimiento. R4 («la prórroga vence pronto») no tenía número en el diseño
 #: (§2.2 dice «N días»): se tomó el mismo 3 del recordatorio de cuota.
-DEFAULT_INSTALLMENT_DAYS_BEFORE: tuple[int, ...] = (3, 0)
+#: R1 solo 3 días antes (decisión del 25/09/2026, docs/NOTIFICACIONES.md §20.2-1).
+#: Era `(3, 0)`: con el tope semanal, el aviso del día casi siempre quedaba
+#: `throttled` porque el de 3 días antes ya había gastado el cupo.
+DEFAULT_INSTALLMENT_DAYS_BEFORE: tuple[int, ...] = (3,)
 DEFAULT_EXTENSION_DAYS_BEFORE: tuple[int, ...] = (3,)
 MAX_DAYS_BEFORE = 30
 MAX_REMINDER_POINTS = 5
@@ -90,8 +93,9 @@ MAX_REMINDER_POINTS = 5
 @dataclass(frozen=True)
 class ReminderSchedule:
     """Cuántos días antes salen los recordatorios por fecha (R1 y R4,
-    docs/NOTIFICACIONES.md §20). Parámetros por empresa, como pidió §12.2-1;
-    los valores de fábrica son los que fijó esa decisión.
+    docs/NOTIFICACIONES.md §20). Parámetros por empresa, como pidió §12.2-1.
+    De fábrica, 3 días antes para los dos: §12.2-1 le había puesto a R1
+    también el día del vencimiento, y el 25/09/2026 se sacó (§20.2-1).
 
     **Ojo con el tope semanal (Ley 2300):** con un contacto por semana, dos
     puntos a menos de 7 días uno del otro no salen los dos — el segundo queda

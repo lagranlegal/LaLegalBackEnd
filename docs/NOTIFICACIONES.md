@@ -686,7 +686,7 @@ Un recordatorio sobre **el propio contrato que la persona firmó** es *servicio 
 
 ### 12.1 · Las siete que siguen abiertas
 
-1. **¿Cuántos días antes se avisa la cuota, y cuántas veces?** Puse 3 días como parámetro sin decidir el valor. Y la de fondo: ¿se avisa **también** cuando ya venció (R2)? Un recordatorio es un favor; un cobro repetido es otra cosa, y la frontera la pone el negocio, no el sistema. **No reusar `grace_days`** (§4.3).
+1. **¿Cuántos días antes se avisa la cuota, y cuántas veces?** *(Cerrada: §12.2-1 dijo 3 días y el día del vencimiento; el 25/09/2026 quedó **solo 3 días antes**, §20.2-4.)* Puse 3 días como parámetro sin decidir el valor. Y la de fondo: ¿se avisa **también** cuando ya venció (R2)? Un recordatorio es un favor; un cobro repetido es otra cosa, y la frontera la pone el negocio, no el sistema. **No reusar `grace_days`** (§4.3).
 2. **¿El resumen diario le llega también al dueño cuando no hay nada que reportar?** Un correo que dice "todo en orden" prueba que el sistema vive y entrena a abrirlo; treinta seguidos entrenan a archivarlo. Mi recomendación: **sí los primeros 30 días, después solo cuando haya algo** — pero es una decisión de producto.
 3. **¿Puede un inquilino redactar sus propios correos?** Lo decidí como **no** (§4.4), con el argumento de que la entregabilidad es un recurso compartido. Si comercialmente hace falta ofrecerlo, no es una fila en `document_template`: es un producto con revisión previa a la activación.
 4. **¿Cuál es el umbral de "descuento grande" y de "descuadre grande" para las alertas inmediatas (§2.5)?** Un monto fijo se desactualiza y un porcentaje no dice nada sobre un contrato chico. Hoy no hay con qué medirlo: hay 11 abonos y 13 ventas en septiembre en toda la base. Recomendación: nacer con el umbral en 0 —avisar **todos** los descuentos, que son pocos— y subirlo cuando moleste. **Cerrado de más se nota; abierto de más no** (es el mismo criterio con que se resolvió `TERMINAL_STATUSES` en `rules.py`).
@@ -707,6 +707,8 @@ sin información**, umbrales **configurables por empresa**, y lo que va al **cli
    en horario hábil, nunca domingo ni festivo — diseñado dentro de la **Ley 2300 de 2023** («dejen de
    fregar»). Si esa ley aplica a una compraventa **va en la misma consulta al abogado** que (a) y la 7.
    Parámetros por empresa; `grace_days` sigue sin reusarse.
+   **Corregido el 25/09/2026 (Mateo): solo 3 días antes, no el día del vencimiento.** Con el tope semanal el
+   aviso del día casi siempre quedaba `throttled`; el porqué está en §20.2-4. El 0 sigue siendo configurable.
 2. **Resumen diario:** **solo si hubo actividad o alertas.** Además un **resumen semanal que sale siempre**
    (lunes): prueba que el sistema vive sin entrenar a archivar. Patrón de Square/Toast.
 3. **Correos por inquilino:** **no.** La empresa personaliza nombre, logo, teléfono y una línea de cierre;
@@ -744,7 +746,8 @@ como parámetros ya coinciden con ella: **lunes a viernes de 7:00 a 19:00, sába
 domingos ni festivos, y máximo un contacto por semana por canal.** Aplican a los cuatro sin excepción.
 **Los comprobantes transaccionales (C1–C7) NO son cobranza** —acusan algo que el cliente acaba de hacer— y ya
 quedaron fuera del tope semanal en las fases 4 y 6 (§18.1-1); siguen dentro de la ventana horaria, que es la
-lectura conservadora que no rompe nada. La consecuencia práctica de aplicar el tope semanal a R1 está en §20.4.
+lectura conservadora que no rompe nada. La consecuencia práctica de aplicar el tope semanal a R1 está en §20.4:
+por ella R1 quedó, de fábrica, **solo 3 días antes** del vencimiento y no también el día (§20.2-4).
 
 **2. R3 (entró en prórroga) NO pesa como el remate: informa un cambio de estado.** Es la respuesta a §12.1-7.
 El correo lo dice: es **informativo** y **no reemplaza lo pactado en el contrato**, que es el que fija plazos
@@ -1514,7 +1517,7 @@ suscripción vigente); la falla de una se registra y no tumba el job.
 
 | # | Evento | Día objetivo (se deriva del ancla, con `rules`) | `dedupe_key` |
 |---|---|---|---|
-| R1 | `installment_due_soon` | `add_months(interest_paid_until, 1) − N`, con N en `installment_days_before` (de fábrica **3 y 0**) | `due_soon:<customer_id>:<día objetivo>` |
+| R1 | `installment_due_soon` | `add_months(interest_paid_until, 1) − N`, con N en `installment_days_before` (de fábrica **3**; hasta el 25/09/2026, 3 y 0 — §20.2-4) | `due_soon:<customer_id>:<día objetivo>` |
 | R2 | `installment_overdue` | el día en que entró en mora: `add_months(interest_paid_until, 1)` (solo `in_arrears`) | `arrears:<customer_id>:<día objetivo>` |
 | R3 | `extension_started` | el día en que entró en prórroga: `add_months(interest_paid_until, arrears_window_months)` (solo `in_extension`, y solo si cuadra con `extension_ends_at`, §20.3-4) | `extension:<customer_id>:<día objetivo>` |
 | R4 | `extension_ending_soon` | `extension_ends_at − N`, con N en `extension_days_before` (de fábrica **3**) | `extension_ending:<customer_id>:<día objetivo>` |
@@ -1522,7 +1525,8 @@ suscripción vigente); la falla de una se registra y no tumba el job.
 
 - **Agrupación (§2.3): un evento por (cliente, día objetivo, tipo)**, con todos sus contratos en
   `payload.contracts` —número, fecha, monto y saldo de capital (§9.1)—, ordenados por número. Tres cuotas de Juana
-  que tocan el mismo martes —dos que vencen el viernes y una que vence ese día— son **un** correo. `entity_type`
+  que tocan el mismo martes —dos que vencen el viernes y una que vence ese día, si la empresa configuró el 0— son
+  **un** correo. `entity_type`
   del evento es `customer`.
 - **Idempotencia:** la llave lleva la fecha objetivo, nunca la de corrida (§6.1): correr dos veces la misma noche,
   o tres días tarde, da la misma llave; el mes siguiente, otra. `on conflict do nothing` como camino normal.
@@ -1552,12 +1556,25 @@ prórroga). El «día del vencimiento» que §12.2-1 le pidió a R1 y el «entr�
 mismo contrato. Dos correos el mismo día —«vence hoy» y «venció»— son el mismo aviso dicho dos veces. Quedó como
 C2/C3 (§18.1-3): **si el evento de estado de ese día (R2, o R3 con ventana 1) está encendido, él lleva el contrato**;
 si no, lo lleva R1. El hecho de estado se registra siempre (apagado, sin entrega); lo que cambia es si R1 lo repite.
+**Con el default de hoy (`[3]`, §20.2-4) el choque no ocurre**: R1 nunca cae el día del vencimiento. La lógica
+se queda porque `installment_days_before` es un parámetro y una empresa puede volver a pedir `[0]` o `[3, 0]`; los
+tests del choque configuran `[3, 0]` a propósito.
 
 **2. Por qué la agrupación manda sobre la llave de §6.1.** Ver §20.3-1.
 
 **3. Por qué una ventana fija de búsqueda y no «desde la última corrida», como el resumen.** El resumen necesita
 saber hasta dónde reportó para no contar dos veces; acá la `dedupe_key` ya lo garantiza, y re-evaluar 7 días cada
 noche cuesta una consulta por empresa sobre sus contratos vivos. Es más simple y no depende de otra fila.
+
+**4. R1 sale solo 3 días antes (Mateo, 25/09/2026).** Con los días de fábrica `[3, 0]` y el tope de la Ley 2300
+(un contacto por semana, §12.3-1), el aviso del día casi siempre quedaba `throttled`: el de 3 días antes ya había
+gastado el cupo (§20.4). Un aviso que el sistema planifica y el tope calla es ruido en la base y una promesa que la
+pantalla no cumple. Se quedó el de 3 días porque **le da al cliente tiempo de conseguir la plata**; el del día llega
+cuando ya no hay margen. El default pasó a `[3]` en `preferences.DEFAULT_INSTALLMENT_DAYS_BEFORE`. **Sin backfill:**
+ninguna empresa tenía override de `reminders` en `company.settings`, y un faltante —en cualquier nivel del jsonb— se
+lee con el default (`parse_reminders`, test `test_preferences_read_back_a_bad_schedule_as_the_default`). Una empresa
+que configure `[3, 0]` sigue funcionando como antes (tests `test_R1_configured_three_days_before_and_on_the_due_day`
+y el del tope semanal).
 
 ### 20.3 · Discrepancias: dónde el código contradijo este documento (y ganó)
 
@@ -1570,7 +1587,8 @@ noche cuesta una consulta por empresa sobre sus contratos vivos. Es más simple 
    se deriva del ancla (`interest_paid_until`), así que cuando el cliente abona y el ancla avanza, la llave del mes
    siguiente es otra sin que nadie limpie nada.
 2. **El día del vencimiento de R1 coincide con la entrada en mora de R2** (§20.2-1). El diseño no lo vio porque §2.2
-   se escribió con R1 solo a 3 días, y §12.2-1 le agregó el día del vencimiento después.
+   se escribió con R1 solo a 3 días, y §12.2-1 le agregó el día del vencimiento después. Desde el 25/09/2026 el
+   default volvió a lo de §2.2 (§20.2-4): el choque solo existe si una empresa configura el 0.
 3. **R2 «ya vencida, máximo uno por semana» (§12.2-1) quedó como UN aviso por ancla, no uno semanal.** §12.2-1 fijó
    un **tope**, no una cadencia, y la llave anclada al ancla de §6.1 manda uno por mes adeudado: al entrar en mora.
    No se construyó un recordatorio que se repita cada semana mientras siga en mora. Si se quisiera, sería una llave
@@ -1606,19 +1624,25 @@ noche cuesta una consulta por empresa sobre sus contratos vivos. Es más simple 
 - **Sin migración, sin secretos nuevos.** Los de siempre para que un correo al cliente salga: `RESEND_API_KEY`,
   `FRONTEND_URL` y `NOTIFICATIONS_LINK_SECRET` **en la Machine del job** (§17.3). El front puede ir después: el campo
   `reminders` es aditivo.
-- **Dudoso — el tope semanal se come el aviso del día del vencimiento.** Con la ley aplicada tal cual (§12.3-1, un
-  contacto por semana) y los días de fábrica (3 y 0), **el recordatorio de 3 días antes sale y el del día del
-  vencimiento queda `throttled`** (test `test_weekly_cap_throttles_the_second_reminder_but_not_a_receipt`). Y como el
-  día del vencimiento lo lleva R2 si está encendido (§20.2-1), **con R1 y R2 encendidos el R2 también queda
-  `throttled`**, y el siguiente contacto posible es R3, meses después. No es un defecto del código: son las dos
-  decisiones juntas. Si Mateo prefiere el aviso del día del vencimiento, se deja `installment_days_before: [0]`; si
-  prefiere los dos, hay que relajar `max_per_week` — y eso es justo lo que la ley limita.
+- **Resuelto en parte (25/09/2026) — el tope semanal se comía el aviso del día del vencimiento.** Con la ley
+  aplicada tal cual (§12.3-1, un contacto por semana) y los días de fábrica de entonces (3 y 0), **el recordatorio
+  de 3 días antes salía y el del día del vencimiento quedaba `throttled`**. Mateo decidió quedarse con el de 3 días
+  (§20.2-4) y el default pasó a `[3]`. Una empresa que configure `[3, 0]` vuelve a este caso (test
+  `test_weekly_cap_throttles_the_second_reminder_but_not_a_receipt`, que lo configura).
+- **Dudoso — lo que sigue en pie: con R1 y R2 encendidos, R2 queda `throttled`.** El tope es de **7 días corridos**
+  (`count_sent_to(since=now − 7 días)`), y R2 nace el día del vencimiento, 3 días después del R1. Sacar el 0 no
+  lo cambió: el siguiente contacto posible es R3, meses después (test
+  `test_with_the_default_R1_still_spends_the_week_of_R2`). No es un defecto del código: son dos decisiones
+  juntas. Si Mateo quiere que el aviso de mora salga, las salidas son apagar R1 (y perder el aviso previo), que
+  el tope no cuente un R1 contra un R2 del mismo ancla (código nuevo, y una lectura de la ley que habría que
+  sostener), o subir `max_per_week` — y eso último es justo lo que la ley limita.
 - **Dudoso — sin prioridad dentro de la misma noche.** Si a un cliente le tocan dos recordatorios de tipos distintos
   la misma noche (R1 de un contrato y R3 de otro), sale el primero que tome el despachador y el otro queda
   `throttled`; el orden entre entregas creadas en la misma transacción no está definido (`claim_due_deliveries`
   ordena por `scheduled_at`, que es el mismo). Lo razonable sería que ganara R3 (la última campana); no se hizo.
 - **Dudoso — cambiar un interruptor a mitad del día** puede producir, en una segunda corrida de esa misma noche, R1
-  «vence hoy» además del R2 que ya salió (la llave es otra). Caso de borde: el job corre una vez al día.
+  «vence hoy» además del R2 que ya salió (la llave es otra). Caso de borde: el job corre una vez al día, y desde el
+  25/09/2026 solo pasa si la empresa configuró el 0.
 - **Dudoso — la cláusula del contrato no se verifica** (§9.2-i): el backend escribe `contract` aunque la empresa no
   haya insertado la cláusula en su plantilla.
 - **Revisión legal antes de encender** en una empresa real (§12.3): la recomendación sigue en pie.

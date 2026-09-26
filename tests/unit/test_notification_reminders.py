@@ -2,7 +2,11 @@
 §2.2, §2.3, §6.1, §20) — puro, sin base: recibe los contratos con sus fechas
 ya derivadas por `contracts.integration` y decide qué eventos nacen.
 
-Martes 3 de septiembre de 2030 es el «hoy» de casi todos."""
+Martes 3 de septiembre de 2030 es el «hoy» de casi todos.
+
+De fábrica R1 sale solo 3 días antes (`[3]`, decisión del 25/09/2026). Los
+tests del choque «el día del vencimiento» configuran `[3, 0]` a propósito:
+una empresa puede volver a pedir el aviso del día, y ahí el choque existe."""
 
 from datetime import date
 from decimal import Decimal
@@ -50,13 +54,21 @@ def _c(
     )
 
 
+#: Lo que una empresa configura si quiere también el aviso del día (§20.2-1).
+WITH_DUE_DAY = ReminderSchedule(installment_days_before=(3, 0))
+
+
 def _plan(
-    contracts: list[ReminderContract], *, on: set[str], today: date = TODAY
+    contracts: list[ReminderContract],
+    *,
+    on: set[str],
+    today: date = TODAY,
+    schedule: ReminderSchedule | None = None,
 ) -> list[reminders.PlannedReminder]:
     return reminders.plan_reminders(
         contracts,
         today=today,
-        schedule=ReminderSchedule(),
+        schedule=schedule or ReminderSchedule(),
         lookback_days=7,
         event_enabled=lambda code: code in on,
     )
@@ -81,6 +93,29 @@ def test_keys_carry_the_customer_and_the_target_day_not_the_run_day() -> None:
     assert late.dedupe_key == planned.dedupe_key
 
 
+def test_the_default_is_ONE_R1_three_days_before_and_nothing_on_the_due_day() -> None:
+    """Decisión del 25/09/2026: de fábrica, R1 solo 3 días antes. Con el tope
+    semanal de la Ley 2300 el aviso del día casi siempre quedaba `throttled`
+    —el de 3 días antes ya gastaba el cupo—, y 3 días le dan al cliente tiempo
+    de conseguir la plata."""
+    assert ReminderSchedule().installment_days_before == (3,)
+    juana = uuid4()
+    [planned] = _plan([_c(juana, 1, due=date(2030, 9, 6))], on={R1})
+    assert (planned.event_type, planned.target_date) == (R1, date(2030, 9, 3))
+    # El día del vencimiento, aun con R2 apagado: R1 no dice nada.
+    due_today = _c(
+        juana, 1, status="in_arrears", due=date(2030, 9, 3), arrears_on=date(2030, 9, 3), owed=1
+    )
+    assert [p.event_type for p in _on_today(_plan([due_today], on={R1}))] == [R2]
+    # Y el mismo contrato visto desde cada día de la semana: un solo R1.
+    days = {
+        p.target_date
+        for today in (date(2030, 9, d) for d in range(1, 8))
+        for p in _plan([_c(juana, 1, due=date(2030, 9, 6))], on={R1}, today=today)
+    }
+    assert days == {date(2030, 9, 3)}
+
+
 def test_one_event_per_customer_day_and_type_listing_every_contract() -> None:
     juana, pedro = uuid4(), uuid4()
     planned = _on_today(
@@ -94,6 +129,7 @@ def test_one_event_per_customer_day_and_type_listing_every_contract() -> None:
                 _c(pedro, 4, due=date(2030, 9, 6)),
             ],
             on={R1},
+            schedule=WITH_DUE_DAY,  # el #2 entra por el aviso del día
         )
     )
     by_customer = {p.customer_id: p for p in planned if p.event_type == R1}
@@ -102,7 +138,8 @@ def test_one_event_per_customer_day_and_type_listing_every_contract() -> None:
 
 
 def test_the_due_day_is_ONE_notice_arrears_wins_if_on() -> None:
-    """El día del vencimiento el contrato entra en mora (months_owed = 1). R1
+    """Con `[3, 0]` configurado (de fábrica ya no: §20.2-1). El día del
+    vencimiento el contrato entra en mora (months_owed = 1). R1
     «vence hoy» y R2 «venció» serían el mismo aviso dos veces: sale R2 si está
     encendido, y R1 si solo R1 lo está (como C2/C3, §18.1-3). El hecho de la
     mora se planifica siempre —apagado se registra sin entrega, §4.3—; lo que
@@ -111,15 +148,21 @@ def test_the_due_day_is_ONE_notice_arrears_wins_if_on() -> None:
     contract = _c(
         juana, 1, status="in_arrears", due=date(2030, 9, 3), arrears_on=date(2030, 9, 3), owed=1
     )
-    assert [p.event_type for p in _on_today(_plan([contract], on={R1, R2}))] == [R2]
-    assert sorted(p.event_type for p in _on_today(_plan([contract], on={R1}))) == [R1, R2]
+
+    def today(on: set[str]) -> list[str]:
+        return sorted(
+            p.event_type for p in _on_today(_plan([contract], on=on, schedule=WITH_DUE_DAY))
+        )
+
+    assert today({R1, R2}) == [R2]
+    assert today({R1}) == [R1, R2]
     # Los dos apagados: se registran los dos hechos, ninguno con entrega.
-    assert sorted(p.event_type for p in _on_today(_plan([contract], on=set()))) == [R1, R2]
+    assert today(set()) == [R1, R2]
 
 
 def test_window_one_contract_goes_straight_to_extension_and_R3_carries_the_due_day() -> None:
-    """Tecnología (ventana 1): el día del vencimiento entra en PRÓRROGA, sin pasar
-    por mora. Ese día el aviso lo lleva R3."""
+    """Tecnología (ventana 1), con `[3, 0]` configurado: el día del vencimiento
+    entra en PRÓRROGA, sin pasar por mora. Ese día el aviso lo lleva R3."""
     juana = uuid4()
     contract = _c(
         juana,
@@ -131,8 +174,14 @@ def test_window_one_contract_goes_straight_to_extension_and_R3_carries_the_due_d
         window=1,
         owed=1,
     )
-    assert [p.event_type for p in _on_today(_plan([contract], on={R1, R3}))] == [R3]
-    assert sorted(p.event_type for p in _on_today(_plan([contract], on={R1}))) == [R3, R1]
+
+    def today(on: set[str]) -> list[str]:
+        return sorted(
+            p.event_type for p in _on_today(_plan([contract], on=on, schedule=WITH_DUE_DAY))
+        )
+
+    assert today({R1, R3}) == [R3]
+    assert today({R1}) == [R3, R1]
 
 
 def test_nothing_before_its_day_and_nothing_older_than_the_lookback() -> None:
@@ -141,7 +190,11 @@ def test_nothing_before_its_day_and_nothing_older_than_the_lookback() -> None:
     # El «3 días antes» de una cuota que venció ayer sí se planifica (hace 4
     # días, dentro de la ventana): es el que el rezago deja `skipped_stale`.
     late = _plan([_c(juana, 1, status="in_arrears", due=date(2030, 9, 2))], on={R1})
-    assert [p.target_date for p in late] == [date(2030, 8, 30), date(2030, 9, 2)]
+    assert [p.target_date for p in late] == [date(2030, 8, 30)]
+    with_due_day = _plan(
+        [_c(juana, 1, status="in_arrears", due=date(2030, 9, 2))], on={R1}, schedule=WITH_DUE_DAY
+    )
+    assert [p.target_date for p in with_due_day] == [date(2030, 8, 30), date(2030, 9, 2)]
     old = _c(juana, 1, status="in_arrears", due=date(2030, 8, 20), arrears_on=date(2030, 8, 20))
     assert _plan([old], on={R2}) == []  # 14 días atrás: fuera de la ventana de búsqueda
 

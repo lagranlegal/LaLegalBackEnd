@@ -61,7 +61,7 @@ class ReminderScheduleOut(BaseModel):
     """Cuántos días antes salen los recordatorios por fecha (NOTIFICACIONES §20).
     De mayor a menor; `0` es el mismo día."""
 
-    #: R1 · la cuota. De fábrica `[3, 0]`: 3 días antes y el día del vencimiento.
+    #: R1 · la cuota. De fábrica `[3]`: solo 3 días antes (0 = el día del vencimiento).
     installment_days_before: list[int]
     #: R4 · el fin de la prórroga. De fábrica `[3]`.
     extension_days_before: list[int]

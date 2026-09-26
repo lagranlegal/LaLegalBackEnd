@@ -1258,11 +1258,12 @@ async def test_reminder_schedule_is_a_setting_with_the_decided_defaults(
     client: TestClient, notif: dict[str, Any]
 ) -> None:
     """Fase 5 (§20): los días de antelación de R1 y R4 son parámetros por
-    empresa; de fábrica, los que fijó §12.2-1 (3 días antes y el día del
-    vencimiento) y 3 días antes del fin de la prórroga."""
+    empresa; de fábrica, 3 días antes de la cuota (decisión del 25/09/2026;
+    §12.2-1 había fijado también el día del vencimiento) y 3 días antes del fin
+    de la prórroga."""
     headers = {"Authorization": f"Bearer {notif['admin_token']}"}
     got = client.get("/api/v1/notifications/settings", headers=headers).json()
-    assert got["reminders"] == {"installment_days_before": [3, 0], "extension_days_before": [3]}
+    assert got["reminders"] == {"installment_days_before": [3], "extension_days_before": [3]}
 
     response = client.patch(
         "/api/v1/notifications/settings",

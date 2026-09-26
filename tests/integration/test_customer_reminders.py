@@ -233,12 +233,45 @@ def _key(prefix: str, customer_id: UUID, day: str) -> str:
 # ------------------------------------------------ cada uno, en su fecha objetivo ----
 
 
-async def test_R1_goes_out_three_days_before_and_on_the_due_day(rem: dict[str, Any]) -> None:
-    """§12.1-1: 3 días antes y el día del vencimiento. La fecha de la cuota es
-    `add_months(interest_paid_until, 1)`: 6/08 ⇒ vence el viernes 6/09. El tope
-    semanal se relaja acá para ver salir los dos (su efecto tiene su test)."""
+async def test_R1_goes_out_only_three_days_before(rem: dict[str, Any]) -> None:
+    """De fábrica, solo 3 días antes (decisión del 25/09/2026, §20.2-1). La
+    fecha de la cuota es `add_months(interest_paid_until, 1)`: 6/08 ⇒ vence el
+    viernes 6/09. El tope semanal se relaja para que no sea él quien calle el
+    viernes: si el viernes no sale nada, es porque no se planificó."""
     cid, juana = rem["company_id"], rem["juana"]
     await _enable(cid, R1, customer_contact_limits={"max_per_week": 5})
+    number = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
+    provider = RecordingProvider()
+
+    await _run(cid, MON)  # a 4 días: nada
+    assert await _events(cid) == []
+
+    await _run(cid, TUE)  # a 3 días
+    [event] = await _events(cid, R1)
+    assert event.dedupe_key == _key("due_soon", juana, "2030-09-03")
+    assert event.payload["contracts"][0]["due_date"] == "2030-09-06"
+    await _dispatch(cid, TUE, provider)
+    assert [d.status for d in await _deliveries(cid)] == ["sent"]
+
+    # El viernes 6 vence y entra en mora; con R2 apagado, R1 no dice nada.
+    await _set_status(cid, number, "in_arrears")
+    await _run(cid, FRI)
+    assert [e.dedupe_key for e in await _events(cid, R1)] == [event.dedupe_key]
+    await _dispatch(cid, FRI, provider)
+    assert len(provider.outbox) == 1
+
+
+async def test_R1_configured_three_days_before_and_on_the_due_day(rem: dict[str, Any]) -> None:
+    """Una empresa que configure `[3, 0]` (§12.1-1, el default hasta el
+    25/09/2026) recibe los dos. El tope semanal se relaja acá para ver salir
+    los dos (su efecto tiene su test)."""
+    cid, juana = rem["company_id"], rem["juana"]
+    await _enable(
+        cid,
+        R1,
+        customer_contact_limits={"max_per_week": 5},
+        reminders={"installment_days_before": [3, 0]},
+    )
     number = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
     provider = RecordingProvider()
 
@@ -472,9 +505,11 @@ async def test_several_contracts_same_customer_same_day_is_one_mail(
     """§2.3: el recordatorio es por (cliente, día, tipo), no por contrato. El
     martes a Juana le tocan dos cuotas que vencen el viernes (3 días antes) y
     una que vence ese mismo martes (con R2 apagado, la lleva R1): UN correo que
-    nombra las tres. Pedro, sin correo, tiene su propio evento `unroutable`."""
+    nombra las tres. Pedro, sin correo, tiene su propio evento `unroutable`.
+    Con `[3, 0]` configurado: de fábrica (`[3]`) todas las cuotas de un mismo
+    día vencen el mismo día, y la mezcla de fechas es lo que se mira acá."""
     cid, juana, pedro = rem["company_id"], rem["juana"], rem["pedro"]
-    await _enable(cid, R1)
+    await _enable(cid, R1, reminders={"installment_days_before": [3, 0]})
     a = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
     b = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
     c = await _contract(cid, juana, status="in_arrears", interest_paid_until=date(2030, 8, 3))
@@ -506,9 +541,10 @@ async def test_weekly_cap_throttles_the_second_reminder_but_not_a_receipt(
     rem: dict[str, Any],
 ) -> None:
     """§20: los cuatro son cobranza y comparten el tope de 1 por semana; el
-    comprobante de un abono (C2) no es cobranza y sale igual (§18.1-1)."""
+    comprobante de un abono (C2) no es cobranza y sale igual (§18.1-1). Con
+    `[3, 0]` configurado: es el caso que llevó a sacar el 0 del default."""
     cid, juana = rem["company_id"], rem["juana"]
-    await _enable(cid, R1, "payment_registered")
+    await _enable(cid, R1, "payment_registered", reminders={"installment_days_before": [3, 0]})
     number = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
     provider = RecordingProvider()
 
@@ -527,6 +563,28 @@ async def test_weekly_cap_throttles_the_second_reminder_but_not_a_receipt(
     assert [d.status for d in await _deliveries(cid, receipt)] == ["sent"]
     assert len(provider.outbox) == 2
     assert "Recibimos" in provider.outbox[1].subject
+
+
+async def test_with_the_default_R1_still_spends_the_week_of_R2(rem: dict[str, Any]) -> None:
+    """§20.4: sacar el 0 de R1 no libera el día del vencimiento. El tope es de 7
+    días corridos, y R2 nace 3 días después del R1: con los dos encendidos, R2
+    queda `throttled`. Se deja fijado para que nadie lo descubra en producción."""
+    cid, juana = rem["company_id"], rem["juana"]
+    await _enable(cid, R1, R2)
+    number = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
+    provider = RecordingProvider()
+
+    await _run(cid, TUE)
+    await _dispatch(cid, TUE, provider)
+    assert [d.status for d in await _deliveries(cid)] == ["sent"]
+
+    await _set_status(cid, number, "in_arrears")
+    await _run(cid, FRI)
+    await _dispatch(cid, FRI, provider)
+    assert [e.event_type for e in await _events(cid) if e.target_date == date(2030, 9, 6)] == [R2]
+    [arrears] = await _deliveries(cid, _key("arrears", juana, "2030-09-06"))
+    assert arrears.status == "throttled"
+    assert len(provider.outbox) == 1
 
 
 async def _receipt(cid: UUID, customer_id: UUID, number: int) -> str:
@@ -688,6 +746,9 @@ async def test_preferences_read_back_a_bad_schedule_as_the_default() -> None:
         prefs = preferences.parse(
             {"notifications": {"reminders": {"installment_days_before": raw}}}
         )
-        assert prefs.reminders.installment_days_before == (3, 0), raw
+        assert prefs.reminders.installment_days_before == (3,), raw
+    # Un faltante, en cualquier nivel, también: ninguna empresa necesita backfill.
+    for settings in (None, {}, {"notifications": {}}, {"notifications": {"reminders": {}}}):
+        assert preferences.parse(settings).reminders.installment_days_before == (3,), settings
     ok = preferences.parse({"notifications": {"reminders": {"extension_days_before": [1, 7]}}})
     assert ok.reminders.extension_days_before == (7, 1)
