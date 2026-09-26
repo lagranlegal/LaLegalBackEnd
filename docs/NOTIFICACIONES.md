@@ -1019,22 +1019,115 @@ día que alguien encienda uno, ya hay con qué decidir a quién se le puede escr
 - **La captura al crear el contrato (§1c, §9.2-f)** — ver §17.2-4.
 - **La lista «clientes sin correo» (§1c)** — no se construyó.
 - **Webhook de Resend:** `email_invalid_at` existe y el `gate` lo respeta, pero **nadie lo escribe todavía**.
-- **Cabeceras `List-Unsubscribe` / `List-Unsubscribe-Post` (RFC 8058)** no se agregaron. Gmail y Yahoo las exigen a
-  los remitentes masivos; hoy el volumen no llega. El `POST` ya ignora el cuerpo, así que puede ser su destino — pero
-  la cabecera tendría que apuntar a la **API** (un POST sin página), y eso pide decidir la URL pública del backend.
+- ~~**Cabeceras `List-Unsubscribe` / `List-Unsubscribe-Post` (RFC 8058)** no se agregaron.~~ **Hechas el 25/09/2026**,
+  ver §17-bis.
 - **El texto de la casilla es de producto, no legal.** Dice qué cubre y que se puede retirar; si la Ley 1581 exige
   otra redacción para que la autorización sea «previa, expresa e informada», es la consulta de §9.2-h y §9.3. Cambiarlo
   es texto del front, sin migración.
 - **Volver a suscribirse solo en el mostrador.** La página de baja no ofrece deshacer. Sería otro `POST`, tan seguro
   como el de la baja; se dejó fuera por alcance, no por riesgo. Hoy la persona lo pide en la compraventa y se
   desmarca la casilla.
-- **El endpoint público no tiene límite de tasa.** El token no se puede adivinar (128 bits de firma), así que el
-  riesgo es de carga, no de acceso. Ningún endpoint del proyecto lo tiene hoy.
+- ~~**El endpoint público no tiene límite de tasa.**~~ **Tiene uno desde el 25/09/2026**, en memoria y por máquina —
+  ver §17-bis.
 - **El correo enmascarado muestra el dominio completo.** Suficiente para reconocerse; a quien tenga el enlace
   reenviado le dice el proveedor de correo de la persona, no más.
 - **Verificado en vivo con un correo real: pendiente**, como en §15 y §16 — exige la key de Resend y el secreto en Fly.
   Verificado en local: la página de baja a 360 y 1280 px contra el backend y la base locales, tres `GET` sin tocar la
   baja, el `POST` con su `audit_log`.
+
+
+## 17-bis. La baja de un clic y el límite de tasa del enlace — lo implementado (25/09/2026)
+
+Los dos pendientes de §17.4 que tocaban el endpoint público de baja. **Sin migración.** Código:
+`unsubscribe.list_unsubscribe_headers`, el campo `headers` de `providers.EmailMessage` (viaja a Resend en el campo
+`headers` del cuerpo), `dispatcher._prepare`, `router.public_router` y `app/common/rate_limit.py` (nuevo). Tests:
+`tests/unit/test_rate_limit.py` (4), tres en `test_unsubscribe_token.py`, uno en `test_resend_provider.py`, cuatro en
+`tests/integration/test_email_basis.py` y dos aserciones en `test_notifications.py` (el correo al cliente las lleva, el
+resumen no). El del despachador se vio fallar sin el cambio (`KeyError: 'List-Unsubscribe-Post'`).
+
+### 17-bis.1 · Las cabeceras (RFC 2369 y RFC 8058)
+
+Todo correo al **cliente** sale con:
+
+```
+List-Unsubscribe: <https://compraventa-backend-dev.fly.dev/api/v1/public/unsubscribe/{token}>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+```
+
+Gmail y Yahoo las exigen desde 2024 a los remitentes masivos y con ellas muestran «Anular suscripción» junto al
+remitente: la persona se da de baja sin abrir el correo, en vez de marcarlo como spam. Hoy el volumen no llega al
+umbral de «masivo», pero la entrega mejora igual, y la marca de spam la paga `prendo.com.co` para todos (§9.2-e).
+
+- **Apuntan a la API, no a la página — y es la única excepción a la regla de §17.** Quien usa la cabecera es el
+  **servidor** del proveedor de correo, con un `POST` y el cuerpo `List-Unsubscribe=One-Click`, y la RFC pide que la
+  baja quede hecha en ese request, sin página intermedia. El front es estático (Vercel): no tiene quién reciba un
+  POST. La regla de §17 —«un GET nunca da de baja»— sigue intacta: la RFC eligió POST justamente porque los escáneres
+  que abren enlaces hacen GET (§1 de la RFC). El enlace del **cuerpo** sigue yendo a la página del front.
+- **El POST ya existía** (`POST /api/v1/public/unsubscribe/{token}`) e ignoraba el cuerpo: sirve igual a la página
+  (que no manda cuerpo) y al proveedor (que manda el form-urlencoded). Test con el request exacto de la RFC.
+- **Una sola URI HTTPS**, porque la RFC 8058 pide exactamente una. Un cliente de correo que no sabe hacer el POST
+  abre esa URI en el navegador: el `GET` de la API, con `Accept: text/html`, responde **303 a la página del front**
+  en vez de un JSON crudo. Lo distingue el `Accept` —un navegador que navega manda `text/html`; el `fetch` de la
+  página manda `*/*`—, y redirigir tampoco escribe.
+- **A dónde apuntan:** `PUBLIC_API_URL` si está; si no, `https://{FLY_APP_NAME}.fly.dev`, que Fly pone solo en cada
+  máquina de la app, **la del job incluida** (es la que manda los recordatorios). O sea: **no hace falta ningún
+  secreto nuevo** para dev ni prod. Sin ninguna de las dos (local), el correo sale **sin** las cabeceras — no `dead`:
+  la salida obligatoria de §9.2-e es el enlace del cuerpo; esto mejora la entrega, no es la salida.
+
+**Los correos a la empresa y la invitación NO las llevan, a propósito:**
+
+- **Resumen y alertas** van a usuarios de la empresa. No se «dan de baja» de un enlace: los apaga un admin en
+  Configuración, o se les quita el permiso `receive_digest`/`receive_alerts`. Un «Anular suscripción» de Gmail
+  prometería una salida que no existe (el POST exige un token de **cliente**) — y si existiera, un clic distraído le
+  apagaría al dueño el aviso de un faltante de caja. Eso es una pérdida, no una preferencia.
+- **La invitación** es un correo único que pidió un admin para una persona concreta, no una lista: no hay de qué
+  darse de baja. Gmail no las exige para correos transaccionales uno a uno.
+
+### 17-bis.2 · El límite de tasa del endpoint público
+
+`/api/v1/public/unsubscribe/{token}` era el único endpoint de la API sin sesión y sin ningún límite. El proyecto no
+tenía mecanismo (ni middleware ni `slowapi`), así que se hizo lo más simple que funciona:
+
+| Llave | Límite | Qué corta |
+|---|---|---|
+| IP (`Fly-Client-IP`; sin ella, la del socket) | **60 pedidos por minuto** | una IP barriendo tokens basura |
+| token (recortado a 128 caracteres) | **10 pedidos cada 10 minutos** | un script golpeando la misma URL — el único caso que llega a la base: un token basura muere en el HMAC, sin consulta |
+
+`GET` y `POST` cuentan juntos. Pasado cualquiera: **`429 RATE_LIMITED`**, `details.retry_after_seconds` y la cabecera
+`Retry-After`. Un pedido rechazado no cuenta (quien reintenta en bucle no alarga su castigo).
+
+- **El objetivo es abuso, no fuerza bruta:** el token es un HMAC de 128 bits; no hay nada que adivinar.
+- **Por qué tan holgado por IP:** el POST de un clic lo manda el servidor de Gmail, así que bajas legítimas de
+  personas distintas pueden llegar desde las mismas IPs de Google; y el CGNAT de los operadores móviles pone a mucha
+  gente detrás de una IP. Un 429 a una baja legítima es un correo más que termina marcado como spam.
+- **Por qué 10 por token:** una persona real hace 2 o 3 (abrir, confirmar, recargar); los escáneres que abren el
+  enlace también caben.
+
+**Cómo se comporta con varias máquinas — la limitación, dicha claro.** El contador vive **en memoria del proceso**, y
+cada máquina de Fly corre un solo worker de uvicorn, así que el límite es **por máquina**:
+
+- Con N máquinas detrás del proxy, quien reparte sus pedidos entre todas llega hasta **N veces** el límite. Hoy dev
+  corre una (y se apaga sola) y prod una siempre encendida: hoy N = 1.
+- **Se olvida al reiniciar** (deploy, arranque en frío de dev).
+- **Ventana fija:** en el borde entre dos ventanas caben hasta 2× el límite en poco tiempo.
+- **Memoria acotada:** a 10.000 llaves se barren las vencidas, y si no alcanza se vacía todo — perder un minuto de
+  conteo es mejor que dejar que alguien haga crecer el proceso hasta que Fly lo mate.
+
+Para cortar abuso alcanza. **No sirve** para un límite global (una cuota, un login propio): eso pide un contador
+compartido —una tabla, que pide migración, o un Redis, que es infraestructura nueva— y ninguno se justificaba para un
+endpoint que recibe unas decenas de visitas al día. Los tests vacían el limitador entre caso y caso
+(`tests/conftest.py`): la suite entera corre en un proceso y desde la misma IP.
+
+### 17-bis.3 · Lo dudoso
+
+- **`Fly-Client-IP` se da por confiable.** El proxy de Fly la escribe; si alguien llegara a la máquina sin pasar por
+  el proxy podría fingirla, pero la máquina no expone el puerto fuera de la red privada de Fly.
+- **DKIM de las cabeceras.** La RFC 8058 pide que la firma DKIM cubra `List-Unsubscribe` y `List-Unsubscribe-Post`.
+  Resend firma con DKIM y documenta este uso del campo `headers`, pero **no se verificó** en un correo real (exige la
+  key y el dominio verificado, como todo lo de §15–§20). Se ve en «Mostrar original» de Gmail: `dkim=pass` y las dos
+  cabeceras en `h=`.
+- **La prueba real del clic** —Gmail mostrando «Anular suscripción» y el POST llegando a Fly— queda para cuando se
+  encienda un aviso al cliente con Resend configurado.
 
 ---
 

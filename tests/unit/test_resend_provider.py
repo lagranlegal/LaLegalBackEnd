@@ -5,6 +5,7 @@ no, porque de eso depende que un Resend caído no se convierta en correos
 perdidos, y que una dirección rechazada no se reintente para siempre.
 """
 
+import dataclasses
 import json
 from typing import Any
 
@@ -82,3 +83,22 @@ async def test_network_error_is_retryable(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_without_key_the_default_is_the_null_provider() -> None:
     assert isinstance(providers.get_default_provider(), providers.NullProvider)
+
+
+async def test_mail_headers_travel_in_the_body_not_as_request_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`List-Unsubscribe` es una cabecera del CORREO: va en el campo `headers`
+    del cuerpo de Resend. Puesta como cabecera HTTP del request a la API, se
+    perdería sin error (§17-bis)."""
+    seen = _patch(monkeypatch, lambda r: httpx.Response(200, json={"id": "re_1"}))
+    one_click = {
+        "List-Unsubscribe": "<https://api.example.com/api/v1/public/unsubscribe/t>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+    await ResendProvider("k").send(dataclasses.replace(MESSAGE, headers=one_click))
+    assert json.loads(seen[0].content)["headers"] == one_click
+    assert "List-Unsubscribe" not in seen[0].headers
+
+    await ResendProvider("k").send(MESSAGE)
+    assert "headers" not in json.loads(seen[1].content)

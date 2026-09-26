@@ -93,3 +93,48 @@ def test_mask_email() -> None:
     assert unsubscribe.mask_email(None) is None
     assert unsubscribe.mask_email("   ") is None
     assert unsubscribe.mask_email("sin-arroba") == "s•••"
+
+
+# ------------------------------------ cabeceras de un clic (RFC 8058, §17-bis) ----
+
+
+def test_one_click_headers_point_to_the_api_post(
+    secret: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Al revés que el enlace del cuerpo, la cabecera apunta a la API: quien
+    la usa es el servidor de Gmail con un POST, y el front es estático."""
+    monkeypatch.setenv("PUBLIC_API_URL", "https://api.example.com/")
+    get_settings.cache_clear()
+    company_id, customer_id = uuid4(), uuid4()
+    headers = unsubscribe.list_unsubscribe_headers(company_id=company_id, customer_id=customer_id)
+
+    assert headers["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+    value = headers["List-Unsubscribe"]
+    # RFC 2369: la URI entre ángulos. RFC 8058: exactamente una, HTTPS.
+    assert value.startswith("<https://api.example.com/api/v1/public/unsubscribe/")
+    assert value.endswith(">") and value.count("<") == 1 and "//api/" not in value
+    token = value[1:-1].rsplit("/", 1)[1]
+    assert unsubscribe.read_token(token) == (company_id, customer_id)
+
+
+def test_on_fly_the_api_url_comes_from_the_app_name(
+    secret: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUBLIC_API_URL", "")
+    monkeypatch.setenv("FLY_APP_NAME", "compraventa-backend-dev")
+    get_settings.cache_clear()
+    headers = unsubscribe.list_unsubscribe_headers(company_id=uuid4(), customer_id=uuid4())
+    assert headers["List-Unsubscribe"].startswith(
+        "<https://compraventa-backend-dev.fly.dev/api/v1/public/unsubscribe/"
+    )
+
+
+def test_without_a_public_api_url_there_are_no_headers(
+    secret: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sin a dónde apuntar no se inventa nada: el correo sale igual, con su
+    enlace en el cuerpo, que es la salida obligatoria (§9.2-e)."""
+    monkeypatch.setenv("PUBLIC_API_URL", "")
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    get_settings.cache_clear()
+    assert unsubscribe.list_unsubscribe_headers(company_id=uuid4(), customer_id=uuid4()) == {}

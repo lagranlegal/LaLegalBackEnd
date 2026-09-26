@@ -449,3 +449,95 @@ def test_the_public_endpoints_need_no_session(client: TestClient, tenant: dict) 
     token = _token(tenant, customer["id"])
     body = client.get(f"/api/v1/public/unsubscribe/{token}").json()
     assert set(body) == {"company_name", "email_hint", "unsubscribed_at"}
+
+
+# ------------------------------- baja de un clic y límite de tasa (§17-bis) ----
+
+
+async def test_the_one_click_post_from_the_mail_provider_unsubscribes(
+    client: TestClient, tenant: dict
+) -> None:
+    """RFC 8058 §3.2: el servidor de Gmail/Yahoo hace POST a la URI de
+    `List-Unsubscribe` con el cuerpo `List-Unsubscribe=One-Click`, sin cookies
+    ni sesión, y espera la baja hecha — sin página intermedia."""
+    customer = _customer_with_consent(client, tenant)
+    token = _token(tenant, customer["id"])
+
+    response = client.post(
+        f"/api/v1/public/unsubscribe/{token}",
+        content="List-Unsubscribe=One-Click",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["unsubscribed_at"] is not None
+    row = await _row(
+        "select email_opt_out_at from public.customer where id = :id", {"id": customer["id"]}
+    )
+    assert row.email_opt_out_at is not None
+
+
+async def test_a_browser_opening_the_api_link_goes_to_the_page_without_unsubscribing(
+    client: TestClient, tenant: dict
+) -> None:
+    """Un cliente de correo que no sabe hacer el POST abre la URI de la
+    cabecera en el navegador. Ve la página de baja (que pregunta), no un JSON
+    — y abrirla sigue sin dar de baja."""
+    customer = _customer_with_consent(client, tenant)
+    token = _token(tenant, customer["id"])
+
+    response = client.get(
+        f"/api/v1/public/unsubscribe/{token}",
+        headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"https://app.example.com/baja/{token}"
+    # El `fetch` de la página manda `*/*`: ese sigue recibiendo el JSON.
+    assert client.get(f"/api/v1/public/unsubscribe/{token}").json()["unsubscribed_at"] is None
+    row = await _row(
+        "select email_opt_out_at from public.customer where id = :id", {"id": customer["id"]}
+    )
+    assert row.email_opt_out_at is None
+
+
+def test_the_same_link_hammered_gets_rate_limited(client: TestClient, tenant: dict) -> None:
+    """10 pedidos por token cada 10 minutos, GET y POST juntos. El 11 recibe
+    429 con su código y `Retry-After`. Una persona real hace 2 o 3."""
+    customer = _customer_with_consent(client, tenant)
+    token = _token(tenant, customer["id"])
+    for i in range(10):
+        method = "POST" if i % 2 else "GET"
+        assert client.request(method, f"/api/v1/public/unsubscribe/{token}").status_code == 200
+
+    blocked = client.post(f"/api/v1/public/unsubscribe/{token}")
+    assert blocked.status_code == 429
+    body = blocked.json()
+    assert body["code"] == "RATE_LIMITED"
+    assert 0 < body["details"]["retry_after_seconds"] <= 600
+    assert blocked.headers["Retry-After"] == str(body["details"]["retry_after_seconds"])
+
+    # Otro enlace, desde la misma IP, no paga por este.
+    other = _customer_with_consent(client, tenant)
+    other_token = _token(tenant, other["id"])
+    assert client.get(f"/api/v1/public/unsubscribe/{other_token}").status_code == 200
+
+
+def test_one_ip_sweeping_tokens_gets_rate_limited(client: TestClient, tenant: dict) -> None:
+    """60 por minuto por IP. Cada token basura es distinto, así que el límite
+    por token no los ve: los corta el de la IP. Detrás de Fly la IP es la de
+    `Fly-Client-IP`, no la del proxy."""
+    for i in range(60):
+        response = client.get(
+            f"/api/v1/public/unsubscribe/basura{i}", headers={"Fly-Client-IP": "203.0.113.7"}
+        )
+        assert response.json()["code"] == "UNSUBSCRIBE_LINK_INVALID"
+    blocked = client.get(
+        "/api/v1/public/unsubscribe/basura-61", headers={"Fly-Client-IP": "203.0.113.7"}
+    )
+    assert blocked.status_code == 429
+    assert blocked.json()["code"] == "RATE_LIMITED"
+    # Otra persona (otra IP real detrás del mismo proxy) no queda bloqueada.
+    other = client.get(
+        "/api/v1/public/unsubscribe/basura-x", headers={"Fly-Client-IP": "198.51.100.2"}
+    )
+    assert other.json()["code"] == "UNSUBSCRIBE_LINK_INVALID"

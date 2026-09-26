@@ -137,6 +137,14 @@ async def _prepare(
 
         payload: dict[str, Any] = dict(e["payload"] or {})
         legal_basis: str | None = None
+        # Cabeceras del correo. Solo las lleva el correo al CLIENTE (§17-bis):
+        # el resumen y las alertas van a usuarios de la empresa, que no se
+        # «dan de baja» de un enlace sino que se apagan en Configuración (y
+        # un clic de Gmail que les apagara el aviso de un faltante de caja
+        # sería una pérdida, no un favor); la invitación es un correo único
+        # pedido por un admin, no una lista. `List-Unsubscribe` en cualquiera
+        # de ellos prometería una salida que no existe.
+        mail_headers: dict[str, str] = {}
         if e["audience"] == "customer":
             customer = (
                 await repository.get_customer_contact(
@@ -174,6 +182,12 @@ async def _prepare(
             # credencial (pequeña, pero credencial) en una tabla exportable.
             try:
                 payload["unsubscribe_url"] = unsubscribe.unsubscribe_link(
+                    company_id=c["id"], customer_id=e["customer_id"]
+                )
+                # RFC 8058: la baja de un clic de Gmail/Yahoo. Sin URL pública
+                # del backend vuelve `{}` y el correo sale igual — la salida
+                # obligatoria es el enlace del cuerpo, esto mejora la entrega.
+                mail_headers = unsubscribe.list_unsubscribe_headers(
                     company_id=c["id"], customer_id=e["customer_id"]
                 )
             except unsubscribe.LinkNotConfigured as exc:
@@ -256,6 +270,7 @@ async def _prepare(
             text=rendered.text,
             reply_to=rendered.reply_to,
             idempotency_key=f"delivery-{d['id']}",
+            headers=mail_headers,
         ),
         legal_basis=legal_basis,
     )

@@ -84,6 +84,9 @@ async def notif(
     # hay cómo armarlo: el despachador no lo manda (§17).
     monkeypatch.setenv("FRONTEND_URL", "https://app.example.com")
     monkeypatch.setenv("NOTIFICATIONS_LINK_SECRET", "secreto-de-prueba-de-los-enlaces-de-baja")
+    # Con esto el correo al cliente lleva `List-Unsubscribe` (§17-bis); los de
+    # la empresa no deben llevarla aunque esté configurada.
+    monkeypatch.setenv("PUBLIC_API_URL", "https://api.example.com")
     get_settings.cache_clear()
 
     cid, admin_role, asesor_role = uuid4(), uuid4(), uuid4()
@@ -317,6 +320,10 @@ async def test_running_the_job_twice_does_not_duplicate(notif: dict[str, Any]) -
     assert message.from_header == '"Prendo" <notificaciones@prendo.com.co>'
     assert "Resumen semanal · Compraventa Avisos" in message.subject
     assert f"Contrato #{number}" in message.text
+    # §17-bis: el resumen va a un usuario de la empresa, que lo apaga en
+    # Configuración. Un «Anular suscripción» de Gmail acá prometería una salida
+    # que no existe.
+    assert message.headers == {}
     assert [d.status for d in await _deliveries(cid)] == ["sent"]
 
 
@@ -1174,6 +1181,16 @@ async def test_a_sent_mail_records_its_basis_and_carries_the_unsubscribe_link(
     assert prefix in message.html
     token = message.text.split(prefix, 1)[1].split()[0]
     assert unsubscribe.read_token(token) == (cid, notif["customer_mail"])
+
+    # §17-bis, RFC 8058: la baja de un clic, a la API (el POST lo manda el
+    # servidor del proveedor de correo), y para el MISMO cliente.
+    assert message.headers["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+    one_click = message.headers["List-Unsubscribe"]
+    assert one_click.startswith("<https://api.example.com/api/v1/public/unsubscribe/")
+    assert unsubscribe.read_token(one_click[1:-1].rsplit("/", 1)[1]) == (
+        cid,
+        notif["customer_mail"],
+    )
 
 
 async def test_without_link_config_a_customer_mail_does_not_go_out(

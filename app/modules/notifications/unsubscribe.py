@@ -29,6 +29,7 @@ en línea más rápido que la API.
 import base64
 import hashlib
 import hmac
+import os
 from uuid import UUID
 
 from app.core.settings import get_settings
@@ -36,6 +37,12 @@ from app.core.settings import get_settings
 _VERSION = b"\x01"
 _SIG_BYTES = 16
 _PATH = "/baja/"
+#: Donde el proveedor de correo hace el POST de un clic (RFC 8058). Es la
+#: ruta de `router.public_router`, que ya aceptaba POST e ignoraba el cuerpo.
+_API_PATH = "/api/v1/public/unsubscribe/"
+#: RFC 8058 §3.1: el valor exacto, literal, que el cliente de correo reenvía
+#: como cuerpo del POST.
+ONE_CLICK_POST = "List-Unsubscribe=One-Click"
 
 
 class LinkNotConfigured(Exception):
@@ -93,6 +100,59 @@ def unsubscribe_link(*, company_id: UUID, customer_id: UUID) -> str:
     if not base:
         raise LinkNotConfigured("FRONTEND_URL vacía: no hay página de baja a la que apuntar.")
     return base + _PATH + make_token(company_id=company_id, customer_id=customer_id)
+
+
+def _public_api_base() -> str:
+    """La URL pública de este backend, o '' si no se puede saber.
+
+    `PUBLIC_API_URL` manda; sin ella, en Fly se deriva de `FLY_APP_NAME` (Fly
+    la pone sola en toda máquina de la app, incluida la del job nocturno), así
+    que las cabeceras funcionan en dev y prod sin configurar un secreto más."""
+    explicit = get_settings().public_api_url.strip().rstrip("/")
+    if explicit:
+        return explicit
+    app_name = os.environ.get("FLY_APP_NAME", "").strip()
+    return f"https://{app_name}.fly.dev" if app_name else ""
+
+
+def list_unsubscribe_headers(*, company_id: UUID, customer_id: UUID) -> dict[str, str]:
+    """`List-Unsubscribe` + `List-Unsubscribe-Post` (RFC 2369 y RFC 8058).
+
+    Gmail y Yahoo las exigen desde 2024 a quien manda en volumen, y las usan
+    para mostrar «Anular suscripción» junto al remitente: la persona se da de
+    baja sin abrir el correo, en vez de marcarlo como spam — y esa marca la
+    paga `prendo.com.co` para todos los inquilinos (§9.2-e).
+
+    **Apuntan a la API, no a la página del front, y es la excepción a la regla
+    de este archivo:** acá el que llama es el SERVIDOR del proveedor de correo,
+    con un POST y el cuerpo `List-Unsubscribe=One-Click`, y la RFC pide que dé
+    de baja sin página intermedia. Un POST no lo manda un escáner que abre
+    enlaces: la RFC lo eligió justamente por eso (§1). El enlace del CUERPO
+    sigue yendo a la página del front, que solo muestra con el GET.
+
+    La RFC pide exactamente UNA URI HTTPS, así que no se agrega la de la
+    página. Un cliente que no sepa hacer el POST y abra esta URI en el
+    navegador cae en el GET, que redirige a la página (`router.get_unsubscribe`).
+
+    `{}` si no hay a dónde apuntar: el correo sale igual, con su enlace en el
+    cuerpo, que es el requisito (§9.2-e); las cabeceras mejoran la entrega,
+    no son la salida.
+    """
+    base = _public_api_base()
+    if not base:
+        return {}
+    token = make_token(company_id=company_id, customer_id=customer_id)
+    return {
+        "List-Unsubscribe": f"<{base}{_API_PATH}{token}>",
+        "List-Unsubscribe-Post": ONE_CLICK_POST,
+    }
+
+
+def page_link_for_token(token: str) -> str | None:
+    """La página de baja del front para un token ya armado, o None sin
+    `FRONTEND_URL`. No valida el token: la página lo hace al cargar."""
+    base = get_settings().frontend_url.strip().rstrip("/")
+    return base + _PATH + token if base else None
 
 
 def mask_email(email: str | None) -> str | None:

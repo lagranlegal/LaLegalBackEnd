@@ -136,6 +136,9 @@ tenant en el request, ni RLS que aplicar. Las reglas, para el próximo que haga 
   endpoint sin guard que no esté ahí sigue siendo un bug de revisión.
 - **Prefijo `/api/v1/public/`**, para que se vea en el path —y en cualquier regla de proxy o de logs— que no lleva
   sesión.
+- **Límite de tasa** (25/09/2026), porque sin sesión no hay JWT que haga de límite: 60 pedidos por minuto por IP y
+  10 cada 10 minutos por token, en memoria y **por máquina** (`app/common/rate_limit.py`, `NOTIFICACIONES.md`
+  §17-bis). Corta abuso; no es una cuota global.
 
 ### El Custom Access Token Hook y el estado `invited`
 

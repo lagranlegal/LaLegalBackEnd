@@ -12,6 +12,9 @@ class AppError(Exception):
 
     status_code: int = status.HTTP_400_BAD_REQUEST
     code: str = "BAD_REQUEST"
+    #: Cabeceras HTTP extra de la respuesta de error. Hoy solo `Retry-After`
+    #: del 429 (`app/common/rate_limit.py`).
+    headers: dict[str, str] | None = None
 
     def __init__(
         self, message: str, details: dict[str, Any] | None = None, code: str | None = None
@@ -119,18 +122,23 @@ class ImportCapitalExceedsPrincipalError(AppError):
 
 
 def _error_response(
-    status_code: int, code: str, message: str, details: dict[str, Any]
+    status_code: int,
+    code: str,
+    message: str,
+    details: dict[str, Any],
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={"code": code, "message": message, "details": details},
+        headers=headers,
     )
 
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
-        return _error_response(exc.status_code, exc.code, exc.message, exc.details)
+        return _error_response(exc.status_code, exc.code, exc.message, exc.details, exc.headers)
 
     @app.exception_handler(IntegrityError)
     async def handle_integrity_error(_request: Request, exc: IntegrityError) -> JSONResponse:

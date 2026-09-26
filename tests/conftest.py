@@ -38,3 +38,14 @@ def rsa_keypair() -> tuple[str, object]:
 @pytest.fixture
 def rsa_keypair_other() -> tuple[str, object]:
     return _generate_rsa_keypair()
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits() -> None:
+    """El límite de tasa del endpoint público de baja vive en memoria del
+    proceso (`app/common/rate_limit.py`), y la suite entera corre en uno solo
+    desde la misma IP de `TestClient`: sin esto, el test número 61 que abre
+    un enlace de baja recibiría un 429 por culpa de los otros sesenta."""
+    from app.common import rate_limit
+
+    rate_limit.reset_all()

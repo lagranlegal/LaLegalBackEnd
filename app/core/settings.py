@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     # un HMAC con clave vacía lo firma cualquiera. Cambiarlo invalida los
     # enlaces de los correos ya enviados: se rota solo si se filtró.
     notifications_link_secret: str = ""
+    # URL pública de ESTE backend (`https://compraventa-backend-dev.fly.dev`).
+    # La usa la cabecera `List-Unsubscribe` de los correos al cliente (RFC
+    # 8058, NOTIFICACIONES §17-bis): la baja de un clic la dispara el SERVIDOR
+    # del proveedor de correo con un POST, y el front (Vercel, estático) no
+    # tiene quién lo reciba. Vacía = se deriva de `FLY_APP_NAME`, que Fly pone
+    # solo en cada máquina; fuera de Fly y sin esto, los correos salen igual
+    # pero sin esas cabeceras (el enlace del cuerpo sigue siendo la salida).
+    public_api_url: str = ""
 
     @model_validator(mode="after")
     def _resolve_jwks_url(self) -> "Settings":

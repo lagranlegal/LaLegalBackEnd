@@ -37,6 +37,10 @@ class EmailMessage:
     #: registro, el reintento no duplica el correo (Resend respeta
     #: `Idempotency-Key` por 24 h).
     idempotency_key: str | None = None
+    #: Cabeceras del CORREO (no del request a Resend): hoy, `List-Unsubscribe`
+    #: y `List-Unsubscribe-Post` en los correos al cliente (§17-bis). Resend
+    #: las recibe en el campo `headers` del cuerpo.
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,8 @@ class ResendProvider:
         }
         if message.reply_to:
             payload["reply_to"] = message.reply_to
+        if message.headers:
+            payload["headers"] = dict(message.headers)
         headers = {"Authorization": f"Bearer {self._api_key}"}
         if message.idempotency_key:
             headers["Idempotency-Key"] = message.idempotency_key
