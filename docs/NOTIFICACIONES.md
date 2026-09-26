@@ -1,5 +1,7 @@
 # NOTIFICACIONES.md — Avisos por correo al cliente y a la empresa (spec)
 
+> **Estado (25/09/2026, cierre): FASE 5 IMPLEMENTADA en `dev`, sin desplegar** — los recordatorios al cliente R1–R4 tienen productor (un paso nuevo del job), agrupados por cliente y día, todos apagados por defecto; y las preguntas legales quedaron cerradas con el criterio de Mateo (§12.3, orientación, no concepto): **§20**.
+>
 > **Estado (25/09/2026, noche): FASE 7 IMPLEMENTADA en `dev`, sin desplegar** — las cuatro alertas inmediatas a la empresa (A1–A4) tienen productor, encendidas por catálogo y detrás del interruptor general, que sigue apagado: **§19**.
 >
 > **Estado (25/09/2026, tarde): FASES 4 y 6 IMPLEMENTADAS en `dev`, sin desplegar** — cada operación de dinero genera su aviso al cliente (C1–C7), todos apagados por defecto: **§18**.
@@ -569,6 +571,22 @@ Y por encima de la tabla, tres cortes que ganan siempre y en este orden: **no ha
 
 **(h) La salvedad, sin adornos.** **Esto es una recomendación de producto e ingeniería, no asesoría legal.** La **Ley 1581 de 2012** exige autorización previa, expresa e informada del titular **como regla general**, y contempla excepciones. **Si un aviso sobre el contrato que la propia persona firmó cae en una de ellas —o si la relación contractual basta como base— lo tiene que confirmar un abogado.** No cito artículos, decretos ni jurisprudencia a propósito: no los verifiqué, y un número inventado en un documento de diseño termina copiado en un correo a un cliente. Lo que el diseño garantiza no es tener la razón: es que **la respuesta del abogado sea un cambio de configuración y no un rediseño**.
 
+**(i) Qué papel sostiene la base `contract` (decisión del 25/09/2026, §12.3-4).** Hasta acá `contract` era «la
+relación contractual» en abstracto. Desde el 25/09 el criterio del dueño es concreto: la base se apoya en **una
+cláusula de autorización de avisos dentro del contrato firmado**, más la **política de tratamiento de datos**
+de la empresa (Ley 1581). La relación con lo construido:
+
+| Pieza | Dónde | Qué hace |
+|---|---|---|
+| La cláusula | `document_template` del contrato (editor del front, `00046`) | El front la ofrece como **ejemplo insertable**; la empresa decide si la usa y con qué redacción. **El backend no la lee ni la exige**: el cuerpo del contrato es del inquilino (§4.4) y es ProseMirror que renderiza el front |
+| El valor `email_basis = 'contract'` | `customer`, escrito por `create_contract`/`import_contract`/`extend_loan` (§17) | Sigue siendo lo que el despachador cruza con la finalidad (§9.2-c). No cambió nada del código |
+| La prueba | el contrato firmado | Es lo que §7 ya decía: la prueba de la base `contract` **es el contrato**. Con la cláusula adentro, esa prueba dice además qué autorizó |
+
+**Lo que esto NO resuelve, dicho:** el backend no puede saber si el contrato que firmó un cliente tenía la
+cláusula — una empresa que no la inserte sigue escribiendo `contract` igual. Validarlo exigiría leer el cuerpo
+del contrato impreso, que es del front y del inquilino. Queda como responsabilidad de la empresa, y es otra razón
+para la revisión legal previa que recomienda §12.3.
+
 ### 9.3 · Si el correo está mal escrito y le llega a un tercero
 
 Es el caso que no tiene vuelta atrás, y hay que separar dos cosas:
@@ -704,20 +722,56 @@ sin información**, umbrales **configurables por empresa**, y lo que va al **cli
 **Esto es criterio de producto, no asesoría legal.** La consulta al abogado lleva tres puntos: el aviso de
 remate (a), el de prórroga (7) y si la Ley 2300 aplica a los recordatorios (1).
 
-### 12.3 · Las tres preguntas legales, EN PAUSA (Mateo, 24/09/2026)
+### 12.3 · Las preguntas legales: CERRADAS con criterio del dueño (Mateo, 25/09/2026)
 
-Mateo decidió **no hacer la consulta por ahora**, con la condición de que activarlas después no cueste un
-rediseño. Consecuencia concreta:
+> **Esto es orientación, no un concepto de abogado.** Mateo decidió el criterio el 25/09/2026 sin hacer la
+> consulta que §12.2 proponía; este documento lo registra y lo implementa, pero **no lo vuelve una opinión
+> legal**. No se citan artículos ni decretos más allá de los nombres de las leyes, por la misma razón de
+> §9.2-h. **Recomendación firme: una revisión legal antes de encender cualquier recordatorio en una empresa
+> real** (y en particular antes de encender R5). Todo lo de abajo quedó como configuración, así que lo que
+> diga esa revisión se aplica sin rediseño.
 
-- **Todos los avisos al CLIENTE** —recordatorio de cuota (R1), cuota vencida (R2), prórroga (R3) y
-  `auction_ready_customer`— **se construyen y quedan en el catálogo con `default_enabled = false`**. La
-  Fase 5b entrega solo los avisos a la **empresa**. Encender uno es un interruptor por empresa, sin código.
-- **Los límites de la Ley 2300 se construyen como PARÁMETROS del despachador**, no como lógica fija:
-  tope de envíos por destinatario y semana, ventana horaria hábil, y exclusión de domingos y festivos
-  colombianos. Nacen **activos para `audience='customer'`** (el caso conservador) y sin efecto para la
-  empresa. Si el abogado dice que la ley no aplica, se relajan por configuración.
-- Lo que la decisión (1) fijó —3 días antes, el día del vencimiento, máximo uno semanal ya vencida— queda
-  como **valor por defecto** de esos eventos para el día que se enciendan.
+El 24/09 las tres preguntas quedaron en pausa, con los avisos al cliente construidos y apagados (el texto de
+esa pausa se reemplaza por este). El 25/09 Mateo las cerró así:
+
+**1. Ley 2300 de 2023 («Dejen de fregar»): TODO mensaje sobre un pago pendiente es cobranza — R1, R2, R3 y R4.**
+La ley alcanza a quien hace gestión de cobranza, directa o indirecta, y no distingue entre recordar antes del
+vencimiento y cobrar después: el criterio es que el mensaje trata de un pago que el cliente tiene pendiente.
+Por eso los cuatro recordatorios (y R5) caen bajo sus límites, y los límites de fábrica que la fase 1 dejó
+como parámetros ya coinciden con ella: **lunes a viernes de 7:00 a 19:00, sábados de 8:00 a 15:00, sin
+domingos ni festivos, y máximo un contacto por semana por canal.** Aplican a los cuatro sin excepción.
+**Los comprobantes transaccionales (C1–C7) NO son cobranza** —acusan algo que el cliente acaba de hacer— y ya
+quedaron fuera del tope semanal en las fases 4 y 6 (§18.1-1); siguen dentro de la ventana horaria, que es la
+lectura conservadora que no rompe nada. La consecuencia práctica de aplicar el tope semanal a R1 está en §20.4.
+
+**2. R3 (entró en prórroga) NO pesa como el remate: informa un cambio de estado.** Es la respuesta a §12.1-7.
+El correo lo dice: es **informativo** y **no reemplaza lo pactado en el contrato**, que es el que fija plazos
+y condiciones. R4 (la prórroga vence pronto) lleva la misma aclaración. Siguen `default_enabled = false`:
+cerrar la pregunta legal no enciende nada, porque encender es de cada empresa (§4.3). Esto reemplaza
+§12.2-7, que los había dejado apagados *hasta el concepto*.
+
+**3. R5 (`auction_ready_customer`) es un aviso de CORTESÍA, no la notificación formal.**
+- **La notificación formal es la que diga el contrato.** En una compraventa con pacto de retroventa la
+  propiedad se consolida según lo pactado en el contrato; el correo no es el acto que la consolida ni el
+  aviso que el contrato exige, y no puede contradecirlo (§2.2-c).
+- **Prueba.** La Ley 527 de 1999 da valor probatorio a los mensajes de datos, pero **que el servidor acepte un
+  correo no prueba que el titular lo leyó** — un `sent` (o el futuro `delivered` de Resend) dice que un
+  servidor lo recibió, nada más. Si una empresa necesita **prueba de entrega**, lo que sirve es **correo
+  electrónico certificado** (por ejemplo 4-72 e-entrega o Certicámara). **Queda anotado como mejora futura, sin
+  construir:** sería otro canal (`channel`) sobre los mismos eventos (§4.1-b), con la constancia colgada del
+  `provider_id` de la entrega.
+- **La plantilla se lo dice al cliente en lenguaje llano:** *«Este es un aviso de cortesía. La notificación
+  formal es la que establece su contrato, en la forma y los plazos que allí se pactaron: este correo no
+  reemplaza lo pactado en su contrato.»* (`templates.COURTESY_NOTE`).
+- **Sigue apagado por defecto y conserva la advertencia al encenderlo** (§2.2-c): la pantalla que lo enciende
+  —en el front— muestra lo que asume quien lo enciende. Esta decisión le quita a la advertencia el tono de
+  «pregunta sin respuesta», no su razón de ser.
+
+**4. La base legal «contrato» (§9.2) se apoya en una cláusula de autorización de avisos DENTRO del contrato
+firmado, más la política de tratamiento de datos (Ley 1581).** No es una casilla nueva ni un cambio de datos:
+es qué papel sostiene el valor `email_basis = 'contract'`. El front va a ofrecer esa cláusula como **ejemplo
+insertable** en el editor de plantillas de contrato (otro trabajo, en `frontend-starter`); la relación está en
+§9.2-i.
 
 ## 13. Defectos y cosas de arrastre encontradas al escribir esto
 
@@ -1147,7 +1201,7 @@ apagado el hecho **se registra igual** y sin entregas (§4.3) — test `test_off
 - **La pantalla de preferencias no muestra `transactional_in_weekly_cap`** (el front no se tocó). El campo es aditivo en
   el `GET`/`PATCH` y el front no lo manda, así que no rompe nada; el valor por defecto es el correcto.
 - **Webhook de Resend, `delivered`/`bounced`, y verificado en vivo con un correo real:** pendientes, como en §15–§17.
-- **R1–R4 (fase 5)** siguen sin productor.
+- ~~**R1–R4 (fase 5)** siguen sin productor.~~ Tienen productor desde la fase 5 (§20).
 
 ### 18.5 · La devolución de liquidación mixta: UN aviso con los dos montos (F21-37, 25/09/2026)
 
@@ -1337,4 +1391,142 @@ en el resumen.
   resumen (E4) con su marca de umbral. Agregarlo sería un quinto tipo en el catálogo (migración) y una decisión de
   producto; no se hizo.
 - **Verificado en vivo con un correo real: pendiente**, como en §15–§18.
+
+---
+
+## 20. Fase 5 — lo implementado (25/09/2026)
+
+**Sin migración.** Todo cupo en `00058` y `00059`: los cuatro tipos ya estaban en el catálogo con su familia
+(`reminder` R1/R4, `state` R2/R3) y `default_enabled = false`, `notification_event.target_date` ya existía para el
+rezago, y el tope semanal ya distinguía cobranza de comprobante por familia (§18.1-1). **Nada se encendió:** los
+cuatro siguen apagados por catálogo y el interruptor de la empresa sigue apagado.
+
+**Código:** `notifications/reminders.py` (nuevo: el planificador puro `plan_reminders` y el paso
+`build_all_reminders`), `contracts/integration.list_reminder_contracts` (fechas y montos derivados con `rules`),
+`preferences.ReminderSchedule` (los días de antelación como parámetro), el campo `reminders` del
+`GET`/`PATCH /notifications/settings`, las plantillas de R1–R5 (`templates._reminder_lines`, `INFORMATIVE_NOTE`,
+`COURTESY_NOTE`) y el paso nuevo en `jobs/nightly.py`. Tests: `tests/integration/test_customer_reminders.py` (17,
+contra Postgres), `tests/unit/test_notification_reminders.py` (8, el planificador), cuatro en
+`test_notification_templates.py` y uno en `test_notifications.py` (la preferencia). Cada uno se vio fallar antes
+de implementar (contra un `build_all_reminders` vacío, las plantillas viejas y el esquema sin `reminders`).
+
+### 20.1 · Qué sale y cuándo
+
+El job tiene ahora **cinco pasos**: estados → suscripciones → resumen → **recordatorios** → despacho. El paso nuevo
+va después de `recompute_all_statuses` (R2 y R3 leen el estado persistido, §5.2) y antes del despacho (que manda lo
+que el paso crea esa misma noche). Una transacción por empresa, las mismas empresas que el resumen (activas y con
+suscripción vigente); la falla de una se registra y no tumba el job.
+
+| # | Evento | Día objetivo (se deriva del ancla, con `rules`) | `dedupe_key` |
+|---|---|---|---|
+| R1 | `installment_due_soon` | `add_months(interest_paid_until, 1) − N`, con N en `installment_days_before` (de fábrica **3 y 0**) | `due_soon:<customer_id>:<día objetivo>` |
+| R2 | `installment_overdue` | el día en que entró en mora: `add_months(interest_paid_until, 1)` (solo `in_arrears`) | `arrears:<customer_id>:<día objetivo>` |
+| R3 | `extension_started` | el día en que entró en prórroga: `add_months(interest_paid_until, arrears_window_months)` (solo `in_extension`, y solo si cuadra con `extension_ends_at`, §20.3-4) | `extension:<customer_id>:<día objetivo>` |
+| R4 | `extension_ending_soon` | `extension_ends_at − N`, con N en `extension_days_before` (de fábrica **3**) | `extension_ending:<customer_id>:<día objetivo>` |
+| R5 | `auction_ready_customer` | sin cambios: el día siguiente al fin de la prórroga, en el paso del resumen (§15.1) | `auction_ready:<contract_id>:<extension_ends_at>` |
+
+- **Agrupación (§2.3): un evento por (cliente, día objetivo, tipo)**, con todos sus contratos en
+  `payload.contracts` —número, fecha, monto y saldo de capital (§9.1)—, ordenados por número. Tres cuotas de Juana
+  que tocan el mismo martes —dos que vencen el viernes y una que vence ese día— son **un** correo. `entity_type`
+  del evento es `customer`.
+- **Idempotencia:** la llave lleva la fecha objetivo, nunca la de corrida (§6.1): correr dos veces la misma noche,
+  o tres días tarde, da la misma llave; el mes siguiente, otra. `on conflict do nothing` como camino normal.
+- **La ventana de búsqueda** es de 7 días hacia atrás (`max(7, stale_after_days + 1)`), re-evaluada cada noche. Si
+  el job estuvo caído, lo que cayó dentro de esos días se registra y `service.record_event` aplica el rezago de
+  siempre: todavía es noticia → `pending`; ya no → `skipped_stale` (§5.3). Lo anterior a 7 días no se registra.
+- **Montos:** R1 dice la cuota (`rules.monthly_interest`); R2, R3 y R4 dicen lo que cuesta ponerse al día hoy
+  (`monthly_interest × months_between(interest_paid_until, hoy)`). Todo sale de `contracts.integration`:
+  `notifications` no calcula una fecha ni un interés.
+- **Plantillas** (molde de §8.1, marca de la empresa en el encabezado, enlace de baja, de usted): fechas
+  **absolutas** («vence el 6 de septiembre de 2030», nunca «en 3 días», porque un aviso que sale un día tarde dentro
+  de la ventana tiene que seguir siendo cierto), «Si ya pagó, no tenga en cuenta este mensaje», y el recuadro con la
+  aclaración: **R3 y R4** «informativo … no reemplaza lo pactado en su contrato»; **R5** «aviso de cortesía; la
+  notificación formal es la que establece su contrato» (§12.3). Ni prenda ni cédula: test sobre el render.
+- **Lo demás no lo decide este paso:** la base legal, el apagado y el rezago los aplica `record_event` como a todo
+  evento; la hora hábil y el tope de la Ley 2300, el despachador, en un solo lugar (§14). Los cuatro son familia
+  `reminder`/`state`: gastan y respetan el tope semanal; los comprobantes no.
+- **Preferencia nueva:** `company.settings.notifications.reminders = {installment_days_before, extension_days_before}`,
+  listas de 0 a 30 días, sin repetir, hasta 5 puntos. Faltante = default; nada exige backfill. En el `GET`/`PATCH`
+  como `reminders` (aditivo; el `PATCH` se audita dentro de `update_settings`, como el resto).
+
+### 20.2 · Las decisiones, y su porqué
+
+**1. El día del vencimiento es UN aviso, no dos.** `months_owed = months_between(interest_paid_until, hoy)` pasa de
+0 a 1 **el mismo día** en que vence la cuota: ese día el contrato entra en mora (o, con ventana de un mes, directo en
+prórroga). El «día del vencimiento» que §12.2-1 le pidió a R1 y el «entró en mora» de R2 caen el mismo día sobre el
+mismo contrato. Dos correos el mismo día —«vence hoy» y «venció»— son el mismo aviso dicho dos veces. Quedó como
+C2/C3 (§18.1-3): **si el evento de estado de ese día (R2, o R3 con ventana 1) está encendido, él lleva el contrato**;
+si no, lo lleva R1. El hecho de estado se registra siempre (apagado, sin entrega); lo que cambia es si R1 lo repite.
+
+**2. Por qué la agrupación manda sobre la llave de §6.1.** Ver §20.3-1.
+
+**3. Por qué una ventana fija de búsqueda y no «desde la última corrida», como el resumen.** El resumen necesita
+saber hasta dónde reportó para no contar dos veces; acá la `dedupe_key` ya lo garantiza, y re-evaluar 7 días cada
+noche cuesta una consulta por empresa sobre sus contratos vivos. Es más simple y no depende de otra fila.
+
+### 20.3 · Discrepancias: dónde el código contradijo este documento (y ganó)
+
+1. **§6.1 da llaves por CONTRATO para R2 y R3 (`arrears:<contract_id>:<interest_paid_until>`,
+   `extension:<contract_id>:<extension_ends_at>`) y una de R1 con `<lead_days>`. Con cualquiera de las dos, §2.3 es
+   imposible:** una llave por contrato es un evento por contrato, y un evento es un correo; y con `<lead_days>` en la
+   llave, dos contratos del mismo cliente en etapas distintas (uno a 3 días, otro que vence hoy) partirían el día en
+   dos correos. Ganó §2.3 —*«la decisión que los números de la base obligan»*—: la llave es
+   `<tipo>:<customer_id>:<día objetivo>`. **La propiedad que §6.1 buscaba se conserva:** el día objetivo de R2 y R3
+   se deriva del ancla (`interest_paid_until`), así que cuando el cliente abona y el ancla avanza, la llave del mes
+   siguiente es otra sin que nadie limpie nada.
+2. **El día del vencimiento de R1 coincide con la entrada en mora de R2** (§20.2-1). El diseño no lo vio porque §2.2
+   se escribió con R1 solo a 3 días, y §12.2-1 le agregó el día del vencimiento después.
+3. **R2 «ya vencida, máximo uno por semana» (§12.2-1) quedó como UN aviso por ancla, no uno semanal.** §12.2-1 fijó
+   un **tope**, no una cadencia, y la llave anclada al ancla de §6.1 manda uno por mes adeudado: al entrar en mora.
+   No se construyó un recordatorio que se repita cada semana mientras siga en mora. Si se quisiera, sería una llave
+   con la semana (`arrears_weekly:<cliente>:<lunes>`) y una decisión de producto — y con el tope de la ley, gastaría
+   el único contacto de la semana.
+4. **§15.2-1 deriva el día de entrada en prórroga del ancla, y eso miente si el ancla se mueve con la prórroga en
+   curso.** Un cliente que debe más meses que la ventana puede abonar uno y seguir en prórroga: el ancla avanza, el
+   día «derivado» se corre y caería dentro de la ventana de búsqueda — un segundo «entró en prórroga» sobre la misma
+   prórroga. `list_reminder_contracts` exige que el día derivado cuadre con el `extension_ends_at` persistido
+   (`add_months(entrada, extension_months) == extension_ends_at`); si no, no hay R3. Test con el caso. **El resumen
+   (E2) tiene el mismo defecto** en `list_state_entries` y no se tocó (fuera de alcance; el efecto allá es una fila
+   de más en un correo interno).
+5. **R2 sí puede repetirse tras un abono parcial en mora, y es a propósito.** Si debe dos meses y paga uno, el ancla
+   avanza y sigue en mora: la cuota siguiente también está vencida, y es un hecho nuevo — exactamente lo que la llave
+   de §6.1 anclada a `interest_paid_until` producía. Si cae dentro de la ventana de búsqueda sale (o queda
+   `skipped_stale`), con su fecha real.
+6. **§2.2 decía «R4: `extension_ends_at` cae en N días»** sin N. Quedó 3, como R1, y es parámetro.
+7. **La plantilla de R1 de la fase 1 traía la fecha arriba y un solo vencimiento.** Con la agrupación, cada contrato
+   lleva su fecha (el mismo día pueden tocar cuotas de fechas distintas). Un payload con el formato viejo se sigue
+   redactando (la fecha de arriba completa la de cada contrato).
+
+### 20.4 · Operación, deploy, y lo dudoso
+
+- **El deploy tiene que actualizar la Machine `nightly-job`**, no solo la app: `fly deploy` no la toca (F21-10,
+  ARCHITECTURE §11), y sin eso el paso nuevo no corre — los recordatorios no nacen nunca y **nadie se entera**, porque
+  un paso que no existe no falla. Usar `scripts/deploy_dev.sh` (`e5819ae`), que lleva la Machine a la misma imagen
+  conservando su `schedule` (nunca la destruye: borrarla causó el incidente del 27/08). Verificación
+  desde la base, de solo lectura: `select max(occurred_on) from notification_event where event_type in
+  ('installment_due_soon','installment_overdue','extension_started','extension_ending_soon')` — la primera noche
+  registra los hechos (apagados) de cualquier empresa con contratos vivos.
+- **La primera noche registra hechos de hasta 7 días atrás**, apagados y sin entrega en toda empresa que no los
+  encendió. En una empresa que los encienda, lo de más de 2 días queda `skipped_stale` — es el rastro esperado, no
+  una falla. Volumen: del orden de 4 filas por cliente con contrato vivo por mes (§10).
+- **Sin migración, sin secretos nuevos.** Los de siempre para que un correo al cliente salga: `RESEND_API_KEY`,
+  `FRONTEND_URL` y `NOTIFICATIONS_LINK_SECRET` **en la Machine del job** (§17.3). El front puede ir después: el campo
+  `reminders` es aditivo.
+- **Dudoso — el tope semanal se come el aviso del día del vencimiento.** Con la ley aplicada tal cual (§12.3-1, un
+  contacto por semana) y los días de fábrica (3 y 0), **el recordatorio de 3 días antes sale y el del día del
+  vencimiento queda `throttled`** (test `test_weekly_cap_throttles_the_second_reminder_but_not_a_receipt`). Y como el
+  día del vencimiento lo lleva R2 si está encendido (§20.2-1), **con R1 y R2 encendidos el R2 también queda
+  `throttled`**, y el siguiente contacto posible es R3, meses después. No es un defecto del código: son las dos
+  decisiones juntas. Si Mateo prefiere el aviso del día del vencimiento, se deja `installment_days_before: [0]`; si
+  prefiere los dos, hay que relajar `max_per_week` — y eso es justo lo que la ley limita.
+- **Dudoso — sin prioridad dentro de la misma noche.** Si a un cliente le tocan dos recordatorios de tipos distintos
+  la misma noche (R1 de un contrato y R3 de otro), sale el primero que tome el despachador y el otro queda
+  `throttled`; el orden entre entregas creadas en la misma transacción no está definido (`claim_due_deliveries`
+  ordena por `scheduled_at`, que es el mismo). Lo razonable sería que ganara R3 (la última campana); no se hizo.
+- **Dudoso — cambiar un interruptor a mitad del día** puede producir, en una segunda corrida de esa misma noche, R1
+  «vence hoy» además del R2 que ya salió (la llave es otra). Caso de borde: el job corre una vez al día.
+- **Dudoso — la cláusula del contrato no se verifica** (§9.2-i): el backend escribe `contract` aunque la empresa no
+  haya insertado la cláusula en su plantilla.
+- **Revisión legal antes de encender** en una empresa real (§12.3): la recomendación sigue en pie.
+- **Webhook de Resend y verificado en vivo con un correo real:** pendientes, como en §15–§19.
 
