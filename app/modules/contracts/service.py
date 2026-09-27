@@ -536,6 +536,43 @@ async def import_contract(
     return await get_contract(db, company_id=company_id, contract_id=contract_id)
 
 
+async def _persist_status_locked(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID, today: date
+) -> bool:
+    """Persiste el estado calculado, releyendo el contrato BLOQUEADO y
+    recalculando sobre esa fila. Devuelve si escribió.
+
+    Lo usan el GET y el job nocturno, que leen sin bloquear y solo llegan acá
+    cuando el estado cambió (F4-01): sin la relectura bloqueada, uno que leyó
+    "en mora" justo antes de que un abono confirmara pisaba el `active`
+    recién escrito con su estado viejo. Así una lectura que no cambia nada
+    sigue sin esperar a nadie.
+    """
+    locked = await repository.get_contract_for_update(
+        db, company_id=company_id, contract_id=contract_id
+    )
+    if locked is None:
+        return False
+    lm = locked._mapping
+    new_status, new_extension_ends_at = rules.compute_status(
+        current_status=lm["status"],
+        interest_paid_until=lm["interest_paid_until"],
+        arrears_window_months=lm["arrears_window_months"],
+        extension_months=lm["extension_months"],
+        extension_ends_at=lm["extension_ends_at"],
+        today=today,
+    )
+    if new_status == lm["status"] and new_extension_ends_at == lm["extension_ends_at"]:
+        return False
+    return await repository.update_contract_status(
+        db,
+        company_id=company_id,
+        contract_id=contract_id,
+        status=new_status,
+        extension_ends_at=new_extension_ends_at,
+    )
+
+
 async def get_contract(db: AsyncSession, *, company_id: UUID, contract_id: UUID) -> ContractOut:
     row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
     if row is None:
@@ -552,32 +589,9 @@ async def get_contract(db: AsyncSession, *, company_id: UUID, contract_id: UUID)
         today=today,
     )
     if new_status != m["status"] or new_extension_ends_at != m["extension_ends_at"]:
-        # Hay que ESCRIBIR, así que se relee bloqueando y se recalcula sobre
-        # esa fila (F4-01): sin esto, un GET que leyó "en mora" justo antes de
-        # que un abono confirmara pisaba el `active` recién escrito con su
-        # estado viejo. Solo bloquea cuando va a escribir — un GET que no
-        # cambia nada sigue sin esperar a nadie.
-        locked = await repository.get_contract_for_update(
-            db, company_id=company_id, contract_id=contract_id
+        await _persist_status_locked(
+            db, company_id=company_id, contract_id=contract_id, today=today
         )
-        assert locked is not None
-        lm = locked._mapping
-        new_status, new_extension_ends_at = rules.compute_status(
-            current_status=lm["status"],
-            interest_paid_until=lm["interest_paid_until"],
-            arrears_window_months=lm["arrears_window_months"],
-            extension_months=lm["extension_months"],
-            extension_ends_at=lm["extension_ends_at"],
-            today=today,
-        )
-        if new_status != lm["status"] or new_extension_ends_at != lm["extension_ends_at"]:
-            await repository.update_contract_status(
-                db,
-                company_id=company_id,
-                contract_id=contract_id,
-                status=new_status,
-                extension_ends_at=new_extension_ends_at,
-            )
         row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
         assert row is not None
 
@@ -1088,14 +1102,10 @@ async def recompute_all_statuses(db: AsyncSession) -> int:
             today=today,
         )
         if new_status != m["status"] or new_extension_ends_at != m["extension_ends_at"]:
-            await repository.update_contract_status(
-                db,
-                company_id=m["company_id"],
-                contract_id=m["id"],
-                status=new_status,
-                extension_ends_at=new_extension_ends_at,
-            )
-            updated += 1
+            if await _persist_status_locked(
+                db, company_id=m["company_id"], contract_id=m["id"], today=today
+            ):
+                updated += 1
     return updated
 
 
