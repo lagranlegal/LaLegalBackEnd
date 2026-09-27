@@ -760,3 +760,77 @@ async def test_selling_a_fraction_of_a_countable_product_is_rejected(
     )
     assert rechazada.status_code == 400, rechazada.text
     assert "fraccionarias" in rechazada.json()["message"]
+
+
+# --------------------------------------------------------------------------
+# Referencias entre empresas (SEC-07 / F6-06, auditoría 27/09/2026)
+# --------------------------------------------------------------------------
+async def _cliente_de_otra_empresa() -> tuple[str, str]:
+    otra, cliente = uuid4(), uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("insert into public.company (id, name) values (:id, 'Otra empresa (test)')"),
+            {"id": str(otra)},
+        )
+        await session.execute(
+            text(
+                "insert into public.customer (id, company_id, full_name, doc_type, doc_number, "
+                "phone) values (:id, :cid, 'Cliente ajeno', 'cc', :doc, '3000000000')"
+            ),
+            {"id": str(cliente), "cid": str(otra), "doc": str(uuid4().int)[:10]},
+        )
+    return str(otra), str(cliente)
+
+
+async def _borrar_empresa(company_id: str) -> None:
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("delete from public.customer where company_id = :cid"), {"cid": company_id}
+        )
+        await session.execute(
+            text("delete from public.company where id = :cid"), {"cid": company_id}
+        )
+
+
+async def _ventas(company_id: object) -> int:
+    async with AsyncSessionLocal() as session:
+        return int(
+            (
+                await session.execute(
+                    text("select count(*) from public.sale where company_id = :cid"),
+                    {"cid": str(company_id)},
+                )
+            ).scalar_one()
+        )
+
+
+async def test_una_venta_solo_acepta_clientes_de_la_misma_empresa(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=sales_tenant["company_id"], register_id=sales_tenant["register_id"]
+    )
+    otra, cliente_ajeno = await _cliente_de_otra_empresa()
+    try:
+        for customer_id in (cliente_ajeno, str(uuid4())):
+            response = client.post(
+                "/api/v1/sales",
+                headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+                json={
+                    "customer_id": customer_id,
+                    "payment_method": "cash",
+                    "lines": [
+                        {
+                            "item_id": str(sales_tenant["item_id"]),
+                            "quantity": 1,
+                            "unit_price": "500000.00",
+                        }
+                    ],
+                },
+            )
+            assert response.status_code == 404, response.text
+            assert response.json()["code"] == "NOT_FOUND"
+            assert response.json()["details"] == {"customer_id": customer_id}
+        assert await _ventas(sales_tenant["company_id"]) == 0
+    finally:
+        await _borrar_empresa(otra)

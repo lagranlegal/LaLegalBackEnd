@@ -2397,3 +2397,40 @@ async def test_F6_11_el_mismo_egreso_con_la_misma_clave_da_de_baja_una_vez(
 
     item = client.get(f"/api/v1/inventory/items/{item_id}", headers=_headers(token)).json()
     assert Decimal(item["quantity"]) == 4
+
+
+async def test_un_ingreso_solo_acepta_proveedores_de_la_misma_empresa(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """SEC-07 (27/09/2026): la FK del proveedor se valida sin RLS."""
+    otra, proveedor = uuid4(), uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("insert into public.company (id, name) values (:id, 'Otra (test)')"),
+            {"id": str(otra)},
+        )
+        await session.execute(
+            text(
+                "insert into public.supplier (id, company_id, name, code_letter) "
+                "values (:id, :cid, 'Proveedor ajeno', 'Z')"
+            ),
+            {"id": str(proveedor), "cid": str(otra)},
+        )
+    try:
+        for supplier_id in (proveedor, uuid4()):
+            response = client.post(
+                "/api/v1/inventory/entries",
+                headers=_headers(inventory_tenant["token"]),
+                json=_entry_payload(inventory_tenant, supplier_id=str(supplier_id)),
+            )
+            assert response.status_code == 404, response.text
+            assert response.json()["code"] == "NOT_FOUND"
+            assert response.json()["details"] == {"supplier_id": str(supplier_id)}
+    finally:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text("delete from public.supplier where company_id = :cid"), {"cid": str(otra)}
+            )
+            await session.execute(
+                text("delete from public.company where id = :cid"), {"cid": str(otra)}
+            )

@@ -186,6 +186,18 @@ async def create_entry(
     is_purchase = body.origin_type == "purchase"
     if is_purchase and body.supplier_id is None:
         raise AppError("Un ingreso de compra requiere `supplier_id`.")
+    # Mismo hueco que el cliente de una venta (SEC-07): la FK
+    # `inventory_entry.supplier_id` se valida sin RLS y aceptaba el proveedor
+    # de otra empresa. Se busca acá, bajo el tenant, antes de escribir.
+    if body.supplier_id is not None:
+        supplier = await catalogs_repo.get_supplier(
+            db, company_id=company_id, supplier_id=body.supplier_id
+        )
+        if supplier is None:
+            raise NotFoundError(
+                "El proveedor no existe en esta empresa.",
+                details={"supplier_id": str(body.supplier_id)},
+            )
     if not is_purchase and body.payment_method is not None:
         raise AppError("Solo un ingreso de compra puede llevar `payment_method`.")
 

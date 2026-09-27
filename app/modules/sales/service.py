@@ -115,6 +115,22 @@ async def create_sale(
             (),
         )
 
+    # El cliente se busca en ESTA empresa antes de escribir nada (SEC-07 /
+    # F6-06, 27/09/2026). La FK `sale.customer_id → customer(id)` la valida
+    # Postgres sin RLS, así que por sí sola aceptaba el cliente de otra
+    # empresa —y le mandaba el comprobante C6—, y un id que no existe en
+    # ninguna reventaba en un 500. Ajeno o inexistente responden lo mismo,
+    # 404, para no revelar cuál de los dos es.
+    if body.customer_id is not None:
+        customer = await customers_repo.get_customer(
+            db, company_id=company_id, customer_id=body.customer_id
+        )
+        if customer is None:
+            raise NotFoundError(
+                "El cliente no existe en esta empresa.",
+                details={"customer_id": str(body.customer_id)},
+            )
+
     items = []
     subtotal_sum = Decimal("0")
     for line in body.lines:
