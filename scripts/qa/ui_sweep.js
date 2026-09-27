@@ -11,7 +11,7 @@ function ratio(a,b){const l1=lum(a),l2=lum(b);return (Math.max(l1,l2)+.05)/(Math
     const ctx = await b.newContext({viewport:{width:1440,height:900}, colorScheme: tema});
     const p = await ctx.newPage();
     await p.goto(`${BASE}/auth/login`, {waitUntil:'networkidle'});
-    await p.fill('input[type=email]','qa.admin@qalab.com'); await p.fill('input[type=password]', process.env.QA_PASSWORD||'QaLab2026!');
+    await p.fill('input[type=email]','qa.admin@qalab.com'); await p.fill('input[type=password]', process.env.QA_PASSWORD||process.env.QA_PASSWORD);
     await p.click('button[type=submit]'); await p.waitForTimeout(6000);
     const malos = new Map();
     for (const ruta of RUTAS) {

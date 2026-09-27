@@ -9,7 +9,7 @@ const ACTORS = [
   { role: 'Asesor',    email: 'qa.asesor@qalab.com' },
   { role: 'Bodega',    email: 'qa.bodega@qalab.com' },
 ];
-const PW = process.env.QA_PASSWORD || (process.env.QA_PASSWORD || 'QaLab2026!');
+const PW = process.env.QA_PASSWORD || (process.env.QA_PASSWORD);
 
 (async () => {
   const browser = await chromium.launch();

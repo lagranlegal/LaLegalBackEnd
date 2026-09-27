@@ -13,7 +13,7 @@ const { chromium } = require(process.env.QA_PLAYWRIGHT
   || `${process.env.HOME}/.npm/_npx/e41f203b7505f1fb/node_modules/playwright`);
 
 const BASE = process.env.QA_FRONT_URL || 'https://la-legal-front-end.vercel.app';
-const PW = process.env.QA_PASSWORD || 'QaLab2026!';
+const PW = process.env.QA_PASSWORD;
 const [email, viejoId, nuevoId] = process.argv.slice(2);
 
 const texto = async (page) => (await page.textContent('body')) || '';

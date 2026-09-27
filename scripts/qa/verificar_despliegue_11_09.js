@@ -8,7 +8,7 @@
 //
 //   node scripts/qa/verificar_despliegue_11_09.js
 const API = process.env.QA_API_URL || 'https://compraventa-backend-dev.fly.dev';
-const PW = process.env.QA_PASSWORD || 'QaLab2026!';
+const PW = process.env.QA_PASSWORD;
 const SUPA = 'https://driyubkodnsqxbtxcmaz.supabase.co';
 const ANON = process.env.QA_ANON_KEY;
 

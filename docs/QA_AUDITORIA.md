@@ -2730,7 +2730,7 @@ Todo vive en el proyecto Supabase de **dev** (`driyubkodnsqxbtxcmaz`). Las empre
 | `ZZ QA — auditoria 08/09` | La empresa espejo principal: catálogo, cuentas, clientes, contratos |
 | `ZZ QA-B — aislamiento 08/09` | La segunda empresa, para probar que A no ve nada de B |
 
-Seis usuarios, todos con contraseña `QaLab2026!`:
+Seis usuarios, todos con la misma contraseña de laboratorio (no se escribe acá: el repo es público; va en `QA_PASSWORD`). Rotada el 27/09/2026:
 
 | Correo | Rol | Permisos |
 |---|---|---|

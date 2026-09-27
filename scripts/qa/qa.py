@@ -25,7 +25,7 @@ SCRATCH.mkdir(exist_ok=True)
 
 # Contraseña de los usuarios de prueba de la empresa espejo (ambiente dev,
 # usuarios desechables). Se puede sobreescribir con QA_PASSWORD.
-TEST_PASSWORD = os.environ.get("QA_PASSWORD", "QaLab2026!")
+TEST_PASSWORD = os.environ.get("QA_PASSWORD", "")  # sin default: el repo es público
 
 
 def _dotenv(path: pathlib.Path) -> dict[str, str]:

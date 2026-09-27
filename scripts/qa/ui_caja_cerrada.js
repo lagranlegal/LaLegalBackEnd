@@ -20,7 +20,7 @@ const ck = (c, t, d = '') => { console.log(`  ${c ? 'OK ' : 'MAL'} ${t}${d ? ` â
 
   await page.goto(`${BASE}/auth/login`, { waitUntil: 'networkidle' });
   await page.fill('input[type=email]', 'qa.b.admin@qalab.com');
-  await page.fill('input[type=password]', 'QaLab2026!');
+  await page.fill('input[type=password]', process.env.QA_PASSWORD);
   await page.click('button[type=submit]');
   await page.waitForURL((u) => !u.pathname.startsWith('/auth'), { timeout: 45000 }).catch(() => {});
   await page.waitForTimeout(3000);

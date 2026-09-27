@@ -6,7 +6,7 @@ const ANCHOS = [360, 768, 1280];
   const b = await chromium.launch(); const ctx = await b.newContext({viewport:{width:1280,height:900}});
   const p = await ctx.newPage();
   await p.goto(`${BASE}/auth/login`, {waitUntil:'networkidle'});
-  await p.fill('input[type=email]','qa.admin@qalab.com'); await p.fill('input[type=password]', process.env.QA_PASSWORD||'QaLab2026!');
+  await p.fill('input[type=email]','qa.admin@qalab.com'); await p.fill('input[type=password]', process.env.QA_PASSWORD||process.env.QA_PASSWORD);
   await p.click('button[type=submit]'); await p.waitForTimeout(6000);
   console.log(`${'ruta'.padEnd(22)} ${ANCHOS.map(a=>String(a).padStart(12)).join('')}`);
   for (const ruta of RUTAS) {

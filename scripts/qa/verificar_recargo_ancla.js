@@ -10,7 +10,7 @@
 //   QA_ANON_KEY=... node scripts/qa/verificar_recargo_ancla.js
 const API = 'https://compraventa-backend-dev.fly.dev';
 const SUPA = 'https://driyubkodnsqxbtxcmaz.supabase.co';
-const ANON = process.env.QA_ANON_KEY, PW = 'QaLab2026!';
+const ANON = process.env.QA_ANON_KEY, PW = process.env.QA_PASSWORD;
 
 const j = async (r) => ({ status: r.status, body: await r.json().catch(() => null) });
 (async () => {

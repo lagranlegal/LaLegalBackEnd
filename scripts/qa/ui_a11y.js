@@ -11,7 +11,7 @@ function ratio(a,b){const l1=lum(a),l2=lum(b);return ((Math.max(l1,l2)+0.05)/(Ma
   const page = await ctx.newPage();
   await page.goto(`${BASE}/auth/login`, { waitUntil:'networkidle' });
   await page.fill('input[type=email]','qa.asesor@qalab.com');
-  await page.fill('input[type=password]',(process.env.QA_PASSWORD || 'QaLab2026!'));
+  await page.fill('input[type=password]',(process.env.QA_PASSWORD));
   await page.click('button[type=submit]');
   await page.waitForTimeout(6000);
   // contraste de todo texto visible
