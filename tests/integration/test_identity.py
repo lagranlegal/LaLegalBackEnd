@@ -359,14 +359,18 @@ async def test_deactivate_last_admin_is_blocked(client: TestClient, tenant: dict
     assert response.json()["code"] == "LAST_ADMIN_SAFEGUARD"
 
 
-def test_reassign_last_admin_away_is_blocked(client: TestClient, tenant: dict) -> None:
+def test_nadie_cambia_su_propio_rol(client: TestClient, tenant: dict) -> None:
+    """Antes, el último admin cambiándose el rol llegaba a
+    `LAST_ADMIN_SAFEGUARD`. Desde F3-02 (27/09/2026) nadie cambia su propio
+    rol —ni el último admin ni nadie—, así que la respuesta es otra y llega
+    antes: el cambio de rol lo decide siempre otra persona."""
     response = client.patch(
         f"/api/v1/identity/users/{tenant['admin_user_id']}/role",
         headers=_headers(tenant["admin_token"]),
         json={"role_id": str(tenant["basic_role_id"])},
     )
-    assert response.status_code == 409
-    assert response.json()["code"] == "LAST_ADMIN_SAFEGUARD"
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "CANNOT_CHANGE_OWN_ROLE"
 
 
 def test_remove_admin_permission_from_only_admin_role_is_blocked(
@@ -634,3 +638,176 @@ async def test_F3_07_desactivar_y_degradar_a_la_vez_no_dejan_cero(tenant: dict) 
             )
         ).scalar_one()
     assert admins == 1
+
+
+# --------------------------------------------------------------------------
+# Quien gestiona usuarios o roles solo reparte lo que tiene (F3-02, 27/09/2026)
+# --------------------------------------------------------------------------
+async def _usuario_con_permisos(tenant: dict, nombre: str, codes: list[str]) -> tuple[UUID, str]:
+    """Crea un rol con exactamente `codes` y un usuario activo con ese rol."""
+    role_id, user_id = uuid4(), uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("insert into public.role (id, company_id, name) values (:id, :cid, :name)"),
+            {"id": str(role_id), "cid": str(tenant["company_id"]), "name": nombre},
+        )
+        await session.execute(
+            text(
+                "insert into public.role_permission (role_id, permission_id) "
+                "select :rid, id from public.permission where code = any(:codes)"
+            ),
+            {"rid": str(role_id), "codes": codes},
+        )
+        await session.execute(
+            text(
+                "insert into public.app_user (id, company_id, role_id, full_name, email, status) "
+                "values (:id, :cid, :rid, :name, :email, 'active')"
+            ),
+            {
+                "id": str(user_id),
+                "cid": str(tenant["company_id"]),
+                "rid": str(role_id),
+                "name": nombre,
+                "email": f"{nombre.lower().replace(' ', '-')}-{user_id}@example.com",
+            },
+        )
+    token = make_token(
+        tenant["private_pem"],
+        sub=str(user_id),
+        company_id=str(tenant["company_id"]),
+        role_id=str(role_id),
+    )
+    return user_id, token
+
+
+async def _gestor(tenant: dict) -> tuple[UUID, str]:
+    return await _usuario_con_permisos(
+        tenant, "Gestor", ["identity.manage_users", "inventory.view"]
+    )
+
+
+async def test_gestor_no_puede_cambiarse_su_propio_rol(client: TestClient, tenant: dict) -> None:
+    gestor_id, token = await _gestor(tenant)
+    response = client.patch(
+        f"/api/v1/identity/users/{gestor_id}/role",
+        headers=_headers(token),
+        json={"role_id": str(tenant["admin_role_id"])},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "CANNOT_CHANGE_OWN_ROLE"
+
+
+async def test_solo_se_asigna_un_rol_contenido_en_los_permisos_del_actor(
+    client: TestClient, tenant: dict
+) -> None:
+    _, token = await _gestor(tenant)
+    otro_id, _ = await _usuario_con_permisos(tenant, "Otro", [])
+
+    hacia_admin = client.patch(
+        f"/api/v1/identity/users/{otro_id}/role",
+        headers=_headers(token),
+        json={"role_id": str(tenant["admin_role_id"])},
+    )
+    assert hacia_admin.status_code == 403, hacia_admin.text
+    body = hacia_admin.json()
+    assert body["code"] == "ROLE_EXCEEDS_ACTOR_PERMISSIONS"
+    assert "identity.manage_roles" in body["details"]["missing_permissions"]
+
+    # Bodega (solo inventory.view) sí está dentro de lo que el gestor tiene.
+    hacia_bodega = client.patch(
+        f"/api/v1/identity/users/{otro_id}/role",
+        headers=_headers(token),
+        json={"role_id": str(tenant["basic_role_id"])},
+    )
+    assert hacia_bodega.status_code == 200, hacia_bodega.text
+    assert hacia_bodega.json()["role_id"] == str(tenant["basic_role_id"])
+
+
+async def test_no_se_cambia_el_rol_de_alguien_con_mas_permisos_que_el_actor(
+    client: TestClient, tenant: dict
+) -> None:
+    _, token = await _gestor(tenant)
+    admin2, _ = await _segundo_admin(tenant)
+    response = client.patch(
+        f"/api/v1/identity/users/{admin2}/role",
+        headers=_headers(token),
+        json={"role_id": str(tenant["basic_role_id"])},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "ROLE_EXCEEDS_ACTOR_PERMISSIONS"
+
+
+async def test_solo_se_invita_con_un_rol_contenido_en_los_permisos_del_actor(
+    client: TestClient, tenant: dict, mocked_invite: list[str]
+) -> None:
+    _, token = await _gestor(tenant)
+    response = client.post(
+        "/api/v1/identity/invitations",
+        headers=_headers(token),
+        json={
+            "email": "invitado-admin@example.com",
+            "full_name": "Invitado",
+            "role_id": str(tenant["admin_role_id"]),
+            "send_email": False,
+        },
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "ROLE_EXCEEDS_ACTOR_PERMISSIONS"
+    assert mocked_invite == []  # no se llegó a crear nada en Supabase Auth
+
+
+async def test_enlace_de_acceso_solo_para_usuarios_dentro_de_los_permisos_del_actor(
+    client: TestClient, tenant: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _fake(email: str) -> str:
+        return "https://supabase.test/verify?token=recovery-fake"
+
+    monkeypatch.setattr(identity_auth_admin, "generate_recovery_link", _fake)
+    _, token = await _gestor(tenant)
+    response = client.post(
+        f"/api/v1/identity/users/{tenant['admin_user_id']}/recovery-link",
+        headers=_headers(token),
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "ROLE_EXCEEDS_ACTOR_PERMISSIONS"
+
+    bodega_id, _ = await _usuario_con_permisos(tenant, "Bodeguero", ["inventory.view"])
+    ok = client.post(f"/api/v1/identity/users/{bodega_id}/recovery-link", headers=_headers(token))
+    assert ok.status_code == 200, ok.text
+
+
+async def test_editar_un_rol_no_agrega_permisos_que_el_actor_no_tiene(
+    client: TestClient, tenant: dict
+) -> None:
+    _, token = await _usuario_con_permisos(
+        tenant, "Editor de roles", ["identity.manage_roles", "inventory.view"]
+    )
+    url = f"/api/v1/identity/roles/{tenant['basic_role_id']}/permissions"
+
+    agrega_ajeno = client.put(
+        url,
+        headers=_headers(token),
+        json={"permission_codes": ["inventory.view", "cashbox.reopen"]},
+    )
+    assert agrega_ajeno.status_code == 403, agrega_ajeno.text
+    assert agrega_ajeno.json()["code"] == "ROLE_EXCEEDS_ACTOR_PERMISSIONS"
+    assert agrega_ajeno.json()["details"]["missing_permissions"] == ["cashbox.reopen"]
+
+    # Quitar sí se puede, y agregar lo que el actor tiene también.
+    quita = client.put(url, headers=_headers(token), json={"permission_codes": []})
+    assert quita.status_code == 200, quita.text
+    agrega_propio = client.put(
+        url, headers=_headers(token), json={"permission_codes": ["identity.manage_roles"]}
+    )
+    assert agrega_propio.status_code == 200, agrega_propio.text
+
+
+async def test_clonar_un_rol_exige_tener_sus_permisos(client: TestClient, tenant: dict) -> None:
+    _, token = await _usuario_con_permisos(tenant, "Editor", ["identity.manage_roles"])
+    response = client.post(
+        "/api/v1/identity/roles",
+        headers=_headers(token),
+        json={"name": "Copia de Admin", "clone_from_role_id": str(tenant["admin_role_id"])},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "ROLE_EXCEEDS_ACTOR_PERMISSIONS"

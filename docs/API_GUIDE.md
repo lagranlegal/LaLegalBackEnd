@@ -525,6 +525,8 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `NOT_FOUND` | 404 | El recurso no existe (o no pertenece a tu empresa — mismo código, no se revela cuál). |
 | `CONFLICT` / `LAST_ADMIN_SAFEGUARD` | 409 | Ver salvaguarda del último admin arriba. |
 | `CANNOT_DEACTIVATE_SELF` | 409 | Un usuario intentó desactivar su propia cuenta. Se valida en el backend, no solo en la UI: ocultar el botón no es protección. |
+| `ROLE_EXCEEDS_ACTOR_PERMISSIONS` | 403 | Quien actúa intentó asignar, invitar con, clonar o darle a un rol permisos que él mismo no tiene, o generar un enlace de acceso (o cambiarle el rol) a alguien con permisos que él no tiene. `details.missing_permissions` lista cuáles. Un administrador con el catálogo completo no lo ve nunca. |
+| `CANNOT_CHANGE_OWN_ROLE` | 403 | Un usuario intentó cambiar su propio rol. El cambio de rol lo decide siempre otra persona. |
 | `USER_ALREADY_INVITED` | 409 | Se invitó otra vez a alguien que sigue en `invited`. Reinvitar anularía el enlace anterior; el mensaje manda a «Generar enlace de activación» desde su ficha. |
 | `USER_ALREADY_EXISTS` | 409 | Ese correo ya es un usuario de **esta** empresa (activo o inactivo). Si está inactivo, el camino es reactivarlo. |
 | `EMAIL_ALREADY_REGISTERED` | 409 | Ese correo ya tiene cuenta en la plataforma, en **otra** empresa. Nunca se confirma en cuál (aislamiento entre tenants). |

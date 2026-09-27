@@ -5,7 +5,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
-from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.errors import AppError, ConflictError, NotFoundError, PermissionDeniedError
 from app.core.security import CurrentUser
 from app.core.security import get_role_permissions as get_cached_role_permissions
 from app.modules.identity import auth_admin, integration, repository
@@ -55,6 +55,45 @@ def _row_to_role(row: Row[Any]) -> RoleOut:
     )
 
 
+async def _actor_permission_codes(db: AsyncSession, actor_role_id: UUID) -> set[str]:
+    """Permisos del rol de quien actúa, leídos de la base y NO del caché.
+
+    El caché de `require_permission` (TTL 60 s) basta para decidir si alguien
+    entra a un endpoint; para decidir qué puede OTORGAR se lee la fila vigente,
+    así un rol recortado hace un segundo ya no reparte lo que perdió.
+    """
+    return set(await repository.role_permission_codes(db, role_id=actor_role_id))
+
+
+def _ensure_within_actor(codes: set[str], actor_codes: set[str], *, message: str) -> None:
+    """Quien gestiona usuarios o roles solo reparte permisos que él mismo tiene.
+
+    Es la regla que hace que `identity.manage_users` sea lo que su nombre dice
+    —gestionar las cuentas de la gente— y no un atajo a cualquier rol de la
+    empresa: asignar, invitar, generar un enlace de acceso o editar un rol
+    exige que los permisos en juego sean un subconjunto de los del actor
+    (auditoría 27/09/2026, F3-02). Un administrador con el catálogo completo
+    no nota ninguna diferencia.
+
+    `details.missing_permissions` lista lo que le falta al actor, para que la
+    pantalla pueda decir cuál y no solo "no se puede".
+    """
+    missing = codes - actor_codes
+    if missing:
+        raise PermissionDeniedError(
+            message,
+            details={"missing_permissions": sorted(missing)},
+            code="ROLE_EXCEEDS_ACTOR_PERMISSIONS",
+        )
+
+
+async def _ensure_role_within_actor(
+    db: AsyncSession, *, role_id: UUID, actor_role_id: UUID, message: str
+) -> None:
+    codes = set(await repository.role_permission_codes(db, role_id=role_id))
+    _ensure_within_actor(codes, await _actor_permission_codes(db, actor_role_id), message=message)
+
+
 async def list_users(
     db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
 ) -> CursorPage[UserOut]:
@@ -71,6 +110,7 @@ async def invite_user(
     email: str,
     full_name: str,
     invited_by: UUID,
+    acting_role_id: UUID,
     send_email: bool = True,
 ) -> tuple[InvitedUserOut, integration.InvitationEmail | None]:
     """Devuelve también el correo a mandar después del commit (§16): el router
@@ -79,6 +119,12 @@ async def invite_user(
     role = await repository.get_role(db, company_id=company_id, role_id=role_id)
     if role is None:
         raise NotFoundError("El rol indicado no existe en esta empresa.")
+    await _ensure_role_within_actor(
+        db,
+        role_id=role_id,
+        actor_role_id=acting_role_id,
+        message="No puedes invitar a alguien con un rol que tiene permisos que tú no tienes.",
+    )
 
     # Invitar dos veces al mismo correo es lo NORMAL: "el enlace no le llegó,
     # mándaselo otra vez". Sin esta comprobación el segundo intento reventaba
@@ -136,8 +182,22 @@ async def _role_has_admin_permission(db: AsyncSession, role_id: UUID) -> bool:
 
 
 async def update_user_role(
-    db: AsyncSession, *, company_id: UUID, user_id: UUID, new_role_id: UUID, acting_user_id: UUID
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    user_id: UUID,
+    new_role_id: UUID,
+    acting_user_id: UUID,
+    acting_role_id: UUID,
 ) -> UserOut:
+    # Nadie cambia su propio rol: ni para subirlo ni para bajarlo. Un cambio de
+    # rol es una decisión que toma OTRA persona y queda auditada a su nombre
+    # (F3-02). Se valida antes del candado: no hay nada que contar.
+    if user_id == acting_user_id:
+        raise PermissionDeniedError(
+            "No puedes cambiar tu propio rol. Pídeselo a otra persona que gestione usuarios.",
+            code="CANNOT_CHANGE_OWN_ROLE",
+        )
     # F3-07: antes de leer nada, el candado de la salvaguarda del último admin.
     await repository.lock_admin_safeguard(db, company_id=company_id)
     user = await repository.get_user(db, company_id=company_id, user_id=user_id)
@@ -148,6 +208,21 @@ async def update_user_role(
         raise NotFoundError("El rol indicado no existe en esta empresa.")
 
     old_role_id = user._mapping["role_id"]
+    # Las dos puntas: el rol que se entrega Y el que la persona tiene hoy. Si
+    # solo se mirara el nuevo, quien gestiona usuarios podría cambiarle el rol
+    # a alguien con más permisos que él —quitárselos—, y eso también es
+    # decidir sobre permisos que no le pertenecen.
+    actor_codes = await _actor_permission_codes(db, acting_role_id)
+    _ensure_within_actor(
+        set(await repository.role_permission_codes(db, role_id=new_role_id)),
+        actor_codes,
+        message="No puedes asignar un rol que tiene permisos que tú no tienes.",
+    )
+    _ensure_within_actor(
+        set(await repository.role_permission_codes(db, role_id=old_role_id)),
+        actor_codes,
+        message="No puedes cambiarle el rol a alguien que tiene permisos que tú no tienes.",
+    )
     if old_role_id != new_role_id and await _role_has_admin_permission(db, old_role_id):
         if not await _role_has_admin_permission(db, new_role_id):
             remaining = await repository.count_active_admins(
@@ -253,11 +328,19 @@ async def create_role(
     description: str | None,
     clone_from_role_id: UUID | None,
     acting_user_id: UUID,
+    acting_role_id: UUID,
 ) -> RoleOut:
     if clone_from_role_id is not None:
         source = await repository.get_role(db, company_id=company_id, role_id=clone_from_role_id)
         if source is None:
             raise NotFoundError("El rol a clonar no existe en esta empresa.")
+        # Clonar es crear un rol con esos permisos: misma regla que editarlos.
+        await _ensure_role_within_actor(
+            db,
+            role_id=clone_from_role_id,
+            actor_role_id=acting_role_id,
+            message="No puedes clonar un rol que tiene permisos que tú no tienes.",
+        )
 
     role_id = uuid4()
     await repository.insert_role(
@@ -327,6 +410,7 @@ async def update_role_permissions(
     role_id: UUID,
     codes: list[str],
     acting_user_id: UUID,
+    acting_role_id: UUID,
 ) -> list[str]:
     # F3-07: quitarle `identity.manage_roles` a un rol es el tercer camino
     # para quedarse sin admins; comparte el candado con los otros dos.
@@ -344,6 +428,13 @@ async def update_role_permissions(
         )
 
     before_codes = await repository.role_permission_codes(db, role_id=role_id)
+    # Solo se exige para lo que se AGREGA: un permiso que el rol ya tenía no lo
+    # está otorgando quien edita, y quitar nunca amplía nada (F3-02).
+    _ensure_within_actor(
+        set(codes) - set(before_codes),
+        await _actor_permission_codes(db, acting_role_id),
+        message="No puedes darle a un rol un permiso que tú no tienes.",
+    )
     if _ADMIN_PERMISSION in before_codes and _ADMIN_PERMISSION not in codes:
         remaining = await repository.count_other_active_admins(
             db, company_id=company_id, excluding_role_id=role_id
@@ -448,7 +539,12 @@ async def get_me(db: AsyncSession, *, user: CurrentUser) -> MeOut:
 
 
 async def generate_recovery_link(
-    db: AsyncSession, *, company_id: UUID, user_id: UUID, acting_user_id: UUID
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    user_id: UUID,
+    acting_user_id: UUID,
+    acting_role_id: UUID,
 ) -> RecoveryLinkOut:
     """Enlace para que un usuario vuelva a poner su contraseña, sin correo.
 
@@ -468,6 +564,18 @@ async def generate_recovery_link(
         raise ConflictError(
             "Este usuario está inactivo. Reactívalo primero si quiere volver a entrar."
         )
+
+    # El enlace deja entrar COMO esa persona, con todos sus permisos: generarlo
+    # para alguien con permisos que el actor no tiene sería entregarlos (F3-02).
+    await _ensure_role_within_actor(
+        db,
+        role_id=user._mapping["role_id"],
+        actor_role_id=acting_role_id,
+        message=(
+            "No puedes generar un enlace de acceso para alguien que tiene permisos "
+            "que tú no tienes."
+        ),
+    )
 
     email = user._mapping["email"]
     link = await auth_admin.generate_recovery_link(email)

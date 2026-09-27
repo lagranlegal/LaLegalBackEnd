@@ -91,6 +91,7 @@ async def invite_user(
         email=body.email,
         full_name=body.full_name,
         invited_by=user.id,
+        acting_role_id=user.role_id,
         send_email=body.send_email,
     )
     if email is not None:
@@ -113,6 +114,7 @@ async def update_user_role(
         user_id=user_id,
         new_role_id=body.role_id,
         acting_user_id=user.id,
+        acting_role_id=user.role_id,
     )
 
 
@@ -159,6 +161,7 @@ async def create_role(
         description=body.description,
         clone_from_role_id=body.clone_from_role_id,
         acting_user_id=user.id,
+        acting_role_id=user.role_id,
     )
 
 
@@ -201,6 +204,7 @@ async def update_role_permissions(
         role_id=role_id,
         codes=body.permission_codes,
         acting_user_id=user.id,
+        acting_role_id=user.role_id,
     )
 
 
@@ -231,5 +235,9 @@ async def generate_recovery_link(
     ningún log.
     """
     return await service.generate_recovery_link(
-        db, company_id=user.company_id, user_id=user_id, acting_user_id=user.id
+        db,
+        company_id=user.company_id,
+        user_id=user_id,
+        acting_user_id=user.id,
+        acting_role_id=user.role_id,
     )
