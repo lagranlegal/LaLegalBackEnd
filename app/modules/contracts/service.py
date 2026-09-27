@@ -890,6 +890,10 @@ async def create_payment(
 
     # El cash_movement refleja el efectivo REAL recibido (neto de descuento);
     # contract_payment guarda el desglose bruto para contabilidad.
+    #
+    # `account_id=resolved.account_id` en los DOS movimientos: sin él,
+    # `record_movement` cae en la cuenta predeterminada del medio de pago y,
+    # con dos bancos, el abono aparece en uno al que nunca llegó (B-01).
     net_interest_collected = interest_amount - discount_amount
     if net_interest_collected > 0:
         await cashbox_integration.record_movement(
@@ -904,6 +908,7 @@ async def create_payment(
             reference_type="contract_payment",
             reference_id=payment_id,
             created_by=user.id,
+            account_id=resolved.account_id,
         )
     if capital_amount > 0:
         await cashbox_integration.record_movement(
@@ -918,6 +923,7 @@ async def create_payment(
             reference_type="contract_payment",
             reference_id=payment_id,
             created_by=user.id,
+            account_id=resolved.account_id,
         )
     # El abono en sí, no solo su descuento. Es la operación de dinero más
     # frecuente del empeño; sin ella, Auditoría no puede responder "¿qué hizo

@@ -121,6 +121,45 @@ async def sum_reference_movements(
     return Decimal(str(result.scalar_one()))
 
 
+async def get_reference_movement_account(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    reference_type: str,
+    reference_id: UUID,
+    direction: str,
+) -> UUID | None:
+    """Cuenta por la que se movió un documento, leída de su movimiento.
+
+    Lo usa un contra-movimiento (anular una venta) para revertir contra la
+    MISMA cuenta a la que entró la plata. Sin esto, `record_movement` resuelve
+    la predeterminada del medio de pago, que con dos bancos —o con una venta
+    por Sistecrédito, medio `other`— es otra cuenta: una queda inflada y la
+    otra en negativo. Se lee del movimiento y no del documento porque el
+    movimiento es lo que efectivamente tocó el saldo.
+    """
+    result = await db.execute(
+        text(
+            """
+            select account_id
+            from public.cash_movement
+            where company_id = :company_id and reference_type = :reference_type
+              and reference_id = :reference_id and direction = :direction
+            order by created_at
+            limit 1
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "reference_type": reference_type,
+            "reference_id": str(reference_id),
+            "direction": direction,
+        },
+    )
+    row = result.first()
+    return UUID(str(row[0])) if row is not None and row[0] is not None else None
+
+
 async def _default_account_for(
     db: AsyncSession, *, company_id: UUID, payment_method: str
 ) -> UUID | None:

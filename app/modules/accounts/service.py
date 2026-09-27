@@ -238,41 +238,47 @@ async def settle_account(
     if destino._mapping["type"] == "cash" and session is None:
         raise AppError("No hay una sesión de caja abierta para recibir efectivo.")
 
+    # Los dos movimientos van SIEMPRE. Con la caja cerrada y un destino que no
+    # es efectivo (lo normal: Sistecrédito consigna al banco), `session_id` es
+    # None y está bien — no pertenecen a ningún turno, igual que un traslado
+    # entre bancos, y por eso tampoco tocan el arqueo de ningún cajón. Antes
+    # iban dentro de un `if session_id is not None`: sin caja abierta se
+    # saltaban en silencio, se auditaba la liquidación y se respondía 200 con
+    # la plata sin registrar en ninguna de las dos cuentas (B-04).
     session_id = session._mapping["id"] if session is not None else None
-    if session_id is not None:
-        await cashbox_integration.record_movement(
-            db,
-            session_id=session_id,
-            company_id=company_id,
-            module="store",
-            direction="out",
-            # Conceptos propios desde 00038: un "ajuste" significa que el
-            # sistema no cuadra con la realidad. Una liquidación sí cuadra —
-            # es la operación normal que cierra toda venta con Sistecrédito.
-            concept="settlement_out",
-            amount=body.amount_settled,
-            payment_method="other",
-            reference_type="settlement",
-            reference_id=account_id,
-            created_by=actor_id,
-            notes=f"Liquidación de {origen._mapping['name']}",
-            account_id=account_id,
-        )
-        await cashbox_integration.record_movement(
-            db,
-            session_id=session_id,
-            company_id=company_id,
-            module="store",
-            direction="in",
-            concept="settlement_in",
-            amount=body.amount_received,
-            payment_method="cash" if destino._mapping["type"] == "cash" else "transfer",
-            reference_type="settlement",
-            reference_id=account_id,
-            created_by=actor_id,
-            notes=body.notes or f"Recibido de {origen._mapping['name']}",
-            account_id=body.to_account_id,
-        )
+    await cashbox_integration.record_movement(
+        db,
+        session_id=session_id,
+        company_id=company_id,
+        module="store",
+        direction="out",
+        # Conceptos propios desde 00038: un "ajuste" significa que el
+        # sistema no cuadra con la realidad. Una liquidación sí cuadra —
+        # es la operación normal que cierra toda venta con Sistecrédito.
+        concept="settlement_out",
+        amount=body.amount_settled,
+        payment_method="other",
+        reference_type="settlement",
+        reference_id=account_id,
+        created_by=actor_id,
+        notes=f"Liquidación de {origen._mapping['name']}",
+        account_id=account_id,
+    )
+    await cashbox_integration.record_movement(
+        db,
+        session_id=session_id,
+        company_id=company_id,
+        module="store",
+        direction="in",
+        concept="settlement_in",
+        amount=body.amount_received,
+        payment_method="cash" if destino._mapping["type"] == "cash" else "transfer",
+        reference_type="settlement",
+        reference_id=account_id,
+        created_by=actor_id,
+        notes=body.notes or f"Recibido de {origen._mapping['name']}",
+        account_id=body.to_account_id,
+    )
 
     comision = body.amount_settled - body.amount_received
     await identity_repo.insert_audit_log(

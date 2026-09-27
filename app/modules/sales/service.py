@@ -593,6 +593,20 @@ async def void_sale(
         # cash_movement.amount exige > 0 — una venta 100% descontada no tuvo
         # efectivo real de por medio, así que anularla tampoco genera un
         # contra-movimiento (no hay nada que devolver).
+        #
+        # Revierte contra la cuenta a la que ENTRÓ la venta, no contra la
+        # predeterminada del medio de pago: con dos bancos o con una venta por
+        # Sistecrédito (medio `other`) son cuentas distintas. Y no pasa por
+        # `resolve_account_for_movement` a propósito: ese rechaza una salida
+        # de una cuenta `settlement`, y acá es justo lo correcto — anular una
+        # venta por convenio borra lo que el convenio ya no nos debe.
+        original_account = await cashbox_integration.get_reference_movement_account(
+            db,
+            company_id=company_id,
+            reference_type="sale",
+            reference_id=sale_id,
+            direction="in",
+        )
         await cashbox_integration.record_movement(
             db,
             session_id=session._mapping["id"],
@@ -606,6 +620,7 @@ async def void_sale(
             reference_id=sale_id,
             created_by=actor_id,
             notes="Anulación de venta",
+            account_id=original_account or row._mapping["account_id"],
         )
     await identity_repo.insert_audit_log(
         db,

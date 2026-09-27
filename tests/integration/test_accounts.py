@@ -240,6 +240,77 @@ async def test_settling_derives_the_commission_without_configuring_it(
     assert body["new_pending_balance"] == "0.00"
 
 
+@pytest.mark.asyncio
+async def test_settling_to_bank_with_the_drawer_closed_still_records_both_movements(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Liquidar a un banco con la caja cerrada registra la plata igual.
+
+    Una consignación de Sistecrédito no pasa por el cajón, así que no exige
+    sesión. Pero los dos movimientos iban dentro de un `if session_id is not
+    None`: con la caja cerrada se saltaban en silencio, se auditaba la
+    liquidación y se respondía 200 — la cuenta por cobrar seguía debiendo lo
+    que ya se cobró y el banco nunca recibía nada.
+    """
+    token = accounts_tenant["token"]
+    cid = str(accounts_tenant["company_id"])
+    sistecredito = _create(client, token, name="Sistecrédito", type="settlement")
+    banco = next(a for a in _accounts(client, token) if a["type"] == "bank")
+
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into public.cash_movement "
+                "(company_id, session_id, module, direction, concept, reference_type, "
+                " reference_id, amount, payment_method, account_id) "
+                "values (:cid, :sid, 'store', 'in', 'sale', 'sale', :ref, 500000, "
+                " 'other', :aid)"
+            ),
+            {
+                "cid": cid,
+                "sid": str(accounts_tenant["session_id"]),
+                "ref": str(uuid4()),
+                "aid": sistecredito["id"],
+            },
+        )
+        await s.execute(
+            text("update public.cash_session set status = 'closed' where id = :sid"),
+            {"sid": str(accounts_tenant["session_id"])},
+        )
+
+    r = client.post(
+        f"/api/v1/accounts/{sistecredito['id']}/settle",
+        headers=_headers(token),
+        json={
+            "to_account_id": banco["id"],
+            "amount_settled": "500000.00",
+            "amount_received": "460000.00",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["new_pending_balance"] == "0.00"
+
+    async with AsyncSessionLocal() as s, s.begin():
+        rows = (
+            await s.execute(
+                text(
+                    "select concept::text, account_id, amount, session_id "
+                    "from public.cash_movement where company_id = :cid "
+                    "and reference_type = 'settlement' order by concept"
+                ),
+                {"cid": cid},
+            )
+        ).all()
+    # Sin turno abierto no pertenecen a ninguno: `session_id` NULL, igual que
+    # un traslado entre bancos. Así tampoco tocan el arqueo de ningún cajón.
+    assert [(r[0], str(r[1]), str(r[2]), r[3]) for r in rows] == [
+        ("settlement_in", banco["id"], "460000.00", None),
+        ("settlement_out", sistecredito["id"], "500000.00", None),
+    ]
+    saldos = {a["id"]: a["balance"] for a in _accounts(client, token)}
+    assert saldos[sistecredito["id"]] == "0.00"
+
+
 def test_cannot_receive_more_than_settled(client: TestClient, accounts_tenant: dict) -> None:
     """La diferencia es la comisión del convenio: nunca puede ser negativa."""
     token = accounts_tenant["token"]

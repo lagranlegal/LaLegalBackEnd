@@ -581,6 +581,74 @@ async def test_void_sale_restores_stock_and_blocks_double_void(
     assert second_void.json()["code"] == "CONFLICT"
 
 
+@pytest.mark.parametrize(
+    ("account_type", "payment_method"), [("bank", "transfer"), ("settlement", "other")]
+)
+async def test_void_sale_reverses_against_the_account_the_sale_entered(
+    client: TestClient, sales_tenant: dict, account_type: str, payment_method: str
+) -> None:
+    """La anulación saca la plata de la cuenta a la que ENTRÓ la venta.
+
+    El contra-movimiento no pasaba cuenta, así que `record_movement` caía en
+    la predeterminada del medio de pago: una venta cobrada al segundo banco se
+    anulaba contra el primero (uno queda inflado y el otro en negativo), y una
+    venta por Sistecrédito —medio `other`— se anulaba contra el banco,
+    dejando la cuenta por cobrar con un saldo que nadie debe.
+    """
+    cid = sales_tenant["company_id"]
+    await _open_cash_session(company_id=cid, register_id=sales_tenant["register_id"])
+    default_bank, chosen = uuid4(), uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.account (id, company_id, name, type, is_default) "
+                "values (:id, :cid, 'Transferencias', 'bank', true)"
+            ),
+            {"id": str(default_bank), "cid": str(cid)},
+        )
+        await session.execute(
+            text(
+                "insert into public.account (id, company_id, name, type, is_default) "
+                "values (:id, :cid, 'Cuenta elegida', :type, false)"
+            ),
+            {"id": str(chosen), "cid": str(cid), "type": account_type},
+        )
+
+    sale_resp = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": payment_method,
+            "account_id": str(chosen),
+            "lines": [
+                {"item_id": str(sales_tenant["item_id"]), "quantity": 1, "unit_price": "500000.00"}
+            ],
+        },
+    )
+    assert sale_resp.status_code == 201, sale_resp.text
+    sale = sale_resp.json()
+
+    response = client.post(
+        f"/api/v1/sales/{sale['id']}/void",
+        headers=_headers(sales_tenant["full_token"]),
+        json={"reason": "cobro doble"},
+    )
+    assert response.status_code == 200, response.text
+
+    async with AsyncSessionLocal() as session, session.begin():
+        rows = (
+            await session.execute(
+                text(
+                    "select direction::text, account_id from public.cash_movement "
+                    "where company_id = :cid and reference_type = 'sale' "
+                    "and reference_id = :sid order by direction"
+                ),
+                {"cid": str(cid), "sid": sale["id"]},
+            )
+        ).all()
+    assert [(r[0], str(r[1])) for r in rows] == [("in", str(chosen)), ("out", str(chosen))]
+
+
 @pytest.mark.asyncio
 async def test_selling_by_weight_charges_the_exact_amount(
     client: TestClient, sales_tenant: dict

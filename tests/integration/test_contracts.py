@@ -451,6 +451,70 @@ async def test_payment_covers_owed_months_and_capital(
     assert updated["status"] == "active"
 
 
+async def test_payment_lands_in_the_chosen_account_not_the_default_one(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Con dos cuentas del mismo tipo, el abono entra a la ELEGIDA.
+
+    El servicio resolvía `body.account_id` (validaba que existiera, decidía la
+    sesión) y después no se lo pasaba a `record_movement`, que al no recibir
+    cuenta cae en la predeterminada del medio de pago. La respuesta decía 201
+    y el saldo de la cuenta equivocada subía: con un solo banco no se nota,
+    con dos la plata aparece donde no llegó.
+    """
+    cid = contract_tenant["company_id"]
+    await _open_cash_session(company_id=cid, register_id=contract_tenant["register_id"])
+    default_bank, chosen_bank = uuid4(), uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        for acc_id, name, is_default in (
+            (default_bank, "Transferencias", True),
+            (chosen_bank, "Banco elegido", False),
+        ):
+            await session.execute(
+                text(
+                    "insert into public.account (id, company_id, name, type, is_default) "
+                    "values (:id, :cid, :name, 'bank', :d)"
+                ),
+                {"id": str(acc_id), "cid": str(cid), "name": name, "d": is_default},
+            )
+
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
+    ).json()
+    await _backdate_interest_paid_until(company_id=cid, contract_id=contract["id"], months=1)
+
+    payment_resp = client.post(
+        f"/api/v1/contracts/{contract['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={
+            "months_covered": 1,
+            "capital_amount": "100000.00",
+            "payment_method": "transfer",
+            "account_id": str(chosen_bank),
+        },
+    )
+    assert payment_resp.status_code == 201, payment_resp.text
+
+    async with AsyncSessionLocal() as session, session.begin():
+        rows = (
+            await session.execute(
+                text(
+                    "select concept::text, account_id from public.cash_movement "
+                    "where company_id = :cid and reference_type = 'contract_payment' "
+                    "and reference_id = :pid order by concept"
+                ),
+                {"cid": str(cid), "pid": payment_resp.json()["id"]},
+            )
+        ).all()
+    # Los DOS movimientos del abono (interés y capital), no solo uno.
+    assert [(r[0], str(r[1])) for r in rows] == [
+        ("capital_payment", str(chosen_bank)),
+        ("interest_payment", str(chosen_bank)),
+    ]
+
+
 async def test_capital_before_interest_caught_up_is_rejected(
     client: TestClient, contract_tenant: dict
 ) -> None:
