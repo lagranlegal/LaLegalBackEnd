@@ -18,6 +18,9 @@
 | Bugs | **GitHub Issues** en los dos repos, con etiquetas de severidad y módulo. |
 | Docs sobrantes | Se **borran** (queda en git). Los de la raíz, que no están versionados, se mueven primero a un repo. |
 | Diseño visual | Se agrega una fase de **rediseño visual** después de los arreglos: primero propuesta para aprobar, después código. |
+| Avalúo (F4-05) | Si la categoría define LTV, el avalúo es **obligatorio**; sin él solo presta quien tenga `contracts.override_ltv`. |
+| Precio de venta (F6-05) | Vender **por debajo** del precio publicado es un descuento: exige `sales.apply_discount`, motivo y auditoría. Por encima, libre. |
+| Saldar en el primer mes (F4-11) | Todo contrato causa **al menos un mes** de interés. |
 
 ## Principios (no negociables)
 
@@ -86,7 +89,10 @@ la consolidación la hace el orquestador.
 |---|---|
 | 1 | ✅ 27/09 — cinco informes; ~95 sospechas. Confirmados en código por el orquestador: **P0-1** (CRÍTICO, seguridad — detalle fuera del repo), **B-01** (abono ignora la cuenta elegida), **B-04** (liquidación con caja cerrada no registra nada), **multiplyMoney** con cantidades fraccionarias; y los permisos base viven solo en `seed.sql` (prod) |
 | 2 | ✅ 27/09 — `scripts/qa/lab_zzai.py` (`9f463e3`): 8 empresas `ZZ AI — *` (Identidad A/B, Contratos, Caja, Inventario, Reportes, Documentos, UI), 83 usuarios activos (en Identidad A, un rol por cada uno de los 43 permisos), catálogo con herencia, 5 cuentas (cash, 2 bank, settlement, vault) y 3 clientes ficticios por empresa. `--verificar` en verde. Credenciales fuera del workspace (el repo es público). Contraseña vieja de QA retirada y rotada |
-| 3–16 | pendiente |
+| 3–6 | ✅ 27/09 — ola 2 en paralelo, una empresa ZZ AI por frente. Identidad: matriz 48 actores × 127 endpoints = 6096 checks sin discrepancias, 0 fugas por id entre empresas. Contratos, caja e inventario: el patrón sistémico es la **concurrencia** (solo `sales` y `notifications` usan `FOR UPDATE`): doble cobro, dos sucesores, cuentas sobregiradas, doble pago de factura, idempotencia exigida e ignorada. Hallazgos con reproducción en los informes de la ola |
+| — | ⏳ Tanda de arreglos: A (back, concurrencia e idempotencia) y D (front) en curso; B (back, permisos, reglas, reportes y errores) después de A |
+| 12, 13 | ⏳ en curso (guía de usuario; `PRODUCCION.md`) |
+| 7–11, 14–16 | pendiente |
 
 ## Hallazgos confirmados en la fase 1
 
