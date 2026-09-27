@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.idempotency import require_idempotency_key
+from app.common.idempotency import optional_idempotency_key, require_idempotency_key
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.contracts import service
@@ -252,7 +252,15 @@ async def auction_contract(
     contract_id: UUID,
     user: Annotated[CurrentUser, Depends(_auction)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str | None, Depends(optional_idempotency_key)],
 ) -> ContractOut:
+    """`Idempotency-Key` opcional (F4-04): el front todavía no la manda. El
+    doble remate lo impide el bloqueo del contrato; la clave solo convierte
+    el 409 del reintento en la respuesta original."""
     return await service.auction_contract(
-        db, company_id=user.company_id, contract_id=contract_id, actor_id=user.id
+        db,
+        company_id=user.company_id,
+        contract_id=contract_id,
+        actor_id=user.id,
+        idempotency_key=idempotency_key,
     )

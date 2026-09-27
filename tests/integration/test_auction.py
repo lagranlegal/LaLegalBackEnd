@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from _concurrency import Peticion, en_paralelo
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -418,3 +419,91 @@ async def test_auction_unique_piece_still_requires_a_photo(
         json={"sale_price": "700000.00"},
     )
     assert publicado.status_code == 200, publicado.text
+
+
+# --------------------------------------------------------------------------
+# Concurrencia (auditoría 27/09/2026, F4-04 / B-12)
+# --------------------------------------------------------------------------
+async def _contrato_rematable(client: TestClient, tenant: dict) -> str:
+    headers = _headers(tenant["token"], idempotency_key=str(uuid4()))
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=headers,
+        json={
+            "customer_id": str(tenant["customer_id"]),
+            "principal": "1000000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [
+                {
+                    "category_id": str(tenant["category_id"]),
+                    "description": "Cadena",
+                    "item_appraisal": "1500000.00",
+                }
+            ],
+        },
+    ).json()
+    await _backdate_and_expire_extension(
+        company_id=tenant["company_id"], contract_id=contract["id"], months=8
+    )
+    refreshed = client.get(f"/api/v1/contracts/{contract['id']}", headers=headers).json()
+    assert refreshed["status"] == "in_extension"
+    return str(contract["id"])
+
+
+async def _remates_de(contract_id: str) -> tuple[int, int]:
+    async with AsyncSessionLocal() as session:
+        entradas = (
+            await session.execute(
+                text(
+                    "select count(*) from public.inventory_entry "
+                    "where contract_id = :id and origin_type = 'auction'"
+                ),
+                {"id": contract_id},
+            )
+        ).scalar_one()
+        articulos = (
+            await session.execute(
+                text("select count(*) from public.inventory_item where source_contract_id = :id"),
+                {"id": contract_id},
+            )
+        ).scalar_one()
+    return int(entradas), int(articulos)
+
+
+async def test_F4_04_dos_remates_en_paralelo_crean_un_solo_articulo(
+    client: TestClient, auction_tenant: dict
+) -> None:
+    """Antes: 200 y 200, dos ingresos de remate por la deuda entera y un
+    artículo huérfano publicable. Sin clave (el front de hoy no la manda):
+    el bloqueo basta, el segundo ve el contrato ya `auctioned`."""
+    contract_id = await _contrato_rematable(client, auction_tenant)
+    url = f"/api/v1/contracts/{contract_id}/auction"
+    respuestas = await en_paralelo(
+        [Peticion("POST", url, token=auction_tenant["token"]) for _ in range(2)]
+    )
+    assert sorted(r.status_code for r in respuestas) == [200, 409], [r.text for r in respuestas]
+    rechazo = next(r for r in respuestas if r.status_code == 409)
+    assert rechazo.json()["code"] == "CONTRACT_NOT_READY_FOR_AUCTION"
+    assert await _remates_de(contract_id) == (1, 1)
+
+
+async def test_F4_04_el_mismo_remate_reintentado_devuelve_el_original(
+    client: TestClient, auction_tenant: dict
+) -> None:
+    """Con `Idempotency-Key`: el reintento (en vuelo o después) recibe el
+    contrato rematado, no un 409 que el front mostraría como error."""
+    contract_id = await _contrato_rematable(client, auction_tenant)
+    url = f"/api/v1/contracts/{contract_id}/auction"
+    clave = str(uuid4())
+    respuestas = await en_paralelo(
+        [
+            Peticion("POST", url, token=auction_tenant["token"], idempotency_key=clave)
+            for _ in range(2)
+        ]
+    )
+    assert [r.status_code for r in respuestas] == [200, 200], [r.text for r in respuestas]
+    assert all(r.json()["status"] == "auctioned" for r in respuestas)
+    tarde = client.post(url, headers=_headers(auction_tenant["token"], idempotency_key=clave))
+    assert tarde.status_code == 200, tarde.text
+    assert await _remates_de(contract_id) == (1, 1)

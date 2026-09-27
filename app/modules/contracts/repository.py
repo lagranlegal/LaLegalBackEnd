@@ -212,6 +212,33 @@ async def get_contract(db: AsyncSession, *, company_id: UUID, contract_id: UUID)
     return result.first()
 
 
+async def get_contract_for_update(
+    db: AsyncSession, *, company_id: UUID, contract_id: UUID
+) -> Row[Any] | None:
+    """`FOR UPDATE`: toda operación que MODIFICA un contrato lo lee por acá.
+
+    Auditoría 27/09/2026, F4-01/F4-02: abonar, ampliar y rematar leían la
+    fila sin bloquear, calculaban en Python y escribían valores ABSOLUTOS
+    (`set capital_balance = :x`). Dos abonos simultáneos de 100.000 sobre un
+    saldo de 500.000 dejaban 400.000 con 200.000 en la caja; dos recargos
+    dejaban dos sucesores vivos del mismo padre. `next_receipt_number`
+    serializaba las dos requests, pero la segunda ya traía la foto vieja.
+
+    Con el bloqueo la segunda espera a que la primera confirme y, en READ
+    COMMITTED, relee la fila ya actualizada — así valida contra el estado
+    real (el mes ya pagado, el padre ya `superseded`). Mismo patrón que
+    `sales.repository.get_sale_for_update`.
+    """
+    result = await db.execute(
+        text(
+            f"select {_CONTRACT_COLUMNS} from public.contract "
+            "where company_id = :company_id and id = :id for update"
+        ),
+        {"company_id": str(company_id), "id": str(contract_id)},
+    )
+    return result.first()
+
+
 async def mark_item_auctioned(
     db: AsyncSession, *, company_id: UUID, contract_item_id: UUID, inventory_item_id: UUID
 ) -> None:
@@ -463,12 +490,22 @@ async def update_contract_status(
     contract_id: UUID,
     status: str,
     extension_ends_at: date | None,
-) -> None:
-    await db.execute(
+) -> bool:
+    """Nunca saca a un contrato de un estado TERMINAL (`paid`, `auctioned`,
+    `superseded`): el `where` lo excluye y devuelve si tocó la fila.
+
+    F4-02: pasar el padre a `superseded` no tenía condición de estado, así
+    que un recargo que corría junto a un pago total "resucitaba" y cerraba
+    un contrato que ya estaba `paid`. Con el `FOR UPDATE` la carrera ya no
+    llega acá; el `where` es la segunda llave, en la base, para que ningún
+    camino futuro que se olvide del bloqueo pueda pisar un estado final.
+    """
+    result = await db.execute(
         text(
             """
             update public.contract set status = :status, extension_ends_at = :extension_ends_at
             where company_id = :company_id and id = :id
+              and status not in ('paid', 'auctioned', 'superseded')
             """
         ),
         {
@@ -478,6 +515,7 @@ async def update_contract_status(
             "extension_ends_at": extension_ends_at,
         },
     )
+    return bool(getattr(result, "rowcount", 0))
 
 
 async def apply_payment_to_contract(

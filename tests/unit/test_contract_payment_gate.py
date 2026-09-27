@@ -96,6 +96,8 @@ async def _abonar(
     monkeypatch.setattr(service.platform_integration, "get_company_today", _centinela)
     monkeypatch.setattr(repository, "find_payment_by_idempotency_key", _sin_idempotencia)
     monkeypatch.setattr(repository, "get_contract", _get_contract)
+    # F4-01: el abono lee el contrato bloqueándolo (`FOR UPDATE`).
+    monkeypatch.setattr(repository, "get_contract_for_update", _get_contract)
     monkeypatch.setattr(repository, "find_successor_contract", _find_successor)
 
     with pytest.raises(AppError) as excinfo:

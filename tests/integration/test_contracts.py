@@ -9,12 +9,14 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from _concurrency import Peticion, en_paralelo
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
 
 from app.core import security
 from app.core.db import AsyncSessionLocal, engine
+from app.modules.contracts.rules import add_months
 from app.modules.platform import integration as platform_integration
 
 
@@ -1780,3 +1782,276 @@ async def test_una_autorizacion_previa_conserva_su_fecha_y_su_origen(
     despues = await _cliente(contract_tenant["customer_id"])
     assert despues.email_consent_at == antes.email_consent_at
     assert despues.email_consent_source == "counter"
+
+
+# --------------------------------------------------------------------------
+# Concurrencia (auditoría 27/09/2026, F4-01 / F4-02): dos operaciones sobre el
+# MISMO contrato al mismo tiempo. Con `TestClient` nunca se pisaban; acá
+# corren entrelazadas de verdad (`_concurrency.en_paralelo`).
+# --------------------------------------------------------------------------
+async def _contrato_para_carrera(
+    client: TestClient, tenant: dict, *, principal: str, meses_adeudados: int = 0
+) -> dict:
+    await _open_cash_session(company_id=tenant["company_id"], register_id=tenant["register_id"])
+    creado = client.post(
+        "/api/v1/contracts",
+        headers=_headers(tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(tenant, principal=principal),
+    )
+    assert creado.status_code == 201, creado.text
+    contrato = dict(creado.json())
+    if meses_adeudados:
+        await _backdate_interest_paid_until(
+            company_id=tenant["company_id"], contract_id=contrato["id"], months=meses_adeudados
+        )
+    return contrato
+
+
+async def _estado_contrato(contract_id: str) -> dict[str, Any]:
+    async with AsyncSessionLocal() as session:
+        fila = (
+            await session.execute(
+                text(
+                    "select status, capital_balance, interest_paid_until "
+                    "from public.contract where id = :id"
+                ),
+                {"id": contract_id},
+            )
+        ).one()
+        cobrado = (
+            await session.execute(
+                text(
+                    "select count(*), coalesce(sum(total), 0) from public.contract_payment "
+                    "where contract_id = :id"
+                ),
+                {"id": contract_id},
+            )
+        ).one()
+        sucesores = (
+            await session.execute(
+                text(
+                    "select capital_balance, status from public.contract "
+                    "where parent_contract_id = :id"
+                ),
+                {"id": contract_id},
+            )
+        ).all()
+    return {
+        "status": fila[0],
+        "capital_balance": fila[1],
+        "interest_paid_until": fila[2],
+        "abonos": cobrado[0],
+        "cobrado": cobrado[1],
+        "sucesores": [(s[0], s[1]) for s in sucesores],
+    }
+
+
+async def test_F4_01_dos_abonos_de_un_mes_en_paralelo_avanzan_dos_meses(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Caso A del informe: 1.000.000 al 5 %, 3 meses adeudados, dos abonos de
+    un mes a la vez. Antes: dos recibos, 100.000 en la caja y el ancla
+    avanzaba UN mes. Con el bloqueo el segundo paga el mes siguiente."""
+    contrato = await _contrato_para_carrera(
+        client, contract_tenant, principal="1000000.00", meses_adeudados=3
+    )
+    antes = await _estado_contrato(contrato["id"])
+    url = f"/api/v1/contracts/{contrato['id']}/payments"
+    cuerpo = {"months_covered": 1, "payment_method": "cash"}
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["full_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["limited_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+        ]
+    )
+    assert [r.status_code for r in respuestas] == [201, 201], [r.text for r in respuestas]
+
+    despues = await _estado_contrato(contrato["id"])
+    assert despues["abonos"] == 2
+    assert despues["cobrado"] == Decimal("100000.00")
+    # Dos meses cobrados = dos meses avanzados. Antes quedaba en +1.
+    assert despues["interest_paid_until"] == add_months(antes["interest_paid_until"], 2)
+
+
+async def test_F4_01_dos_abonos_de_capital_en_paralelo_bajan_el_saldo_dos_veces(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Caso B: 500.000 y dos abonos de capital de 100.000. Antes: la caja
+    +200.000 y el saldo en 400.000."""
+    contrato = await _contrato_para_carrera(client, contract_tenant, principal="500000.00")
+    url = f"/api/v1/contracts/{contrato['id']}/payments"
+    cuerpo = {"months_covered": 0, "capital_amount": "100000.00", "payment_method": "cash"}
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["full_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["full_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+        ]
+    )
+    assert [r.status_code for r in respuestas] == [201, 201], [r.text for r in respuestas]
+    despues = await _estado_contrato(contrato["id"])
+    assert despues["cobrado"] == Decimal("200000.00")
+    assert despues["capital_balance"] == Decimal("300000.00")
+
+
+async def test_F4_01_dos_pagos_totales_en_paralelo_cobran_una_sola_vez(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Caso C: 300.000 y dos pagos totales. Antes: la caja +600.000 por una
+    deuda de 300.000. Ahora el segundo encuentra el contrato `paid`."""
+    contrato = await _contrato_para_carrera(client, contract_tenant, principal="300000.00")
+    url = f"/api/v1/contracts/{contrato['id']}/payments"
+    cuerpo = {"months_covered": 0, "capital_amount": "300000.00", "payment_method": "cash"}
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["full_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["full_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+        ]
+    )
+    codigos = sorted(r.status_code for r in respuestas)
+    assert codigos == [201, 400], [r.text for r in respuestas]
+    rechazo = next(r for r in respuestas if r.status_code == 400)
+    assert rechazo.json()["code"] == "CONTRACT_CLOSED"
+    despues = await _estado_contrato(contrato["id"])
+    assert despues["abonos"] == 1
+    assert despues["cobrado"] == Decimal("300000.00")
+    assert despues["status"] == "paid"
+
+
+async def test_F4_01_el_mismo_abono_reintentado_en_vuelo_no_cobra_dos_veces(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Misma clave, a la vez: el segundo espera el bloqueo y devuelve el
+    abono ya confirmado — mismo recibo, un solo cobro."""
+    contrato = await _contrato_para_carrera(client, contract_tenant, principal="500000.00")
+    url = f"/api/v1/contracts/{contrato['id']}/payments"
+    cuerpo = {"months_covered": 0, "capital_amount": "100000.00", "payment_method": "cash"}
+    clave = str(uuid4())
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST", url, token=contract_tenant["full_token"], json=cuerpo, idempotency_key=clave
+            ),
+            Peticion(
+                "POST", url, token=contract_tenant["full_token"], json=cuerpo, idempotency_key=clave
+            ),
+        ]
+    )
+    assert [r.status_code for r in respuestas] == [201, 201], [r.text for r in respuestas]
+    assert respuestas[0].json()["id"] == respuestas[1].json()["id"]
+    despues = await _estado_contrato(contrato["id"])
+    assert despues["abonos"] == 1
+    assert despues["capital_balance"] == Decimal("400000.00")
+
+
+async def test_F4_02_dos_recargos_en_paralelo_dejan_un_solo_sucesor(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Caso 1 del informe: antes nacían dos sucesores vivos del mismo padre
+    y la cartera subía el doble de lo que salía de la caja."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    url = f"/api/v1/contracts/{viejo['id']}/extend-loan"
+    cuerpo = {"amount": "50000.00", "payment_method": "cash"}
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["full_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+            Peticion(
+                "POST",
+                url,
+                token=contract_tenant["limited_token"],
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            ),
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [201, 400], [r.text for r in respuestas]
+    rechazo = next(r for r in respuestas if r.status_code == 400)
+    assert rechazo.json()["code"] == "CONTRACT_CLOSED"
+    despues = await _estado_contrato(viejo["id"])
+    assert despues["status"] == "superseded"
+    assert despues["sucesores"] == [(Decimal("1050000.00"), "active")]
+
+
+async def test_F4_02_pago_total_y_recargo_en_paralelo_no_cobran_y_prestan_a_la_vez(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    """Caso 2: antes el cliente pagaba los 1.000.000 y además quedaba un
+    sucesor por 1.100.000. Gane quien gane, solo una de las dos ocurre."""
+    viejo = await _contrato_ampliable(client, contract_tenant)
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                f"/api/v1/contracts/{viejo['id']}/payments",
+                token=contract_tenant["full_token"],
+                json={
+                    "months_covered": 0,
+                    "capital_amount": "1000000.00",
+                    "payment_method": "cash",
+                },
+                idempotency_key=str(uuid4()),
+            ),
+            Peticion(
+                "POST",
+                f"/api/v1/contracts/{viejo['id']}/extend-loan",
+                token=contract_tenant["limited_token"],
+                json={"amount": "100000.00", "payment_method": "cash"},
+                idempotency_key=str(uuid4()),
+            ),
+        ]
+    )
+    pago, recargo = respuestas
+    despues = await _estado_contrato(viejo["id"])
+    if pago.status_code == 201:
+        assert recargo.status_code == 400, recargo.text
+        assert recargo.json()["code"] == "CONTRACT_CLOSED"
+        assert despues["status"] == "paid"
+        assert despues["sucesores"] == []
+    else:
+        assert recargo.status_code == 201, recargo.text
+        assert pago.status_code == 409, pago.text
+        assert pago.json()["code"] == "CONTRACT_SUPERSEDED"
+        assert despues["status"] == "superseded"
+        assert despues["abonos"] == 0
+        assert despues["sucesores"] == [(Decimal("1100000.00"), "active")]

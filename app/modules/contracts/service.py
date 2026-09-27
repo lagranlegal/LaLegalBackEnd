@@ -552,13 +552,32 @@ async def get_contract(db: AsyncSession, *, company_id: UUID, contract_id: UUID)
         today=today,
     )
     if new_status != m["status"] or new_extension_ends_at != m["extension_ends_at"]:
-        await repository.update_contract_status(
-            db,
-            company_id=company_id,
-            contract_id=contract_id,
-            status=new_status,
-            extension_ends_at=new_extension_ends_at,
+        # Hay que ESCRIBIR, así que se relee bloqueando y se recalcula sobre
+        # esa fila (F4-01): sin esto, un GET que leyó "en mora" justo antes de
+        # que un abono confirmara pisaba el `active` recién escrito con su
+        # estado viejo. Solo bloquea cuando va a escribir — un GET que no
+        # cambia nada sigue sin esperar a nadie.
+        locked = await repository.get_contract_for_update(
+            db, company_id=company_id, contract_id=contract_id
         )
+        assert locked is not None
+        lm = locked._mapping
+        new_status, new_extension_ends_at = rules.compute_status(
+            current_status=lm["status"],
+            interest_paid_until=lm["interest_paid_until"],
+            arrears_window_months=lm["arrears_window_months"],
+            extension_months=lm["extension_months"],
+            extension_ends_at=lm["extension_ends_at"],
+            today=today,
+        )
+        if new_status != lm["status"] or new_extension_ends_at != lm["extension_ends_at"]:
+            await repository.update_contract_status(
+                db,
+                company_id=company_id,
+                contract_id=contract_id,
+                status=new_status,
+                extension_ends_at=new_extension_ends_at,
+            )
         row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
         assert row is not None
 
@@ -673,7 +692,11 @@ async def update_contract(
     body: ContractUpdateIn,
     acting_user_id: UUID,
 ) -> ContractOut:
-    row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
+    # Bloqueada como toda escritura de un contrato (F4-01): el `before` de la
+    # auditoría tiene que ser el valor que de verdad se reemplazó.
+    row = await repository.get_contract_for_update(
+        db, company_id=company_id, contract_id=contract_id
+    )
     if row is None:
         raise NotFoundError("El contrato no existe en esta empresa.")
     fields = body.model_dump(exclude_unset=True)
@@ -746,13 +769,22 @@ async def create_payment(
     del umbral, las de la alerta A2 a la empresa (NOTIFICACIONES §19). Un
     reintento con la misma llave: el mismo abono y ningún aviso nuevo
     (§18.1-2)."""
+    # PRIMERO el bloqueo, DESPUÉS la clave (F4-01). El bloqueo: dos abonos
+    # simultáneos leían el mismo `interest_paid_until`/`capital_balance` y
+    # el segundo escribía encima del primero — dos recibos, doble plata en
+    # la caja y un solo mes (o un solo abono de capital) aplicado. El orden:
+    # un reintento con la MISMA clave que llega mientras el original sigue
+    # en vuelo espera acá y, al entrar, ya encuentra el abono confirmado y lo
+    # devuelve, en vez de chocar con el UNIQUE.
+    contract_row = await repository.get_contract_for_update(
+        db, company_id=company_id, contract_id=contract_id
+    )
     existing = await repository.find_payment_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
     if existing is not None:
         return _row_to_payment(existing), ()
 
-    contract_row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
     if contract_row is None:
         raise NotFoundError("El contrato no existe en esta empresa.")
     m = contract_row._mapping
@@ -1068,13 +1100,40 @@ async def recompute_all_statuses(db: AsyncSession) -> int:
 
 
 async def auction_contract(
-    db: AsyncSession, *, company_id: UUID, contract_id: UUID, actor_id: UUID
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    contract_id: UUID,
+    actor_id: UUID,
+    idempotency_key: str | None = None,
 ) -> ContractOut:
     """Rematar (CLAUDE.md): decisión humana, ejecución automática. Crea UN
     `inventory_item` en `draft` por cada prenda (`inventory.integration`,
     costo repartido proporcional a tasación), marca contrato y prendas como
     `auctioned`, guarda el vínculo bidireccional. Todo en una transacción.
+
+    F4-04 (auditoría 27/09/2026): dos remates simultáneos del mismo contrato
+    respondían 200 y 200 y creaban DOS ingresos de remate y dos artículos en
+    borrador — uno huérfano, publicable, con el costo entero de la deuda.
+    Ahora el contrato se lee `FOR UPDATE` y el estado se revalida después
+    del bloqueo: el segundo ve `auctioned` y recibe
+    `CONTRACT_NOT_READY_FOR_AUCTION`. La `Idempotency-Key` es OPCIONAL (el
+    front todavía no la manda): si viene, queda en el `inventory_entry` del
+    remate y un reintento con la misma clave devuelve el contrato rematado
+    en vez del 409.
     """
+    locked = await repository.get_contract_for_update(
+        db, company_id=company_id, contract_id=contract_id
+    )
+    if locked is None:
+        raise NotFoundError("El contrato no existe en esta empresa.")
+    if idempotency_key:
+        previo = await inventory_integration.find_auction_contract_by_idempotency_key(
+            db, company_id=company_id, idempotency_key=idempotency_key
+        )
+        if previo is not None:
+            return await get_contract(db, company_id=company_id, contract_id=previo)
+
     contract = await get_contract(db, company_id=company_id, contract_id=contract_id)
     today = await platform_integration.get_company_today(db, company_id=company_id)
     if contract.status != "in_extension" or (
@@ -1122,6 +1181,7 @@ async def auction_contract(
         total_cost=total_cost,
         source_contract_id=contract_id,
         created_by=actor_id,
+        idempotency_key=idempotency_key,
     )
     for contract_item_id, inventory_item_id in links.items():
         await repository.mark_item_auctioned(
@@ -1131,13 +1191,19 @@ async def auction_contract(
             inventory_item_id=inventory_item_id,
         )
 
-    await repository.update_contract_status(
+    if not await repository.update_contract_status(
         db,
         company_id=company_id,
         contract_id=contract_id,
         status="auctioned",
         extension_ends_at=None,
-    )
+    ):
+        # Inalcanzable con el `FOR UPDATE` de arriba; si algún día se llega,
+        # la transacción entera (artículos incluidos) se deshace.
+        raise ConflictError(
+            "El contrato ya está cerrado; no se puede rematar.",
+            code="CONTRACT_NOT_READY_FOR_AUCTION",
+        )
     await identity_repo.insert_audit_log(
         db,
         company_id=company_id,
@@ -1266,6 +1332,16 @@ async def extend_loan(
 
     Todo en UNA transacción (CLAUDE.md regla 4).
     """
+    # Bloqueo del PADRE antes que nada (F4-02): dos recargos simultáneos
+    # dejaban dos sucesores vivos del mismo contrato, y un pago total + un
+    # recargo cobraban la deuda entera y además la volvían a prestar. Con el
+    # bloqueo el segundo espera, lee el padre ya `superseded` (o `paid`) y
+    # lo rechaza igual que un recargo repetido a mano (`CONTRACT_CLOSED`).
+    # La clave se consulta DESPUÉS del bloqueo por lo mismo que en los
+    # abonos: el reintento en vuelo encuentra el sucesor ya confirmado.
+    row = await repository.get_contract_for_update(
+        db, company_id=company_id, contract_id=contract_id
+    )
     existing = await repository.find_contract_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )
@@ -1278,7 +1354,6 @@ async def extend_loan(
     if body.amount <= 0:
         raise AppError("El monto a entregar debe ser mayor a cero.")
 
-    row = await repository.get_contract(db, company_id=company_id, contract_id=contract_id)
     if row is None:
         raise NotFoundError("El contrato no existe en esta empresa.")
     viejo = row._mapping
@@ -1428,13 +1503,18 @@ async def extend_loan(
         )
 
     # --- El viejo se cierra ----------------------------------------------
-    await repository.update_contract_status(
+    if not await repository.update_contract_status(
         db,
         company_id=company_id,
         contract_id=contract_id,
         status="superseded",
         extension_ends_at=None,
-    )
+    ):
+        # Inalcanzable con el `FOR UPDATE` del principio (F4-02); si algún
+        # día se llega, se deshace todo — sucesor y caja incluidos.
+        raise AppError(
+            "El contrato ya está cerrado; no admite ampliaciones.", code="CONTRACT_CLOSED"
+        )
     await repository.mark_items_transferred(db, company_id=company_id, contract_id=contract_id)
 
     # --- La caja: SOLO el delta ------------------------------------------

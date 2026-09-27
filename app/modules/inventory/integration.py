@@ -30,6 +30,24 @@ class AuctionItemInput:
     photos: list[str]
 
 
+async def find_auction_contract_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> UUID | None:
+    """El contrato que ya se remató con esta `Idempotency-Key`, o None.
+
+    La clave del remate se guarda en su `inventory_entry` (origen
+    `auction`): es el único documento que el remate crea, y ya tiene el
+    UNIQUE(company_id, idempotency_key) de 00014.
+    """
+    row = await repository.find_entry_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if row is None or row._mapping["origin_type"] != "auction":
+        return None
+    contract_id = row._mapping["contract_id"]
+    return UUID(str(contract_id)) if contract_id is not None else None
+
+
 async def create_draft_items_from_auction(
     db: AsyncSession,
     *,
@@ -38,6 +56,7 @@ async def create_draft_items_from_auction(
     total_cost: Decimal,
     source_contract_id: UUID,
     created_by: UUID | None,
+    idempotency_key: str | None = None,
 ) -> dict[UUID, UUID]:
     """Crea un `inventory_item` en `draft` por cada prenda del contrato
     rematado (`origin='auction'`), repartiendo `total_cost` con
@@ -67,6 +86,8 @@ async def create_draft_items_from_auction(
         total_cost=total_cost,
         notes=None,
         registered_by=created_by,
+        # F4-04: la clave del remate vive en su ingreso (UNIQUE desde 00014).
+        idempotency_key=idempotency_key,
     )
 
     result: dict[UUID, UUID] = {}
