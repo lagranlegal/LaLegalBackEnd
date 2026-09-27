@@ -58,6 +58,23 @@ async def session_exists_for_date(
     return result.first() is not None
 
 
+async def lock_register(db: AsyncSession, *, register_id: UUID) -> None:
+    """`FOR UPDATE` sobre la registradora: serializa el ciclo de vida de SUS
+    turnos (abrir, cerrar, reabrir).
+
+    Auditoría 27/09/2026, F5-04: cuatro aperturas simultáneas daban 1× 201 y
+    3× 500 en texto plano — las cuatro veían "no hay sesión abierta" y el
+    índice `uq_session_open` rechazaba tres INSERT. Y dos cierres a la vez
+    leían los dos la sesión `open` y emitían DOS `adjustment` por el mismo
+    descuadre. Con la registradora tomada, el segundo espera y ve lo que el
+    primero dejó: `CASH_SESSION_ALREADY_OPEN` / `CASH_SESSION_NOT_OPEN`.
+    """
+    await db.execute(
+        text("select id from public.cash_register where id = :id for update"),
+        {"id": str(register_id)},
+    )
+
+
 async def get_open_session_for_register(db: AsyncSession, *, register_id: UUID) -> Row[Any] | None:
     result = await db.execute(
         text(
@@ -275,6 +292,19 @@ async def list_expense_categories(db: AsyncSession, *, company_id: UUID) -> list
     return list(result.all())
 
 
+async def find_expense_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id from public.expense "
+            "where company_id = :company_id and idempotency_key = :key"
+        ),
+        {"company_id": str(company_id), "key": idempotency_key},
+    )
+    return result.first()
+
+
 async def insert_expense(
     db: AsyncSession,
     *,
@@ -288,19 +318,21 @@ async def insert_expense(
     payment_method: str,
     receipt_url: str | None,
     registered_by: UUID,
+    idempotency_key: str | None = None,
 ) -> None:
     await db.execute(
         text(
             """
             insert into public.expense
                 (id, company_id, session_id, module, category_id, description, amount,
-                 payment_method, receipt_url, registered_by)
+                 payment_method, receipt_url, registered_by, idempotency_key)
             values
                 (:id, :company_id, :session_id, :module, :category_id, :description, :amount,
-                 :payment_method, :receipt_url, :registered_by)
+                 :payment_method, :receipt_url, :registered_by, :idempotency_key)
             """
         ),
         {
+            "idempotency_key": idempotency_key,
             "id": str(expense_id),
             "company_id": str(company_id),
             "session_id": str(session_id),

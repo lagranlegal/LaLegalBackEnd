@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from _concurrency import Peticion, en_paralelo
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -551,3 +552,124 @@ def test_today_session_is_readable_without_history_permission(
     assert cerrada.status_code == 200
     assert cerrada.json()["status"] == "closed"
     assert cerrada.json()["id"] == opened["id"]
+
+
+# --------------------------------------------------------------------------
+# Concurrencia e idempotencia (auditoría 27/09/2026, F5-03 / F5-04)
+# --------------------------------------------------------------------------
+async def test_F5_04_cuatro_aperturas_simultaneas_dan_un_turno_y_tres_409(
+    cashbox_tenant: dict,
+) -> None:
+    """Antes: 1× 201 y 3× 500 en texto plano (`uq_session_open`)."""
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                "/api/v1/cashbox/sessions/open",
+                token=cashbox_tenant["token"],
+                json={"opening_balance": "0.00"},
+            )
+            for _ in range(4)
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [201, 409, 409, 409], [
+        r.text for r in respuestas
+    ]
+    assert {r.json()["code"] for r in respuestas if r.status_code == 409} == {
+        "CASH_SESSION_ALREADY_OPEN"
+    }
+
+
+async def test_F5_04_dos_cierres_simultaneos_emiten_un_solo_ajuste(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """Dos cierres del mismo turno con descuadre: antes los dos leían la
+    sesión `open` y el sobrante entraba DOS veces al cajón."""
+    headers = _headers(cashbox_tenant["token"])
+    opened = client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "0.00"}
+    ).json()
+    cuerpo = {"counted_cash": "1000.00", "difference_reason": "Sobrante"}
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                f"/api/v1/cashbox/sessions/{opened['id']}/close",
+                token=cashbox_tenant["token"],
+                json=cuerpo,
+            )
+            for _ in range(2)
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [200, 409], [r.text for r in respuestas]
+    assert next(r for r in respuestas if r.status_code == 409).json()["code"] == (
+        "CASH_SESSION_NOT_OPEN"
+    )
+    async with AsyncSessionLocal() as session:
+        ajustes = (
+            await session.execute(
+                text(
+                    "select count(*) from public.cash_movement "
+                    "where company_id = :cid and concept = 'adjustment' "
+                    "and reference_id = :sid"
+                ),
+                {"cid": str(cashbox_tenant["company_id"]), "sid": opened["id"]},
+            )
+        ).scalar_one()
+    assert ajustes == 1
+
+
+async def test_F5_03_el_mismo_gasto_con_la_misma_clave_se_registra_una_vez(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """B-13: dos `POST /cashbox/expenses` con la misma clave daban 201 y 201,
+    dos gastos, y la caja bajaba 40.000 por uno de 20.000."""
+    headers = _headers(cashbox_tenant["token"])
+    client.post("/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "0.00"})
+    category = client.post(
+        "/api/v1/cashbox/expense-categories", headers=headers, json={"name": "Aseo F5"}
+    ).json()
+    cuerpo = {
+        "category_id": category["id"],
+        "description": "Productos de aseo",
+        "amount": "20000.00",
+        "payment_method": "cash",
+    }
+    clave = str(uuid4())
+    en_vuelo = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                "/api/v1/cashbox/expenses",
+                token=cashbox_tenant["token"],
+                json=cuerpo,
+                idempotency_key=clave,
+            )
+            for _ in range(2)
+        ]
+    )
+    # En vuelo: el segundo o devuelve el mismo gasto o choca con el UNIQUE
+    # mientras el primero confirma — nunca un segundo gasto.
+    assert 201 in [r.status_code for r in en_vuelo], [r.text for r in en_vuelo]
+    for r in en_vuelo:
+        assert r.status_code == 201 or r.json()["code"] == "IDEMPOTENCY_IN_PROGRESS", r.text
+    tarde = client.post(
+        "/api/v1/cashbox/expenses", headers={**headers, "Idempotency-Key": clave}, json=cuerpo
+    )
+    assert tarde.status_code == 201, tarde.text
+    primero = next(r for r in en_vuelo if r.status_code == 201)
+    assert tarde.json()["id"] == primero.json()["id"]
+
+    async with AsyncSessionLocal() as session:
+        gastos = (
+            await session.execute(
+                text("select count(*), sum(amount) from public.expense where company_id = :cid"),
+                {"cid": str(cashbox_tenant["company_id"])},
+            )
+        ).one()
+    assert gastos[0] == 1
+    assert str(gastos[1]) == "20000.00"
+
+    # Sin clave sigue funcionando como hoy: el front actual no la manda.
+    sin_clave = client.post("/api/v1/cashbox/expenses", headers=headers, json=cuerpo)
+    assert sin_clave.status_code == 201, sin_clave.text

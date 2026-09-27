@@ -175,6 +175,18 @@ def register_exception_handlers(app: FastAPI) -> None:
                 {},
             )
 
+        if "uq_session_open" in detalle:
+            # Red de seguridad: `open_session` ya bloquea la registradora
+            # (F5-04), así que una apertura simultánea debería ver la sesión y
+            # responder esto mismo desde el servicio. Si algún camino llega
+            # al índice, el cajero ve "ya está abierta" y no un 500.
+            return _error_response(
+                status.HTTP_409_CONFLICT,
+                "CASH_SESSION_ALREADY_OPEN",
+                "Ya hay una sesión de caja abierta.",
+                {},
+            )
+
         if "quantity_check" in detalle:
             return _error_response(
                 status.HTTP_400_BAD_REQUEST,

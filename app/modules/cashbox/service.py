@@ -94,6 +94,20 @@ async def _resolve_active_register(db: AsyncSession, *, company_id: UUID) -> UUI
     return cast(UUID, registers[0]._mapping["id"])
 
 
+async def _get_session_locked(
+    db: AsyncSession, *, company_id: UUID, session_id: UUID
+) -> Row[Any] | None:
+    """La sesión, leída DESPUÉS de bloquear su registradora (F5-04): cerrar y
+    reabrir validan el estado del turno, y dos a la vez lo veían igual — dos
+    cierres emitían dos `adjustment` por el mismo descuadre. Se relee tras el
+    bloqueo porque la primera lectura solo sirve para saber qué bloquear."""
+    row = await repository.get_session(db, company_id=company_id, session_id=session_id)
+    if row is None:
+        return None
+    await repository.lock_register(db, register_id=row._mapping["register_id"])
+    return await repository.get_session(db, company_id=company_id, session_id=session_id)
+
+
 async def open_session(
     db: AsyncSession,
     *,
@@ -111,6 +125,8 @@ async def open_session(
     al día en que apareció, en vez de disolverse en el turno siguiente.
     """
     register_id = await _resolve_active_register(db, company_id=company_id)
+    # F5-04: la registradora bloqueada ANTES de mirar si hay sesión abierta.
+    await repository.lock_register(db, register_id=register_id)
     today = await platform_integration.get_company_today(db, company_id=company_id)
 
     if await repository.get_open_session_for_register(db, register_id=register_id) is not None:
@@ -343,7 +359,7 @@ async def close_session(
     body: SessionCloseIn,
     closed_by: UUID,
 ) -> SessionOut:
-    row = await repository.get_session(db, company_id=company_id, session_id=session_id)
+    row = await _get_session_locked(db, company_id=company_id, session_id=session_id)
     if row is None:
         raise NotFoundError("La sesión de caja no existe en esta empresa.")
     m = row._mapping
@@ -420,7 +436,7 @@ async def reopen_session(
     """Devuelve la sesión reabierta y las entregas de la alerta A4 que nacieron
     `pending` (NOTIFICACIONES §19). Reabrir dos veces seguidas es `409`
     (`CASH_SESSION_NOT_CLOSED`), así que el reintento no llega a la alerta."""
-    row = await repository.get_session(db, company_id=company_id, session_id=session_id)
+    row = await _get_session_locked(db, company_id=company_id, session_id=session_id)
     if row is None:
         raise NotFoundError("La sesión de caja no existe en esta empresa.")
     m = row._mapping
@@ -570,8 +586,30 @@ async def list_expense_categories(
 
 
 async def create_expense(
-    db: AsyncSession, *, company_id: UUID, body: ExpenseCreateIn, registered_by: UUID
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: ExpenseCreateIn,
+    registered_by: UUID,
+    idempotency_key: str | None = None,
 ) -> ExpenseOut:
+    """F5-03 (B-13, auditoría 27/09/2026): dos envíos del mismo gasto con la
+    misma clave registraban dos gastos y bajaban la caja dos veces. La clave
+    es OPCIONAL —el front de hoy no la manda y no se puede empezar a
+    rechazarlo—; si viene, se guarda con UNIQUE (00061) y el reintento
+    devuelve el gasto original. Si llega mientras el original sigue en
+    vuelo, el UNIQUE lo frena y responde `IDEMPOTENCY_IN_PROGRESS`."""
+    if idempotency_key:
+        previo = await repository.find_expense_by_idempotency_key(
+            db, company_id=company_id, idempotency_key=idempotency_key
+        )
+        if previo is not None:
+            existente = await repository.get_expense(
+                db, company_id=company_id, expense_id=previo._mapping["id"]
+            )
+            assert existente is not None
+            return _row_to_expense(existente)
+
     category = await repository.get_expense_category(
         db, company_id=company_id, category_id=body.category_id
     )
@@ -597,6 +635,7 @@ async def create_expense(
         payment_method=body.payment_method,
         receipt_url=body.receipt_url,
         registered_by=registered_by,
+        idempotency_key=idempotency_key,
     )
     # Un gasto SALE: no puede financiarse desde una cuenta por cobrar.
     resolved = await integration.resolve_account_for_movement(

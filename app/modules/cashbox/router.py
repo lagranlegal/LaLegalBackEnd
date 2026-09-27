@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.idempotency import optional_idempotency_key
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.cashbox import service
@@ -201,7 +202,14 @@ async def create_expense(
     body: ExpenseCreateIn,
     user: Annotated[CurrentUser, Depends(_expense)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str | None, Depends(optional_idempotency_key)],
 ) -> ExpenseOut:
+    """`Idempotency-Key` OPCIONAL (F5-03): si viene, un reintento no
+    registra el gasto dos veces. Pasa a obligatoria cuando el front la mande."""
     return await service.create_expense(
-        db, company_id=user.company_id, body=body, registered_by=user.id
+        db,
+        company_id=user.company_id,
+        body=body,
+        registered_by=user.id,
+        idempotency_key=idempotency_key,
     )
