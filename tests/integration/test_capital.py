@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from _concurrency import Peticion, en_paralelo
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -652,3 +653,40 @@ async def test_no_se_puede_editar_por_sql(client: TestClient, capital_tenant: di
                 text("update public.capital_movement set amount = 1 where id = :id"),
                 {"id": str(UUID(creado["id"]))},
             )
+
+
+async def test_F5_01_cinco_retiros_simultaneos_por_todo_el_saldo_pasa_uno(
+    client: TestClient, capital_tenant: dict
+) -> None:
+    """Auditoría 27/09/2026, F5-01: cinco retiros a la vez por el saldo
+    entero pasaban los cinco (Bancolombia en −243.424.000). El saldo se
+    deriva de movimientos; la fila de la cuenta es el mutex."""
+    token = capital_tenant["token"]
+    banco = _account_id(client, token, "bank")
+    aporte = client.post(
+        "/api/v1/capital/contributions",
+        headers=_headers(token),
+        json={"account_id": banco, "amount": "600000.00"},
+    )
+    assert aporte.status_code == 201, aporte.text
+    saldo = _balance(client, token, banco)
+    assert saldo > 0
+
+    cuerpo = {"account_id": banco, "amount": str(saldo), "notes": "Todo", "kind": "profit"}
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                "/api/v1/capital/withdrawals",
+                token=token,
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            )
+            for _ in range(5)
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [201, 400, 400, 400, 400], [
+        r.text for r in respuestas
+    ]
+    assert {r.json()["code"] for r in respuestas if r.status_code == 400} == {"BAD_REQUEST"}
+    assert _balance(client, token, banco) == Decimal("0.00")

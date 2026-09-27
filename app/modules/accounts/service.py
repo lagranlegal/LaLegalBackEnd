@@ -182,6 +182,7 @@ async def settle_account(
     account_id: UUID,
     body: SettlementIn,
     actor_id: UUID,
+    idempotency_key: str,
 ) -> SettlementOut:
     """Liquida una cuenta por cobrar: Sistecrédito consigna lo que debía.
 
@@ -197,7 +198,27 @@ async def settle_account(
     La comisión no genera su propio movimiento: no es plata que salió de
     ningún lado, es plata que nunca llegó. Registrarla como egreso la contaría
     dos veces (ya está implícita en que entró menos de lo que se liquidó).
+
+    Auditoría 27/09/2026: F5-01 (cinco liquidaciones simultáneas por todo el
+    pendiente pasaban las cinco) y F5-02 (la `Idempotency-Key` se exigía y se
+    tiraba: un reintento liquidaba dos veces). Primero se bloquea la cuenta
+    por cobrar —el mutex de su saldo—; después se busca la clave, así un
+    reintento en vuelo espera y encuentra la liquidación ya confirmada; y la
+    liquidación queda como documento (`account_settlement`, 00061) con su
+    clave UNIQUE.
     """
+    await repository.lock_accounts(db, company_id=company_id, account_ids=[account_id])
+    previa = await repository.find_settlement_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if previa is not None:
+        p = previa._mapping
+        return _settlement_out(
+            settled=p["amount_settled"],
+            received=p["amount_received"],
+            pending_before=p["pending_before"],
+        )
+
     origen = await repository.get_account(db, company_id=company_id, account_id=account_id)
     if origen is None:
         raise NotFoundError("La cuenta a liquidar no existe en esta empresa.")
@@ -246,6 +267,19 @@ async def settle_account(
     # saltaban en silencio, se auditaba la liquidación y se respondía 200 con
     # la plata sin registrar en ninguna de las dos cuentas (B-04).
     session_id = session._mapping["id"] if session is not None else None
+    await repository.insert_settlement(
+        db,
+        settlement_id=uuid4(),
+        company_id=company_id,
+        from_account_id=account_id,
+        to_account_id=body.to_account_id,
+        amount_settled=body.amount_settled,
+        amount_received=body.amount_received,
+        pending_before=pendiente,
+        notes=body.notes,
+        created_by=actor_id,
+        idempotency_key=idempotency_key,
+    )
     await cashbox_integration.record_movement(
         db,
         session_id=session_id,
@@ -296,16 +330,25 @@ async def settle_account(
         },
     )
 
+    return _settlement_out(
+        settled=body.amount_settled, received=body.amount_received, pending_before=pendiente
+    )
+
+
+def _settlement_out(
+    *, settled: Decimal, received: Decimal, pending_before: Decimal
+) -> SettlementOut:
+    """La respuesta de una liquidación, igual la primera vez que en un
+    reintento con la misma clave (sale del documento guardado)."""
+    comision = settled - received
     return SettlementOut(
-        settled=body.amount_settled,
-        received=body.amount_received,
+        settled=settled,
+        received=received,
         commission=comision,
         commission_pct=(
-            (comision / body.amount_settled * 100).quantize(Decimal("0.01"))
-            if body.amount_settled > 0
-            else None
+            (comision / settled * 100).quantize(Decimal("0.01")) if settled > 0 else None
         ),
-        new_pending_balance=pendiente - body.amount_settled,
+        new_pending_balance=pending_before - settled,
     )
 
 
@@ -351,7 +394,15 @@ async def create_transfer(
     propios permiten EXCLUIRLOS del cálculo de ingresos y gastos sin
     ambigüedad — contarlos inventaría movimiento de negocio donde solo hubo
     un cambio de bolsillo.
+
+    F5-01 (auditoría 27/09/2026): cinco traslados simultáneos por todo el
+    saldo de Davivienda pasaban los cinco y la dejaban en −36.000.000. Se
+    bloquean las DOS cuentas antes de nada, en orden de id (sin deadlocks
+    entre traslados cruzados), y la clave se busca después del bloqueo.
     """
+    await repository.lock_accounts(
+        db, company_id=company_id, account_ids=[body.from_account_id, body.to_account_id]
+    )
     existing = await repository.find_transfer_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )

@@ -183,3 +183,64 @@ async def test_notification_tables_isolated_between_tenants(
                 text("delete from public.notification_event where id = :id"),
                 {"id": str(event_id)},
             )
+
+
+async def test_account_settlement_isolated_between_tenants(
+    two_companies: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    """00061: la liquidación como documento (F5-02) lleva `tenant_isolation`
+    como toda tabla de negocio."""
+    company_a, company_b = two_companies
+    account_a, settlement_id = uuid.uuid4(), uuid.uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.account (id, company_id, name, type) "
+                "values (:id, :cid, 'Sistecrédito RLS', 'settlement')"
+            ),
+            {"id": str(account_a), "cid": str(company_a)},
+        )
+        await session.execute(
+            text(
+                "insert into public.account_settlement "
+                "(id, company_id, from_account_id, to_account_id, amount_settled, "
+                " amount_received, pending_before, idempotency_key) "
+                "values (:id, :cid, :acc, :acc, 100, 90, 100, 'rls-test')"
+            ),
+            {"id": str(settlement_id), "cid": str(company_a), "acc": str(account_a)},
+        )
+
+    async def _visible(company_id: uuid.UUID) -> list[uuid.UUID]:
+        async with AsyncSessionLocal() as session, session.begin():
+            await apply_tenant_claims(
+                session, {"sub": str(uuid.uuid4()), "company_id": str(company_id)}
+            )
+            rows = await session.execute(text("select id from public.account_settlement"))
+            return [row[0] for row in rows]
+
+    try:
+        assert await _visible(company_a) == [settlement_id]
+        assert await _visible(company_b) == []
+    finally:
+        # Es inmutable (`forbid_change`): se desactiva el trigger solo para
+        # limpiar, como hacen los tests de `cash_movement`.
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text(
+                    "alter table public.account_settlement "
+                    "disable trigger trg_account_settlement_immutable"
+                )
+            )
+            await session.execute(
+                text("delete from public.account_settlement where id = :id"),
+                {"id": str(settlement_id)},
+            )
+            await session.execute(
+                text(
+                    "alter table public.account_settlement "
+                    "enable trigger trg_account_settlement_immutable"
+                )
+            )
+            await session.execute(
+                text("delete from public.account where id = :id"), {"id": str(account_a)}
+            )

@@ -69,6 +69,87 @@ async def get_account(db: AsyncSession, *, company_id: UUID, account_id: UUID) -
     return result.first()
 
 
+async def lock_accounts(db: AsyncSession, *, company_id: UUID, account_ids: list[UUID]) -> None:
+    """`FOR UPDATE` sobre las filas de `account`: el MUTEX del saldo.
+
+    El saldo no vive en ninguna fila —se deriva de `cash_movement`—, así que
+    no hay nada que bloquear donde se lee. Auditoría 27/09/2026, F5-01: cinco
+    liquidaciones, traslados o retiros simultáneos por TODO el saldo pasaban
+    los cinco la validación (cada uno leía el saldo antes de que cualquiera
+    escribiera) y la cuenta quedaba en −5.600.000 / −36.000.000 /
+    −243.424.000. Toda operación que VALIDA el saldo de una cuenta antes de
+    sacar plata toma primero esta fila, y así la segunda espera a que la
+    primera confirme y recalcula sobre sus movimientos.
+
+    Varias cuentas (el traslado): en un solo `select … order by id`, que las
+    bloquea siempre en el mismo orden — dos traslados cruzados A→B y B→A no
+    pueden quedar esperándose el uno al otro.
+    """
+    ids = sorted({str(a) for a in account_ids})
+    await db.execute(
+        text(
+            "select id from public.account "
+            "where company_id = :cid and id = any(cast(:ids as uuid[])) "
+            "order by id for update"
+        ),
+        {"cid": str(company_id), "ids": ids},
+    )
+
+
+async def find_settlement_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id, from_account_id, amount_settled, amount_received, pending_before "
+            "from public.account_settlement "
+            "where company_id = :cid and idempotency_key = :key"
+        ),
+        {"cid": str(company_id), "key": idempotency_key},
+    )
+    return result.first()
+
+
+async def insert_settlement(
+    db: AsyncSession,
+    *,
+    settlement_id: UUID,
+    company_id: UUID,
+    from_account_id: UUID,
+    to_account_id: UUID,
+    amount_settled: Decimal,
+    amount_received: Decimal,
+    pending_before: Decimal,
+    notes: str | None,
+    created_by: UUID,
+    idempotency_key: str,
+) -> None:
+    await db.execute(
+        text(
+            """
+            insert into public.account_settlement
+                (id, company_id, from_account_id, to_account_id, amount_settled,
+                 amount_received, pending_before, notes, created_by, idempotency_key)
+            values
+                (:id, :cid, :from_id, :to_id, :settled, :received, :pending_before,
+                 :notes, :created_by, :key)
+            """
+        ),
+        {
+            "id": str(settlement_id),
+            "cid": str(company_id),
+            "from_id": str(from_account_id),
+            "to_id": str(to_account_id),
+            "settled": amount_settled,
+            "received": amount_received,
+            "pending_before": pending_before,
+            "notes": notes,
+            "created_by": str(created_by),
+            "key": idempotency_key,
+        },
+    )
+
+
 async def account_balance(db: AsyncSession, *, company_id: UUID, account_id: UUID) -> Decimal:
     """Saldo de UNA cuenta, con el mismo criterio por tipo que `list_accounts`.
 

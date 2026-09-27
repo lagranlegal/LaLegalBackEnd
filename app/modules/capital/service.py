@@ -116,7 +116,15 @@ async def _registrar(
     Lo único que cambia es la dirección, el concepto y qué se valida antes.
 
     Todo en UNA transacción (CLAUDE.md regla 4).
+
+    El retiro bloquea la cuenta ANTES de todo (F5-01, auditoría 27/09/2026):
+    cinco retiros simultáneos por el saldo entero pasaban los cinco y dejaban
+    Bancolombia en −243.424.000. El aporte no valida saldo y no bloquea.
     """
+    if direction == "withdrawal":
+        await accounts_integration.lock_accounts_for_balance(
+            db, company_id=company_id, account_ids=[account_id]
+        )
     existente = await repository.find_by_idempotency_key(
         db, company_id=company_id, idempotency_key=idempotency_key
     )

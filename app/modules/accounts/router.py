@@ -126,7 +126,7 @@ async def settle_account(
     body: SettlementIn,
     user: Annotated[CurrentUser, Depends(_settle)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
-    _idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
 ) -> SettlementOut:
     """Registra la liquidación de una cuenta por cobrar.
 
@@ -140,6 +140,8 @@ async def settle_account(
         account_id=account_id,
         body=body,
         actor_id=user.id,
+        # F5-02: antes se exigía y no se pasaba — un reintento liquidaba dos veces.
+        idempotency_key=idempotency_key,
     )
 
 

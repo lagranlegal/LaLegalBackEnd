@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from _concurrency import Peticion, en_paralelo
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -940,3 +941,151 @@ async def test_transfer_without_open_session_says_so_instead_of_blaming_the_bala
     )
     assert r.status_code == 409, r.text
     assert r.json()["code"] == "CASH_SESSION_NOT_OPEN", r.text
+
+
+# --------------------------------------------------------------------------
+# Concurrencia e idempotencia (auditoría 27/09/2026, F5-01 / F5-02)
+# --------------------------------------------------------------------------
+async def _pendiente_por_cobrar(tenant: dict, account_id: str, monto: str) -> None:
+    """Una venta por Sistecrédito ya registrada: `monto` queda por cobrar."""
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into public.cash_movement "
+                "(company_id, session_id, module, direction, concept, reference_type, "
+                " reference_id, amount, payment_method, account_id) "
+                "values (:cid, :sid, 'store', 'in', 'sale', 'sale', :ref, :monto, "
+                " 'other', :aid)"
+            ),
+            {
+                "cid": str(tenant["company_id"]),
+                "sid": str(tenant["session_id"]),
+                "ref": str(uuid4()),
+                "monto": Decimal(monto),
+                "aid": account_id,
+            },
+        )
+
+
+def _saldo(client: TestClient, token: str, account_id: str) -> Decimal:
+    return Decimal(next(a for a in _accounts(client, token) if a["id"] == account_id)["balance"])
+
+
+async def test_F5_01_cinco_liquidaciones_simultaneas_por_todo_el_pendiente_pasa_una(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Antes: 5× 200, Sistecrédito en −5.600.000 y el banco +7.000.000."""
+    token = accounts_tenant["token"]
+    siste = _create(client, token, name="Sistecrédito F5", type="settlement")
+    banco = _create(client, token, name="Banco F5", type="bank")
+    await _pendiente_por_cobrar(accounts_tenant, siste["id"], "1400000.00")
+
+    cuerpo = {
+        "to_account_id": banco["id"],
+        "amount_settled": "1400000.00",
+        "amount_received": "1400000.00",
+    }
+    url = f"/api/v1/accounts/{siste['id']}/settle"
+    respuestas = await en_paralelo(
+        [
+            Peticion("POST", url, token=token, json=cuerpo, idempotency_key=str(uuid4()))
+            for _ in range(5)
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [200, 400, 400, 400, 400], [
+        r.text for r in respuestas
+    ]
+    assert {r.json()["code"] for r in respuestas if r.status_code == 400} == {"BAD_REQUEST"}
+    assert _saldo(client, token, siste["id"]) == Decimal("0.00")
+    assert _saldo(client, token, banco["id"]) == Decimal("1400000.00")
+
+
+async def test_F5_01_cinco_traslados_simultaneos_por_todo_el_saldo_pasa_uno(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Antes: 5× 201 y el origen en −36.000.000."""
+    token = accounts_tenant["token"]
+    origen = _create(client, token, name="Davivienda F5", type="bank", opening_balance="9000000")
+    destino = _create(client, token, name="Bancolombia F5", type="bank")
+    cuerpo = {
+        "from_account_id": origen["id"],
+        "to_account_id": destino["id"],
+        "amount": "9000000.00",
+    }
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                "/api/v1/accounts/transfers",
+                token=token,
+                json=cuerpo,
+                idempotency_key=str(uuid4()),
+            )
+            for _ in range(5)
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [201, 400, 400, 400, 400], [
+        r.text for r in respuestas
+    ]
+    assert _saldo(client, token, origen["id"]) == Decimal("0.00")
+    assert _saldo(client, token, destino["id"]) == Decimal("9000000.00")
+
+
+async def test_F5_01_traslados_cruzados_simultaneos_no_se_bloquean_entre_si(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """A→B y B→A a la vez: las dos cuentas se toman en orden de id, así que
+    ninguno queda esperando al otro (sin orden, uno de los dos moría por
+    deadlock con un 500)."""
+    token = accounts_tenant["token"]
+    a = _create(client, token, name="Cruce A", type="bank", opening_balance="100000")
+    b = _create(client, token, name="Cruce B", type="bank", opening_balance="100000")
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                "/api/v1/accounts/transfers",
+                token=token,
+                json={"from_account_id": x, "to_account_id": y, "amount": "100000.00"},
+                idempotency_key=str(uuid4()),
+            )
+            for x, y in ((a["id"], b["id"]), (b["id"], a["id"])) * 3
+        ]
+    )
+    assert all(r.status_code in (201, 400) for r in respuestas), [r.text for r in respuestas]
+    assert _saldo(client, token, a["id"]) + _saldo(client, token, b["id"]) == Decimal("200000.00")
+    assert _saldo(client, token, a["id"]) >= 0
+    assert _saldo(client, token, b["id"]) >= 0
+
+
+async def test_F5_02_la_liquidacion_reintentada_con_la_misma_clave_liquida_una_vez(
+    client: TestClient, accounts_tenant: dict
+) -> None:
+    """Antes: 200 y 200, Sistecrédito −100.000 y el banco +96.000 por UNA
+    liquidación de 50.000/48.000. La clave se exigía y se tiraba."""
+    token = accounts_tenant["token"]
+    siste = _create(client, token, name="Sistecrédito F5-02", type="settlement")
+    banco = _create(client, token, name="Banco F5-02", type="bank")
+    await _pendiente_por_cobrar(accounts_tenant, siste["id"], "200000.00")
+
+    cuerpo = {
+        "to_account_id": banco["id"],
+        "amount_settled": "50000.00",
+        "amount_received": "48000.00",
+    }
+    url = f"/api/v1/accounts/{siste['id']}/settle"
+    clave = str(uuid4())
+    en_vuelo = await en_paralelo(
+        [Peticion("POST", url, token=token, json=cuerpo, idempotency_key=clave) for _ in range(2)]
+    )
+    tarde = client.post(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Idempotency-Key": clave},
+        json=cuerpo,
+    )
+    respuestas = [*en_vuelo, tarde]
+    assert [r.status_code for r in respuestas] == [200, 200, 200], [r.text for r in respuestas]
+    assert all(r.json() == respuestas[0].json() for r in respuestas)
+    assert respuestas[0].json()["new_pending_balance"] == "150000.00"
+    assert _saldo(client, token, siste["id"]) == Decimal("150000.00")
+    assert _saldo(client, token, banco["id"]) == Decimal("48000.00")

@@ -35,6 +35,14 @@ async def get_account_type(db: AsyncSession, *, company_id: UUID, account_id: UU
     return str(row._mapping["type"]) if row is not None else None
 
 
+async def lock_accounts_for_balance(
+    db: AsyncSession, *, company_id: UUID, account_ids: list[UUID]
+) -> None:
+    """Para quien valida el saldo de una cuenta antes de sacar plata desde
+    otro módulo (el retiro del dueño): ver `repository.lock_accounts`, F5-01."""
+    await repository.lock_accounts(db, company_id=company_id, account_ids=account_ids)
+
+
 async def get_account_balance(db: AsyncSession, *, company_id: UUID, account_id: UUID) -> Decimal:
     return await repository.account_balance(db, company_id=company_id, account_id=account_id)
 
