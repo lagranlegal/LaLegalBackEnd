@@ -348,6 +348,36 @@ async def insert_entry_line(
     )
 
 
+async def get_entry_for_update(
+    db: AsyncSession, *, company_id: UUID, entry_id: UUID
+) -> Row[Any] | None:
+    """`FOR UPDATE`: pagar una factura a crédito (F6-01, auditoría 27/09/2026).
+    Dos pagos simultáneos leían los dos `paid_at is null` y sacaban la plata
+    dos veces —incluso con la misma `Idempotency-Key`—; con la fila tomada
+    el segundo espera y ve la compra ya pagada."""
+    result = await db.execute(
+        text(
+            f"select {_ENTRY_COLUMNS} from public.inventory_entry "
+            "where company_id = :company_id and id = :id for update"
+        ),
+        {"company_id": str(company_id), "id": str(entry_id)},
+    )
+    return result.first()
+
+
+async def find_entry_by_pay_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id from public.inventory_entry "
+            "where company_id = :company_id and pay_idempotency_key = :key"
+        ),
+        {"company_id": str(company_id), "key": idempotency_key},
+    )
+    return result.first()
+
+
 async def get_entry(db: AsyncSession, *, company_id: UUID, entry_id: UUID) -> Row[Any] | None:
     result = await db.execute(
         text(
@@ -457,17 +487,20 @@ async def insert_exit(
     exit_type: str,
     reason: str,
     registered_by: UUID | None,
+    idempotency_key: str | None = None,
 ) -> None:
     await db.execute(
         text(
             """
             insert into public.inventory_exit
-                (id, company_id, number, exit_type, reason, registered_by)
+                (id, company_id, number, exit_type, reason, registered_by, idempotency_key)
             values
-                (:id, :company_id, :number, :exit_type, :reason, :registered_by)
+                (:id, :company_id, :number, :exit_type, :reason, :registered_by,
+                 :idempotency_key)
             """
         ),
         {
+            "idempotency_key": idempotency_key,
             "id": str(exit_id),
             "company_id": str(company_id),
             "number": number,
@@ -502,6 +535,19 @@ async def insert_exit_line(
             "quantity": quantity,
         },
     )
+
+
+async def find_exit_by_idempotency_key(
+    db: AsyncSession, *, company_id: UUID, idempotency_key: str
+) -> Row[Any] | None:
+    result = await db.execute(
+        text(
+            "select id from public.inventory_exit "
+            "where company_id = :company_id and idempotency_key = :key"
+        ),
+        {"company_id": str(company_id), "key": idempotency_key},
+    )
+    return result.first()
 
 
 async def get_exit(db: AsyncSession, *, company_id: UUID, exit_id: UUID) -> Row[Any] | None:
@@ -579,22 +625,39 @@ async def get_category_chain_letters(
 
 
 async def mark_entry_paid(
-    db: AsyncSession, *, company_id: UUID, entry_id: UUID, payment_method: str
-) -> None:
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    entry_id: UUID,
+    payment_method: str,
+    idempotency_key: str | None = None,
+) -> bool:
     """Salda una compra pendiente. El `paid_at` es AHORA, no la fecha de la
     compra: el movimiento de caja cae en la sesión abierta de hoy, que es lo
     único posible — una sesión cerrada es inmutable.
+
+    Solo toca una compra TODAVÍA sin pagar (`paid_at is null`) y devuelve si
+    la tocó (F6-01): el `FOR UPDATE` de `get_entry_for_update` ya serializa
+    los pagos, esto es la segunda llave en la base para que ningún camino
+    que se olvide del bloqueo pague dos veces la misma factura.
     """
-    await db.execute(
+    result = await db.execute(
         text(
             """
             update public.inventory_entry
-            set payment_method = :payment_method, paid_at = now()
-            where company_id = :company_id and id = :id
+            set payment_method = :payment_method, paid_at = now(),
+                pay_idempotency_key = :key
+            where company_id = :company_id and id = :id and paid_at is null
             """
         ),
-        {"company_id": str(company_id), "id": str(entry_id), "payment_method": payment_method},
+        {
+            "company_id": str(company_id),
+            "id": str(entry_id),
+            "payment_method": payment_method,
+            "key": idempotency_key,
+        },
     )
+    return bool(getattr(result, "rowcount", 0))
 
 
 # ---- Productos (00021) --------------------------------------------------

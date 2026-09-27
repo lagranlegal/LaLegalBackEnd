@@ -459,8 +459,28 @@ async def list_entries(
 
 
 async def create_exit(
-    db: AsyncSession, *, company_id: UUID, body: ExitCreateIn, registered_by: UUID
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: ExitCreateIn,
+    registered_by: UUID,
+    idempotency_key: str | None = None,
 ) -> ExitOut:
+    """F6-11 (B-13, auditoría 27/09/2026): dos `POST /inventory/exits`
+    idénticos daban dos egresos y el lote bajaba el doble. La clave es
+    OPCIONAL —el front de hoy no la manda—; si viene, se guarda con UNIQUE
+    (00061) y el reintento devuelve el egreso original."""
+    if idempotency_key:
+        previo = await repository.find_exit_by_idempotency_key(
+            db, company_id=company_id, idempotency_key=idempotency_key
+        )
+        if previo is not None:
+            existente = await repository.get_exit(
+                db, company_id=company_id, exit_id=previo._mapping["id"]
+            )
+            assert existente is not None
+            return _row_to_exit(existente)
+
     items = []
     for line in body.lines:
         item = await repository.get_item(db, company_id=company_id, item_id=line.item_id)
@@ -486,6 +506,7 @@ async def create_exit(
         exit_type=body.exit_type,
         reason=body.reason,
         registered_by=registered_by,
+        idempotency_key=idempotency_key,
     )
     for item, quantity in items:
         item_id = item._mapping["id"]
@@ -758,6 +779,7 @@ async def pay_entry(
     entry_id: UUID,
     body: EntryPayIn,
     registered_by: UUID,
+    idempotency_key: str | None = None,
 ) -> EntryOut:
     """Salda una compra que quedó pendiente de pago.
 
@@ -766,10 +788,25 @@ async def pay_entry(
     invalidaría un acta ya cuadrada e impresa. Por eso la compra puede tener
     `entry_date` de la semana pasada y su pago aparecer en el cierre de hoy —
     es lo correcto: la mercancía entró entonces, la plata sale ahora.
+
+    F6-01 (B-07, auditoría 27/09/2026): dos pagos simultáneos de la misma
+    factura sacaban la plata dos veces, con claves distintas y hasta con la
+    MISMA — el router exigía la `Idempotency-Key` y nadie la guardaba. Ahora:
+    la compra se lee `FOR UPDATE`; la clave se busca DESPUÉS del bloqueo (un
+    reintento, en vuelo o tardío, recibe la compra pagada en vez de un 409);
+    se guarda en `pay_idempotency_key` (00061); y un segundo pago con otra
+    clave recibe `409 CONFLICT` "ya fue pagada" (el código genérico que ya
+    está en el catálogo de API_GUIDE §15; uno propio exige documentarlo allí).
     """
-    row = await repository.get_entry(db, company_id=company_id, entry_id=entry_id)
+    row = await repository.get_entry_for_update(db, company_id=company_id, entry_id=entry_id)
     if row is None:
         raise NotFoundError("El ingreso no existe en esta empresa.")
+    if idempotency_key:
+        previo = await repository.find_entry_by_pay_idempotency_key(
+            db, company_id=company_id, idempotency_key=idempotency_key
+        )
+        if previo is not None:
+            return await get_entry(db, company_id=company_id, entry_id=previo._mapping["id"])
     m = row._mapping
     if m["origin_type"] != "purchase":
         raise AppError("Solo un ingreso de compra puede tener un pago asociado.")
@@ -784,9 +821,15 @@ async def pay_entry(
         direction="out",
     )
 
-    await repository.mark_entry_paid(
-        db, company_id=company_id, entry_id=entry_id, payment_method=body.payment_method
-    )
+    if not await repository.mark_entry_paid(
+        db,
+        company_id=company_id,
+        entry_id=entry_id,
+        payment_method=body.payment_method,
+        idempotency_key=idempotency_key,
+    ):
+        # Inalcanzable con el `FOR UPDATE` de arriba; si se llega, nada sale.
+        raise ConflictError("Esta compra ya fue pagada.")
     await cashbox_integration.record_movement(
         db,
         session_id=resolved.session_id,

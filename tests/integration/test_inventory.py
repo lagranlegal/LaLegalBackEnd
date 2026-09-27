@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from _concurrency import Peticion, en_paralelo
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -2261,3 +2262,138 @@ def test_kardex_cuadra_con_el_stock_real_incluida_la_anulacion(
     assert stock_real == Decimal(cuerpo["closing_quantity"])
     costo_real = sum(Decimal(lote["quantity"]) * Decimal(lote["cost"]) for lote in lotes)
     assert costo_real == Decimal(cuerpo["closing_value"])
+
+
+# ---- Concurrencia e idempotencia (auditoría 27/09/2026, F6-01 / F6-11) ----
+async def _pagos_de(tenant: dict, entry_id: str) -> tuple[int, Decimal]:
+    async with AsyncSessionLocal() as session:
+        fila = (
+            await session.execute(
+                text(
+                    "select count(*), coalesce(sum(amount), 0) from public.cash_movement "
+                    "where company_id = :cid and reference_id = :eid and concept = 'purchase'"
+                ),
+                {"cid": str(tenant["company_id"]), "eid": entry_id},
+            )
+        ).one()
+    return int(fila[0]), Decimal(fila[1])
+
+
+def _compra_a_credito(client: TestClient, tenant: dict) -> str:
+    payload = _entry_payload(tenant)
+    del payload["payment_method"]
+    entry = client.post(
+        "/api/v1/inventory/entries", headers=_headers(tenant["token"]), json=payload
+    )
+    assert entry.status_code == 201, entry.text
+    return str(entry.json()["id"])
+
+
+async def test_F6_01_dos_pagos_simultaneos_con_la_misma_clave_pagan_una_vez(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """B-07: con la MISMA clave, [200, 200] y el banco −200.000 por una
+    factura de 100.000 (acá, 500.000). Ahora el segundo espera, encuentra
+    su clave y devuelve la compra pagada; el reintento tardío también."""
+    entry_id = _compra_a_credito(client, inventory_tenant)
+    url = f"/api/v1/inventory/entries/{entry_id}/pay"
+    clave = str(uuid4())
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                url,
+                token=inventory_tenant["token"],
+                json={"payment_method": "transfer"},
+                idempotency_key=clave,
+            )
+            for _ in range(2)
+        ]
+    )
+    assert [r.status_code for r in respuestas] == [200, 200], [r.text for r in respuestas]
+    tarde = client.post(
+        url,
+        headers={"Authorization": f"Bearer {inventory_tenant['token']}", "Idempotency-Key": clave},
+        json={"payment_method": "transfer"},
+    )
+    assert tarde.status_code == 200, tarde.text
+    assert tarde.json()["paid_at"] == respuestas[0].json()["paid_at"]
+    assert await _pagos_de(inventory_tenant, entry_id) == (1, Decimal("500000.00"))
+
+
+async def test_F6_01_dos_pagos_simultaneos_con_claves_distintas_pagan_una_vez(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """Con claves distintas el segundo es otro intento de pagar lo ya pagado:
+    409 `CONFLICT` "ya fue pagada", y la plata sale una sola vez."""
+    entry_id = _compra_a_credito(client, inventory_tenant)
+    url = f"/api/v1/inventory/entries/{entry_id}/pay"
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                url,
+                token=inventory_tenant["token"],
+                json={"payment_method": "transfer"},
+                idempotency_key=str(uuid4()),
+            )
+            for _ in range(2)
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [200, 409], [r.text for r in respuestas]
+    rechazo = next(r for r in respuestas if r.status_code == 409)
+    assert rechazo.json()["code"] == "CONFLICT"
+    assert "ya fue pagada" in rechazo.json()["message"]
+    assert await _pagos_de(inventory_tenant, entry_id) == (1, Decimal("500000.00"))
+
+
+async def test_F6_11_el_mismo_egreso_con_la_misma_clave_da_de_baja_una_vez(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """B-13: dos egresos idénticos daban 201/201 y el lote bajaba el doble."""
+    token = inventory_tenant["token"]
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token),
+        json=_entry_payload(
+            inventory_tenant,
+            lines=[
+                {
+                    "name": "Cadena F6-11",
+                    "cat1_id": str(inventory_tenant["cat1"]),
+                    "cat2_id": str(inventory_tenant["cat2"]),
+                    "cat3_id": str(inventory_tenant["cat3"]),
+                    "unit_cost": "1000.00",
+                    "quantity": 5,
+                }
+            ],
+        ),
+    ).json()
+    item_id = entry["items"][0]["id"]
+    cuerpo = {
+        "exit_type": "damage",
+        "reason": "doble clic",
+        "lines": [{"item_id": item_id, "quantity": 1}],
+    }
+    clave = str(uuid4())
+    en_vuelo = await en_paralelo(
+        [
+            Peticion(
+                "POST", "/api/v1/inventory/exits", token=token, json=cuerpo, idempotency_key=clave
+            )
+            for _ in range(2)
+        ]
+    )
+    assert 201 in [r.status_code for r in en_vuelo], [r.text for r in en_vuelo]
+    for r in en_vuelo:
+        assert r.status_code == 201 or r.json()["code"] == "IDEMPOTENCY_IN_PROGRESS", r.text
+    tarde = client.post(
+        "/api/v1/inventory/exits",
+        headers={"Authorization": f"Bearer {token}", "Idempotency-Key": clave},
+        json=cuerpo,
+    )
+    assert tarde.status_code == 201, tarde.text
+    assert tarde.json()["id"] == next(r for r in en_vuelo if r.status_code == 201).json()["id"]
+
+    item = client.get(f"/api/v1/inventory/items/{item_id}", headers=_headers(token)).json()
+    assert Decimal(item["quantity"]) == 4

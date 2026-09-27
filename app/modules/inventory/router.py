@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.idempotency import require_idempotency_key
+from app.common.idempotency import optional_idempotency_key, require_idempotency_key
 from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.inventory import service
@@ -77,7 +77,14 @@ async def pay_entry(
     entonces, la plata sale ahora.
     """
     return await service.pay_entry(
-        db, company_id=user.company_id, entry_id=entry_id, body=body, registered_by=user.id
+        db,
+        company_id=user.company_id,
+        entry_id=entry_id,
+        body=body,
+        registered_by=user.id,
+        # F6-01: se exigía y no se pasaba — dos pagos con la misma clave
+        # sacaban la plata dos veces.
+        idempotency_key=idempotency_key,
     )
 
 
@@ -135,9 +142,16 @@ async def create_exit(
     body: ExitCreateIn,
     user: Annotated[CurrentUser, Depends(_exit_perm)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    idempotency_key: Annotated[str | None, Depends(optional_idempotency_key)],
 ) -> ExitOut:
+    """`Idempotency-Key` OPCIONAL (F6-11): si viene, un doble clic no da de
+    baja dos veces. Pasa a obligatoria cuando el front la mande."""
     return await service.create_exit(
-        db, company_id=user.company_id, body=body, registered_by=user.id
+        db,
+        company_id=user.company_id,
+        body=body,
+        registered_by=user.id,
+        idempotency_key=idempotency_key,
     )
 
 
