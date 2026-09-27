@@ -2055,3 +2055,70 @@ async def test_F4_02_pago_total_y_recargo_en_paralelo_no_cobran_y_prestan_a_la_v
         assert despues["status"] == "superseded"
         assert despues["abonos"] == 0
         assert despues["sucesores"] == [(Decimal("1100000.00"), "active")]
+
+
+# --------------------------------------------------------------------------
+# F4-05 (27/09/2026): con LTV en la categoría, el avalúo es obligatorio
+# --------------------------------------------------------------------------
+async def test_con_ltv_en_la_categoria_el_avaluo_es_obligatorio_sin_override(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    await _set_ltv(
+        company_id=contract_tenant["company_id"], category_id=contract_tenant["category_id"], pct=70
+    )
+    for avaluo in (None, "0"):
+        respuesta = client.post(
+            "/api/v1/contracts",
+            headers=_headers(contract_tenant["limited_token"], idempotency_key=str(uuid4())),
+            json=_contract_payload(contract_tenant, principal="5000000.00", appraisal_value=avaluo),
+        )
+        assert respuesta.status_code == 422, respuesta.text
+        assert respuesta.json()["code"] == "CONTRACT_APPRAISAL_REQUIRED"
+        assert respuesta.json()["details"]["max_ltv_pct"] == "70.00"
+
+    # Con avalúo y dentro del cupo, el mismo rol presta normal.
+    dentro = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(
+            contract_tenant, principal="700000.00", appraisal_value="1000000.00"
+        ),
+    )
+    assert dentro.status_code == 201, dentro.text
+    assert dentro.json()["ltv_warning"] is False
+
+
+async def test_con_override_ltv_se_presta_sin_avaluo_y_queda_la_bandera(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    await _set_ltv(
+        company_id=contract_tenant["company_id"], category_id=contract_tenant["category_id"], pct=70
+    )
+    respuesta = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant, principal="5000000.00"),
+    )
+    assert respuesta.status_code == 201, respuesta.text
+    assert respuesta.json()["ltv_warning"] is True
+
+
+async def test_sin_ltv_en_la_categoria_el_avaluo_sigue_opcional(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    respuesta = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant, principal="5000000.00"),
+    )
+    assert respuesta.status_code == 201, respuesta.text
+    assert respuesta.json()["ltv_warning"] is False

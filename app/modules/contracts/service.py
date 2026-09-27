@@ -11,6 +11,7 @@ from app.common.pagination import CursorPage, make_page
 from app.core.errors import (
     AppError,
     ConflictError,
+    ContractAppraisalRequiredError,
     ImportCapitalExceedsPrincipalError,
     ImportDatesMisalignedError,
     NotFoundError,
@@ -138,11 +139,28 @@ async def _check_ltv(
     —dárselo a todos o a nadie— y encima cubre el caso que la casilla no
     puede, que el asesor no pueda y el dueño sí.
 
-    Sin tasación o sin LTV en la categoría no hay nada que comparar: se deja
-    pasar sin bandera, igual que siempre.
+    Sin LTV en la categoría no hay techo: se deja pasar sin bandera.
+
+    **Con LTV, el avalúo es obligatorio** (decisión del dueño, auditoría
+    27/09/2026, F4-05). Antes "sin tasación no hay nada que comparar" dejaba
+    pasar cualquier monto: omitir el avalúo —o mandarlo en 0— prestaba 5
+    millones sobre una categoría con techo del 70 % sin permiso ni bandera,
+    mientras 800.000 sobre un avalúo de 1.000.000 sí se bloqueaba. Quien
+    tiene `contracts.override_ltv` puede prestar sin tasar —es la misma
+    excepción que pasarse del techo— y el contrato queda con la bandera,
+    porque nadie comprobó el cupo.
     """
-    if not appraisal_value or appraisal_value <= 0 or max_ltv_pct is None:
+    if max_ltv_pct is None:
         return False
+    if not appraisal_value or appraisal_value <= 0:
+        if await has_permission(db, role_id, "contracts.override_ltv"):
+            return True
+        raise ContractAppraisalRequiredError(
+            "La categoría de la prenda tiene un préstamo máximo sobre el avalúo "
+            f"({max_ltv_pct} %): registra el avalúo para poder calcular el cupo, o "
+            "pide a un responsable con el permiso para autorizarlo que lo registre.",
+            details={"max_ltv_pct": str(max_ltv_pct), "permission": "contracts.override_ltv"},
+        )
     if principal / appraisal_value * 100 <= max_ltv_pct:
         return False
     if not await has_permission(db, role_id, "contracts.override_ltv"):

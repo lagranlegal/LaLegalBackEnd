@@ -111,6 +111,13 @@ class PaymentPartialInterestRejectedError(AppError):
     code = "PAYMENT_PARTIAL_INTEREST_REJECTED"
 
 
+class ContractAppraisalRequiredError(AppError):
+    """Contrato sin avalúo en una categoría con `max_ltv_pct` (F4-05)."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "CONTRACT_APPRAISAL_REQUIRED"
+
+
 class ImportDatesMisalignedError(AppError):
     status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
     code = "IMPORT_DATES_MISALIGNED"
