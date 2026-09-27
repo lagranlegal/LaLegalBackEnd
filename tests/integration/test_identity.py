@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from _concurrency import Peticion, en_paralelo
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -528,3 +529,108 @@ async def test_invited_user_activates_on_first_login(
             )
         ).scalar_one()
     assert status_after == "active"
+
+
+# --------------------------------------------------------------------------
+# Concurrencia (auditoría 27/09/2026, F3-07 / B08)
+# --------------------------------------------------------------------------
+async def _segundo_admin(tenant: dict) -> tuple[UUID, str]:
+    admin2 = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.app_user "
+                "(id, company_id, role_id, full_name, email, status) "
+                "values (:id, :company_id, :role_id, 'Admin Dos', :email, 'active')"
+            ),
+            {
+                "id": str(admin2),
+                "company_id": str(tenant["company_id"]),
+                "role_id": str(tenant["admin_role_id"]),
+                "email": f"admin2-{admin2}@example.com",
+            },
+        )
+    token = make_token(
+        tenant["private_pem"],
+        sub=str(admin2),
+        company_id=str(tenant["company_id"]),
+        role_id=str(tenant["admin_role_id"]),
+    )
+    return admin2, token
+
+
+async def _admins_activos(company_id: UUID) -> int:
+    async with AsyncSessionLocal() as session:
+        return int(
+            (
+                await session.execute(
+                    text(
+                        "select count(*) from public.app_user "
+                        "where company_id = :cid and status = 'active'"
+                    ),
+                    {"cid": str(company_id)},
+                )
+            ).scalar_one()
+        )
+
+
+async def test_F3_07_dos_admins_desactivandose_entre_si_no_dejan_cero(tenant: dict) -> None:
+    """Antes: 204 y 204 — cada uno contaba al otro como "el admin que queda"
+    y la empresa quedaba sin administradores. Con el candado por empresa el
+    segundo cuenta después del primero y recibe `LAST_ADMIN_SAFEGUARD`."""
+    admin2, token2 = await _segundo_admin(tenant)
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                f"/api/v1/identity/users/{admin2}/deactivate",
+                token=tenant["admin_token"],
+            ),
+            Peticion(
+                "POST",
+                f"/api/v1/identity/users/{tenant['admin_user_id']}/deactivate",
+                token=token2,
+            ),
+        ]
+    )
+    assert sorted(r.status_code for r in respuestas) == [204, 409], [r.text for r in respuestas]
+    rechazo = next(r for r in respuestas if r.status_code == 409)
+    assert rechazo.json()["code"] == "LAST_ADMIN_SAFEGUARD"
+    assert await _admins_activos(tenant["company_id"]) == 1
+
+
+async def test_F3_07_desactivar_y_degradar_a_la_vez_no_dejan_cero(tenant: dict) -> None:
+    """La misma carrera por el otro camino: uno desactiva al otro mientras
+    éste le cambia el rol al primero a uno sin `identity.manage_roles`."""
+    admin2, token2 = await _segundo_admin(tenant)
+    respuestas = await en_paralelo(
+        [
+            Peticion(
+                "POST",
+                f"/api/v1/identity/users/{admin2}/deactivate",
+                token=tenant["admin_token"],
+            ),
+            Peticion(
+                "PATCH",
+                f"/api/v1/identity/users/{tenant['admin_user_id']}/role",
+                token=token2,
+                json={"role_id": str(tenant["basic_role_id"])},
+            ),
+        ]
+    )
+    codigos = sorted(r.status_code for r in respuestas)
+    assert codigos in ([200, 409], [204, 409]), [r.text for r in respuestas]
+    assert next(r for r in respuestas if r.status_code == 409).json()["code"] == (
+        "LAST_ADMIN_SAFEGUARD"
+    )
+    async with AsyncSessionLocal() as session:
+        admins = (
+            await session.execute(
+                text(
+                    "select count(*) from public.app_user "
+                    "where company_id = :cid and status = 'active' and role_id = :rid"
+                ),
+                {"cid": str(tenant["company_id"]), "rid": str(tenant["admin_role_id"])},
+            )
+        ).scalar_one()
+    assert admins == 1

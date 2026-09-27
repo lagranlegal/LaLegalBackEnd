@@ -111,6 +111,28 @@ async def set_user_status(
     )
 
 
+async def lock_admin_safeguard(db: AsyncSession, *, company_id: UUID) -> None:
+    """Candado por EMPRESA para la salvaguarda del último administrador.
+
+    Auditoría 27/09/2026, F3-07 (B08): dos admins que se desactivaban entre
+    sí a la vez respondían 204 y 204 — cada uno contaba al otro como "el
+    admin que queda" antes de que el otro escribiera, y la empresa quedaba
+    con CERO administradores y sin forma de recuperarse desde la app.
+
+    Advisory lock de transacción y no `FOR UPDATE` sobre las filas de
+    `app_user`: ser admin depende de la fila del usuario Y de los permisos
+    de su rol, y `update_role_permissions` quita el permiso sin tocar
+    ningún `app_user` — bloquear filas no serializaría ese camino con los
+    otros dos. El candado es uno por empresa, se suelta solo al terminar la
+    transacción (compatible con Supavisor en modo transacción) y solo lo
+    toman las tres operaciones que pueden bajar el número de admins.
+    """
+    await db.execute(
+        text("select pg_advisory_xact_lock(hashtext('identity.last_admin'), hashtext(:cid))"),
+        {"cid": str(company_id)},
+    )
+
+
 async def count_active_admins(
     db: AsyncSession, *, company_id: UUID, exclude_user_id: UUID | None = None
 ) -> int:

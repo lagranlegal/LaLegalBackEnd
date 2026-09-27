@@ -138,6 +138,8 @@ async def _role_has_admin_permission(db: AsyncSession, role_id: UUID) -> bool:
 async def update_user_role(
     db: AsyncSession, *, company_id: UUID, user_id: UUID, new_role_id: UUID, acting_user_id: UUID
 ) -> UserOut:
+    # F3-07: antes de leer nada, el candado de la salvaguarda del último admin.
+    await repository.lock_admin_safeguard(db, company_id=company_id)
     user = await repository.get_user(db, company_id=company_id, user_id=user_id)
     if user is None:
         raise NotFoundError("El usuario no existe en esta empresa.")
@@ -179,6 +181,9 @@ async def update_user_role(
 async def _set_user_active_status(
     db: AsyncSession, *, company_id: UUID, user_id: UUID, active: bool, acting_user_id: UUID
 ) -> None:
+    if not active:
+        # F3-07: desactivar puede dejar la empresa sin admins; reactivar no.
+        await repository.lock_admin_safeguard(db, company_id=company_id)
     user = await repository.get_user(db, company_id=company_id, user_id=user_id)
     if user is None:
         raise NotFoundError("El usuario no existe en esta empresa.")
@@ -323,6 +328,9 @@ async def update_role_permissions(
     codes: list[str],
     acting_user_id: UUID,
 ) -> list[str]:
+    # F3-07: quitarle `identity.manage_roles` a un rol es el tercer camino
+    # para quedarse sin admins; comparte el candado con los otros dos.
+    await repository.lock_admin_safeguard(db, company_id=company_id)
     role = await repository.get_role(db, company_id=company_id, role_id=role_id)
     if role is None:
         raise NotFoundError("El rol no existe en esta empresa.")
