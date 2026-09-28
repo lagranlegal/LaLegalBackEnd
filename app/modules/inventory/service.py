@@ -520,9 +520,18 @@ async def create_exit(
         registered_by=registered_by,
         idempotency_key=idempotency_key,
     )
+    audit_lines: list[dict[str, str]] = []
     for item, quantity in items:
         item_id = item._mapping["id"]
         remaining = item._mapping["quantity"] - quantity
+        audit_lines.append(
+            {
+                "item_id": str(item_id),
+                "quantity": str(quantity.quantize(Decimal("0.001"))),
+                "unit_cost": str(quantize(item._mapping["cost"])),
+                "total_cost": str(quantize(item._mapping["cost"] * quantity)),
+            }
+        )
         await repository.insert_exit_line(
             db,
             line_id=uuid4(),
@@ -547,7 +556,19 @@ async def create_exit(
         action="create_exit",
         entity_type="inventory_exit",
         entity_id=exit_id,
-        after={"exit_type": body.exit_type, "reason": body.reason},
+        # Con las líneas y su costo (F7-17, auditoría fase 7): con solo
+        # `{exit_type, reason}` una merma de 75.000 no se podía reconstruir
+        # desde la auditoría — ni qué pieza, ni cuánto, ni a qué costo. El
+        # costo es el del LOTE (identificación específica), el mismo con el
+        # que la merma entra al estado de resultados.
+        after={
+            "exit_type": body.exit_type,
+            "reason": body.reason,
+            "lines": audit_lines,
+            "total_cost": str(
+                sum((Decimal(line["total_cost"]) for line in audit_lines), start=Decimal("0.00"))
+            ),
+        },
     )
 
     row = await repository.get_exit(db, company_id=company_id, exit_id=exit_id)

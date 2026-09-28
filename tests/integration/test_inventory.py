@@ -589,6 +589,65 @@ def test_exit_reduces_stock_and_writes_off_at_zero(
     assert len(exits_list.json()["items"]) == 1
 
 
+async def test_la_auditoria_del_egreso_guarda_cantidades_y_costo(
+    client: TestClient, inventory_tenant: dict
+) -> None:
+    """F7-17 (auditoría fase 7, 28/09/2026): `create_exit.after` era
+    `{reason, exit_type}` y la merma de 75.000 no se podía reconstruir desde
+    la auditoría — qué pieza, cuánto y a qué costo."""
+    headers = _headers(inventory_tenant["token"])
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=headers,
+        json=_entry_payload(
+            inventory_tenant,
+            lines=[
+                {
+                    "name": "Oro granel",
+                    "cat1_id": str(inventory_tenant["cat1"]),
+                    "cat2_id": str(inventory_tenant["cat2"]),
+                    "cat3_id": str(inventory_tenant["cat3"]),
+                    "unit": "gram",
+                    "unit_cost": "150000.00",
+                    "quantity": "10.5",
+                }
+            ],
+        ),
+    ).json()
+    item_id = entry["items"][0]["id"]
+    salida = client.post(
+        "/api/v1/inventory/exits",
+        headers=headers,
+        json={
+            "exit_type": "loss",
+            "reason": "merma al pesar",
+            "lines": [{"item_id": item_id, "quantity": "0.5"}],
+        },
+    )
+    assert salida.status_code == 201, salida.text
+
+    async with AsyncSessionLocal() as session:
+        after = (
+            await session.execute(
+                text(
+                    "select after from public.audit_log "
+                    "where entity_id = :id and action = 'create_exit'"
+                ),
+                {"id": salida.json()["id"]},
+            )
+        ).scalar_one()
+    assert after["exit_type"] == "loss"
+    assert after["total_cost"] == "75000.00"
+    assert after["lines"] == [
+        {
+            "item_id": item_id,
+            "quantity": "0.500",
+            "unit_cost": "150000.00",
+            "total_cost": "75000.00",
+        }
+    ]
+
+
 def test_exit_insufficient_stock_is_rejected(client: TestClient, inventory_tenant: dict) -> None:
     headers = _headers(inventory_tenant["token"])
     entry = client.post(
