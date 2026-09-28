@@ -530,7 +530,7 @@ def test_profit_summary_crosses_cost_against_price(
     body = _profit(client, reports_tenant["token"], today, today)
 
     assert body["sale_count"] == 2
-    assert body["units_sold"] == 2
+    assert Decimal(body["units_sold"]) == 2
     assert float(body["gross_revenue"]) == 500000.0
     assert float(body["cost_of_goods_sold"]) == 250000.0
     assert float(body["gross_profit"]) == 250000.0
@@ -1307,7 +1307,7 @@ def test_devolucion_parcial_prorratea_el_descuento_de_la_cabecera(
     # (Si esto se hubiera resuelto cambiando `sale.status`, `sale_count` sería
     # 0 y los 900.000 de la cadena habrían desaparecido del resultado.)
     assert body["sale_count"] == 1
-    assert body["units_sold"] == 2
+    assert Decimal(body["units_sold"]) == 2
 
 
 async def test_devolucion_de_otro_mes_no_reescribe_el_mes_de_la_venta(
@@ -1419,3 +1419,57 @@ def test_estado_de_resultados_muestra_las_devoluciones_en_linea_propia(
     mes_actual = serie["points"][-1]
     assert Decimal(mes_actual["sales_revenue"]) == Decimal("500000.00")
     assert Decimal(mes_actual["sales_returns"]) == Decimal("500000.00")
+
+
+# --------------------------------------------------------------------------
+# F6-02 (27/09/2026): las cantidades de los reportes son Decimal — se vende
+# por gramos.
+# --------------------------------------------------------------------------
+def test_reportes_con_cantidades_fraccionarias(client: TestClient, reports_tenant: dict) -> None:
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "5000000.00"}
+    )
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "purchase",
+            "supplier_id": str(reports_tenant["supplier_id"]),
+            "payment_method": "cash",
+            "lines": [
+                {
+                    "name": "Oro por gramo",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit": "gram",
+                    "quantity": "2.5",
+                    "unit_cost": "200000.00",
+                    "sale_price": "300000.00",
+                    "photos": ["http://example.com/oro.jpg"],
+                }
+            ],
+        },
+    )
+    assert entry.status_code == 201, entry.text
+    item_id = entry.json()["items"][0]["id"]
+    venta = client.post(
+        "/api/v1/sales",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "lines": [{"item_id": item_id, "quantity": "1.1", "unit_price": "300000.00"}],
+        },
+    )
+    assert venta.status_code == 201, venta.text
+
+    today = date.today().isoformat()
+    utilidad = _profit(client, reports_tenant["token"], today, today)
+    assert Decimal(utilidad["units_sold"]) == Decimal("1.1")
+    assert utilidad["gross_revenue"] == "330000.00"
+
+    valor = client.get("/api/v1/reports/inventory-valuation", headers=headers)
+    assert valor.status_code == 200, valor.text
+    assert Decimal(valor.json()["units"]) == Decimal("1.4")
+    assert valor.json()["cost_value"] == "280000.00"

@@ -82,8 +82,9 @@ class ProfitSummaryOut(BaseModel):
     sale_count: int
     #: Unidades VENDIDAS en el rango, brutas de devoluciones: es actividad de
     #: venta, no dinero. Lo devuelto ya está descontado del dinero
-    #: (`sales_returns`) y del costo (`returns_cost`).
-    units_sold: int
+    #: (`sales_returns`) y del costo (`returns_cost`). `Decimal` porque se
+    #: vende por gramos (F6-02): 1,1 g no es un entero.
+    units_sold: Decimal
     #: Suma de los subtotales de las líneas, antes de descuentos.
     gross_revenue: Decimal
     #: Descuentos aplicados a nivel de venta — menor ingreso, no un gasto.
@@ -188,7 +189,8 @@ class PayablesOut(BaseModel):
 class InventoryValuationCategoryOut(BaseModel):
     cat1_id: UUID | None
     cat1_name: str
-    units: int
+    #: `Decimal`: una cantidad puede ser fraccionaria (gramos, F6-02).
+    units: Decimal
     cost_value: Decimal
     retail_value: Decimal
 
@@ -207,7 +209,8 @@ class InventoryValuationOut(BaseModel):
     """
 
     as_of: date
-    units: int
+    #: `Decimal`: una cantidad puede ser fraccionaria (gramos, F6-02).
+    units: Decimal
     lot_count: int
     #: Valor al costo. Este es EL número del inventario.
     cost_value: Decimal
@@ -222,7 +225,8 @@ class StaleItemOut(BaseModel):
     product_id: UUID
     product_code: str | None
     product_name: str
-    units: int
+    #: `Decimal`: una cantidad puede ser fraccionaria (gramos, F6-02).
+    units: Decimal
     cost_value: Decimal
     #: Días desde que entró el lote disponible más ANTIGUO de ese producto.
     days_in_stock: int

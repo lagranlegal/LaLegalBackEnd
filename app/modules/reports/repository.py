@@ -509,8 +509,10 @@ async def inventory_valuation(db: AsyncSession, *, company_id: UUID) -> list[Row
               coalesce(c.name, 'Sin categoría')          as cat1_name,
               sum(i.quantity)                            as units,
               count(*)                                   as lot_count,
-              sum(i.cost * i.quantity)                   as cost_value,
-              sum(coalesce(p.sale_price, 0) * i.quantity) as retail_value
+              -- Redondeado POR LOTE antes de sumar (F6-02): con gramos,
+              -- `costo × cantidad` trae milésimas y el dinero va a 2 decimales.
+              sum(round(i.cost * i.quantity, 2))                   as cost_value,
+              sum(round(coalesce(p.sale_price, 0) * i.quantity, 2)) as retail_value
             from public.inventory_item i
             join public.product p
               on p.id = i.product_id and p.company_id = i.company_id
@@ -557,7 +559,7 @@ async def stale_inventory(
                   p.code                     as product_code,
                   p.name                     as product_name,
                   sum(i.quantity)            as units,
-                  sum(i.cost * i.quantity)   as cost_value,
+                  sum(round(i.cost * i.quantity, 2)) as cost_value,
                   (:as_of - min(i.entry_date)) as days_in_stock
                 from public.inventory_item i
                 join public.product p

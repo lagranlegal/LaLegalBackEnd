@@ -286,7 +286,7 @@ async def get_inventory_valuation(db: AsyncSession, *, company_id: UUID) -> Inve
         InventoryValuationCategoryOut(
             cat1_id=r._mapping["cat1_id"],
             cat1_name=r._mapping["cat1_name"],
-            units=r._mapping["units"] or 0,
+            units=r._mapping["units"] or Decimal("0"),
             cost_value=_dec(r._mapping["cost_value"]),
             retail_value=_dec(r._mapping["retail_value"]),
         )
@@ -296,7 +296,7 @@ async def get_inventory_valuation(db: AsyncSession, *, company_id: UUID) -> Inve
     retail_value = sum((c.retail_value for c in by_category), start=Decimal("0.00"))
     return InventoryValuationOut(
         as_of=as_of,
-        units=sum(c.units for c in by_category),
+        units=sum((c.units for c in by_category), start=Decimal("0")),
         lot_count=sum(r._mapping["lot_count"] for r in rows),
         cost_value=cost_value,
         retail_value=retail_value,
@@ -324,7 +324,7 @@ async def get_stale_inventory(
             product_id=r._mapping["product_id"],
             product_code=r._mapping["product_code"],
             product_name=r._mapping["product_name"],
-            units=r._mapping["units"] or 0,
+            units=r._mapping["units"] or Decimal("0"),
             cost_value=_dec(r._mapping["cost_value"]),
             days_in_stock=r._mapping["days_in_stock"] or 0,
         )
