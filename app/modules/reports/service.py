@@ -28,6 +28,7 @@ from app.modules.reports.schemas import (
     PawnPerformanceOut,
     PayablesOut,
     ProfitSummaryOut,
+    SalesCashFlowOut,
     SalesKpisOut,
     StaleInventoryOut,
     StaleItemOut,
@@ -83,6 +84,10 @@ async def get_dashboard(db: AsyncSession, *, company_id: UUID) -> DashboardOut:
             today_total=sm["today_total"],
             today_count=sm["today_count"],
             month_total=sm["month_total"],
+            today_gross=sm["today_gross"],
+            today_returns=sm["today_returns"],
+            month_gross=sm["month_gross"],
+            month_returns=sm["month_returns"],
         ),
         inventory=InventoryKpisOut(
             available_count=im["available_count"],
@@ -125,7 +130,31 @@ async def get_closings_breakdown(
     rows = await repository.closings_breakdown(
         db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
     )
+
+    def _suma(direction: str, concept: str) -> Decimal:
+        return sum(
+            (
+                _dec(r._mapping["total"])
+                for r in rows
+                if r._mapping["direction"] == direction and r._mapping["concept"] == concept
+            ),
+            start=Decimal("0.00"),
+        )
+
+    # F7-05: el resumen sale de las MISMAS líneas, así que no puede separarse
+    # del desglose que acompaña.
+    cobros, anuladas, devueltas = (
+        _suma("in", "sale"),
+        _suma("out", "sale"),
+        _suma("out", "sale_return"),
+    )
     return ClosingsBreakdownOut(
+        sales_flow=SalesCashFlowOut(
+            sales_in=cobros,
+            voided_out=anuladas,
+            returns_out=devueltas,
+            net_sales_flow=cobros - anuladas - devueltas,
+        ),
         lines=[
             ClosingsBreakdownLineOut(
                 module=r._mapping["module"],
@@ -139,7 +168,7 @@ async def get_closings_breakdown(
                 total=r._mapping["total"],
             )
             for r in rows
-        ]
+        ],
     )
 
 
@@ -244,11 +273,18 @@ async def get_pawn_performance(
         (interest / outstanding * 100).quantize(Decimal("0.01")) if outstanding > 0 else None
     )
 
+    interest_net = interest - _dec(m["interest_discounts"])
     return PawnPerformanceOut(
         from_date=from_date,
         to_date=to_date,
         interest_collected=interest,
         interest_discounts=m["interest_discounts"],
+        interest_revenue=interest_net,
+        net_yield_on_current_portfolio_pct=(
+            (interest_net / outstanding * 100).quantize(Decimal("0.01"))
+            if outstanding > 0
+            else None
+        ),
         capital_recovered=m["capital_recovered"],
         capital_disbursed=m["capital_disbursed"],
         payment_count=m["payment_count"],

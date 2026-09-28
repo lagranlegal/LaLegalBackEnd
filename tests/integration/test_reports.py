@@ -99,6 +99,8 @@ async def reports_tenant(
         "accounts.view",
         "accounts.manage",
         "accounts.settle",
+        # F7-05: el flujo de ventas de caja descuenta las anuladas.
+        "sales.void",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -1923,3 +1925,76 @@ def test_F7_08_vender_bajo_el_precio_publicado_figura_como_descuento(
     # El neto no cambia: el subtotal ya venía rebajado.
     assert utilidad["net_revenue"] == "1145000.00"
     assert _estado(client, token)["sales_discounts"] == "105000.00"
+
+
+def test_F7_05_07_ventas_netas_en_el_dashboard_y_flujo_de_caja_sin_anuladas(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """F7-07: «Ventas de hoy» sumaba `sale.total` bruto de devoluciones
+    (5.120.250 con 1.383.333,33 devueltos). F7-05: el KPI de Reportes, armado
+    desde el desglose de caja, sumaba `sale/in` y nunca restaba la anulación
+    (`sale/out`) ni la devolución en efectivo (`sale_return/out`).
+
+    Venta A 500.000; venta B 200.000 anulada; venta C 300.000 devuelta en
+    efectivo. Ventas netas del día: 500.000."""
+    token = reports_tenant["token"]
+    abierta = client.post("/api/v1/cashbox/sessions/open", headers=_headers(token), json={})
+    _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="500000.00")
+    b = _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="200000.00")
+    anulada = client.post(
+        f"/api/v1/sales/{b['id']}/void",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={"reason": "error de digitación"},
+    )
+    assert anulada.status_code == 200, anulada.text
+    c = _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="300000.00")
+    _return_sale(client, token, c["id"], [{"sale_line_id": c["lines"][0]["id"], "quantity": "1"}])
+
+    ventas = client.get("/api/v1/reports/dashboard", headers=_headers(token)).json()["sales"]
+    assert ventas["today_gross"] == "800000.00", "las anuladas nunca cuentan"
+    assert ventas["today_returns"] == "300000.00"
+    assert ventas["today_total"] == "500000.00"
+    assert ventas["month_total"] == "500000.00"
+    assert ventas["month_returns"] == "300000.00"
+    estado = _estado(client, token)
+    assert Decimal(estado["sales_revenue"]) - Decimal(estado["sales_returns"]) == Decimal(
+        ventas["today_total"]
+    ), "la misma cifra que el estado de resultados"
+
+    esperado = client.get(
+        f"/api/v1/cashbox/sessions/{abierta.json()['id']}/report", headers=_headers(token)
+    ).json()["expected_cash"]
+    cerrada = client.post(
+        f"/api/v1/cashbox/sessions/{abierta.json()['id']}/close",
+        headers=_headers(token),
+        json={"counted_cash": esperado},
+    )
+    assert cerrada.status_code == 200, cerrada.text
+    hoy = date.today().isoformat()
+    flujo = client.get(
+        "/api/v1/reports/closings-breakdown",
+        headers=_headers(token),
+        params={"from_date": hoy, "to_date": hoy},
+    ).json()["sales_flow"]
+    assert flujo["kind"] == "cash_flow"
+    assert flujo["sales_in"] == "1000000.00"
+    assert flujo["voided_out"] == "200000.00"
+    assert flujo["returns_out"] == "300000.00"
+    assert flujo["net_sales_flow"] == "500000.00"
+
+
+async def test_F7_06_rendimiento_del_empeno_sobre_el_interes_neto(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """F7-06: la tarjeta de empeño decía 250.000 (bruto) y el KPI 240.000
+    (neto del descuento de 10.000). La respuesta ahora trae el neto —la misma
+    cifra que `income-statement.interest_revenue`— y el rendimiento sobre él."""
+    token = reports_tenant["token"]
+    hoy = date.today().isoformat()
+    empeno = _pawn(client, token, hoy, hoy)
+    estado = _estado(client, token)
+    assert empeno["interest_revenue"] == estado["interest_revenue"]
+    assert Decimal(empeno["interest_revenue"]) == Decimal(empeno["interest_collected"]) - Decimal(
+        empeno["interest_discounts"]
+    )
+    assert "net_yield_on_current_portfolio_pct" in empeno

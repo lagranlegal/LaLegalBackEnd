@@ -17,9 +17,24 @@ class ContractKpisOut(BaseModel):
 
 
 class SalesKpisOut(BaseModel):
+    """Ventas del dashboard (F7-07). `today_total`/`month_total` son NETAS de
+    devoluciones —la misma cifra que `income-statement.sales_revenue −
+    sales_returns` para ese día o mes—; una venta anulada nunca cuenta. El
+    bruto y las devoluciones van aparte para poder explicar la resta."""
+
+    #: Ventas netas de hoy: `today_gross − today_returns`.
     today_total: MoneyOut
+    #: Ventas `completed` de hoy (cuántas), sin restar devoluciones.
     today_count: int
+    #: Ventas netas del mes: `month_gross − month_returns`.
     month_total: MoneyOut
+    #: Σ `sale.total` de las ventas `completed` (neto del descuento de cabecera).
+    today_gross: MoneyOut = Decimal("0.00")
+    #: Devoluciones registradas HOY (por `return_date`), aunque la venta sea
+    #: de otro día — el contra-ingreso cae en el período de la devolución.
+    today_returns: MoneyOut = Decimal("0.00")
+    month_gross: MoneyOut = Decimal("0.00")
+    month_returns: MoneyOut = Decimal("0.00")
 
 
 class InventoryKpisOut(BaseModel):
@@ -67,8 +82,40 @@ class ClosingsBreakdownLineOut(BaseModel):
     total: MoneyOut
 
 
+class SalesCashFlowOut(BaseModel):
+    """Ventas vistas desde la CAJA (F7-05): es FLUJO, no ingreso contable.
+
+    El KPI de ventas de la pantalla Reportes se armaba sumando `sale/in` del
+    desglose y nunca restaba la anulación (`sale/out`) ni la devolución en
+    efectivo (`sale_return/out`): con una venta anulada de 1.200.000 decía
+    «Ventas» 6.120.250 contra 5.120.250 del estado de resultados.
+
+    Sigue siendo flujo: lo que se pagó con nota crédito no entró a caja y no
+    está; lo vendido por Sistecrédito está el día de la venta, en la cuenta
+    `settlement`. Para el INGRESO del período la fuente es
+    `/reports/income-statement`.
+    """
+
+    #: Siempre `"cash_flow"`: rotula la naturaleza del número.
+    kind: str = "cash_flow"
+    description: str = (
+        "Flujo de caja por ventas: cobros de venta menos anulaciones y devoluciones "
+        "pagadas. No es el ingreso contable (ver /reports/income-statement)."
+    )
+    #: Σ `sale/in`: cobros de venta, en todas las cuentas.
+    sales_in: MoneyOut
+    #: Σ `sale/out`: contra-movimientos de ventas anuladas.
+    voided_out: MoneyOut
+    #: Σ `sale_return/out`: devoluciones pagadas (efectivo, transferencia).
+    returns_out: MoneyOut
+    #: `sales_in − voided_out − returns_out`.
+    net_sales_flow: MoneyOut
+
+
 class ClosingsBreakdownOut(BaseModel):
     lines: list[ClosingsBreakdownLineOut]
+    #: Resumen de ventas del mismo rango y las mismas líneas (F7-05).
+    sales_flow: SalesCashFlowOut | None = None
 
 
 class ProfitSummaryOut(BaseModel):
@@ -150,6 +197,10 @@ class PawnPerformanceOut(BaseModel):
     #: Descuentos de interés otorgados (permiso especial). Erosionan el
     #: rendimiento: son interés que se dejó de cobrar.
     interest_discounts: MoneyOut
+    #: `interest_collected − interest_discounts` (F7-06): el interés NETO, la
+    #: misma cifra que `income-statement.interest_revenue`. Es la que debe
+    #: rotularse «Intereses cobrados»; el bruto y el descuento la explican.
+    interest_revenue: MoneyOut = Decimal("0.00")
     #: Capital recuperado vía abonos — reduce cartera, NO es ingreso.
     capital_recovered: MoneyOut
     #: Capital que SALIÓ de caja por préstamos en el rango (contratos nuevos
@@ -169,6 +220,9 @@ class PawnPerformanceOut(BaseModel):
     #: Es una referencia útil cuando el rango termina hoy (el caso normal);
     #: para rangos históricos la cartera de referencia ya no es la de entonces.
     yield_on_current_portfolio_pct: Decimal | None
+    #: Igual, sobre el interés NETO (`interest_revenue`) — F7-06. El de arriba
+    #: se conserva por compatibilidad y usa el bruto.
+    net_yield_on_current_portfolio_pct: Decimal | None = None
 
 
 class SupplierPayableOut(BaseModel):

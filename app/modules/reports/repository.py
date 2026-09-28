@@ -16,6 +16,13 @@ _SALES_WITH_RETURNS_IN_RANGE = (
     "where company_id = :company_id and return_date between :from_date and :to_date)"
 )
 
+# Ídem para el dashboard: ventas con alguna devolución en el MES de `today`.
+_SALES_WITH_RETURNS_THIS_MONTH = (
+    "ret.sale_id in (select sale_id from public.sale_return "
+    "where company_id = :company_id "
+    "and date_trunc('month', return_date) = date_trunc('month', :today))"
+)
+
 _CLOSING_COLUMNS = (
     "id, session_date, opening_balance, expected_cash, counted_cash, difference, "
     "difference_reason, closed_by, closed_at"
@@ -50,23 +57,49 @@ async def contract_kpis(db: AsyncSession, *, company_id: UUID, today: date) -> R
 
 
 async def sales_kpis(db: AsyncSession, *, company_id: UUID, tz_name: str, today: date) -> Row[Any]:
+    """Ventas de hoy y del mes para el dashboard, NETAS de devoluciones (F7-07,
+    auditoría fase 7): «Ventas de hoy» decía 5.120.250 con 1.383.333,33
+    devueltos ese mismo día.
+
+    Una sola definición con el estado de resultados: bruto = Σ `sale.total`
+    de las ventas `completed` (neto del descuento de cabecera; una anulada
+    nunca cuenta), devoluciones = contra-ingreso por `return_date` con el
+    valor de `return_line_amounts_sql` —lo mismo que `profit_summary`—, y
+    total = bruto − devoluciones = `sales_revenue − sales_returns` del IS.
+    """
     result = await db.execute(
         text(
-            """
+            f"""
+            with ventas as (
+                select
+                  coalesce(sum(total) filter (where (sold_at at time zone :tz)::date = :today), 0)
+                    as today_gross,
+                  count(*) filter (where (sold_at at time zone :tz)::date = :today)
+                    as today_count,
+                  coalesce(sum(total) filter (
+                    where date_trunc('month', sold_at at time zone :tz)
+                          = date_trunc('month', :today)
+                  ), 0) as month_gross
+                from public.sale
+                where company_id = :company_id and status = 'completed'
+            ),
+            devoluciones as (
+                select
+                  coalesce(sum(ra.gross - ra.discount) filter (where ra.return_date = :today), 0)
+                    as today_returns,
+                  coalesce(sum(ra.gross - ra.discount) filter (
+                    where date_trunc('month', ra.return_date) = date_trunc('month', :today)
+                  ), 0) as month_returns
+                from {return_line_amounts_sql(_SALES_WITH_RETURNS_THIS_MONTH)} ra
+                join public.sale s on s.id = ra.sale_id and s.company_id = :company_id
+                where s.status = 'completed'
+            )
             select
-              coalesce(
-                sum(total) filter (where (sold_at at time zone :tz)::date = :today), 0
-              ) as today_total,
-              count(*) filter (where (sold_at at time zone :tz)::date = :today) as today_count,
-              coalesce(
-                sum(total) filter (
-                  where date_trunc('month', sold_at at time zone :tz)
-                        = date_trunc('month', :today)
-                ),
-                0
-              ) as month_total
-            from public.sale
-            where company_id = :company_id and status = 'completed'
+              ventas.today_gross, ventas.today_count, ventas.month_gross,
+              devoluciones.today_returns, devoluciones.month_returns,
+              ventas.today_gross - devoluciones.today_returns as today_total,
+              ventas.month_gross - devoluciones.month_returns as month_total
+            from ventas, devoluciones
             """
         ),
         {"company_id": str(company_id), "tz": tz_name, "today": today},
