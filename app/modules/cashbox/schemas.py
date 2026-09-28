@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from app.common.money import Money, PositiveMoney
+from app.common.text import Reason
 
 PaymentMethod = Literal["cash", "transfer", "other"]
 CashModule = Literal["pawn", "store", "general"]
@@ -25,7 +26,7 @@ class SessionOpenIn(BaseModel):
     """
 
     counted_cash: Money | None = None
-    difference_reason: str | None = None
+    difference_reason: Reason | None = None
 
     #: DEPRECADO. Era el saldo de apertura escrito a mano, y hasta 00048 fue
     #: el único número de toda la aplicación que aparecía sin documento. Se
@@ -38,11 +39,11 @@ class SessionOpenIn(BaseModel):
 
 class SessionCloseIn(BaseModel):
     counted_cash: Money
-    difference_reason: str | None = None
+    difference_reason: Reason | None = None
 
 
 class SessionReopenIn(BaseModel):
-    reason: str
+    reason: Reason
 
 
 class SessionOut(BaseModel):
@@ -97,7 +98,7 @@ class ExpenseCreateIn(BaseModel):
     #: medio de pago.
     account_id: UUID | None = None
     category_id: UUID
-    description: str
+    description: Reason
     amount: PositiveMoney
     payment_method: PaymentMethod
     module: CashModule = "general"

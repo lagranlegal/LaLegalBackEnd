@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
 
 from app.common.money import Money, PositiveMoney
+from app.common.text import Reason
 
 PaymentMethod = Literal["cash", "transfer", "other"]
 
@@ -231,7 +232,7 @@ class PaymentCreateIn(BaseModel):
     capital_amount: Money | None = None
     payment_method: PaymentMethod
     discount_amount: Money | None = None
-    discount_reason: str | None = None
+    discount_reason: Reason | None = None
 
 
 class PaymentOut(BaseModel):

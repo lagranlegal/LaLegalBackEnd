@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.common.money import Money, Quantity
+from app.common.text import Reason
 
 PaymentMethod = Literal["cash", "transfer", "other"]
 ReturnReason = Literal["defect", "change_of_mind", "other"]
@@ -31,7 +32,7 @@ class SaleCreateIn(BaseModel):
     payment_method: PaymentMethod
     lines: list[SaleLineIn] = Field(min_length=1)
     discount_amount: Money | None = None
-    discount_reason: str | None = None
+    discount_reason: Reason | None = None
     #: Nota crédito a aplicar. Exige `customer_id` (debe coincidir con el
     #: dueño de la nota — no es transferible entre clientes).
     credit_note_id: UUID | None = None
@@ -83,7 +84,7 @@ class SaleOut(BaseModel):
 
 
 class VoidSaleIn(BaseModel):
-    reason: str
+    reason: Reason
 
 
 class SaleReturnLineIn(BaseModel):

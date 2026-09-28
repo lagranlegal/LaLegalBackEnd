@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.common.money import Money, Quantity
+from app.common.text import Reason
 from app.modules.inventory.units import ProductUnit
 
 #: De dónde salió la mercancía. Cada uno se costea y se reporta distinto, así
@@ -164,7 +165,7 @@ class ExitLineIn(BaseModel):
 
 class ExitCreateIn(BaseModel):
     exit_type: ExitType
-    reason: str
+    reason: Reason
     lines: list[ExitLineIn] = Field(min_length=1)
 
 

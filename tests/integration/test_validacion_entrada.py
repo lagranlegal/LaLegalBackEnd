@@ -175,6 +175,48 @@ def test_cantidad_con_mas_de_tres_decimales_es_422(client: TestClient, todo: dic
     _es_validacion(r, "quantity")
 
 
+# ----------------------------------------------------------------- motivos ----
+@pytest.mark.parametrize("motivo", ["", "   "])
+def test_un_motivo_vacio_o_de_espacios_es_422(client: TestClient, todo: dict, motivo: str) -> None:
+    """F5-05: reabrir la caja, anular una venta, egresar mercancía y dar un
+    descuento exigen un motivo con contenido."""
+    casos = [
+        (f"/api/v1/cashbox/sessions/{uuid4()}/reopen", {"reason": motivo}, "reason"),
+        (f"/api/v1/sales/{uuid4()}/void", {"reason": motivo}, "reason"),
+        (
+            "/api/v1/inventory/exits",
+            {
+                "exit_type": "loss",
+                "reason": motivo,
+                "lines": [{"item_id": str(uuid4()), "quantity": "1"}],
+            },
+            "reason",
+        ),
+        (
+            "/api/v1/sales",
+            {
+                "payment_method": "cash",
+                "lines": [{"item_id": str(uuid4()), "quantity": "1", "unit_price": "10.00"}],
+                "discount_amount": "1.00",
+                "discount_reason": motivo,
+            },
+            "discount_reason",
+        ),
+        (
+            f"/api/v1/contracts/{uuid4()}/payments",
+            {
+                "months_covered": 1,
+                "payment_method": "cash",
+                "discount_amount": "1.00",
+                "discount_reason": motivo,
+            },
+            "discount_reason",
+        ),
+    ]
+    for url, cuerpo, campo in casos:
+        _es_validacion(client.post(url, headers=_h(todo["token"]), json=cuerpo), campo)
+
+
 # ------------------------------------------------------ null en NOT NULL ----
 def test_null_explicito_en_un_campo_obligatorio_es_422(client: TestClient, todo: dict) -> None:
     """F3-04: en un PATCH omitir el campo lo conserva; mandarlo `null` en

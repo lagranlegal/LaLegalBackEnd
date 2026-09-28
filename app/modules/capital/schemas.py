@@ -3,9 +3,10 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.common.money import PositiveMoney
+from app.common.text import Reason
 
 
 class ContributionIn(BaseModel):
@@ -39,7 +40,7 @@ class WithdrawalIn(BaseModel):
     movement_date: date | None = None
     #: Obligatorio. Un retiro sin motivo es la clase de línea que nadie
     #: puede explicar seis meses después, y es plata que salió del negocio.
-    notes: str = Field(min_length=1)
+    notes: Reason
     #: `profit` (reparto de utilidad) o `capital_return` (devolución del
     #: aporte). Contablemente NO son lo mismo; para el dueño de una
     #: compraventa la diferencia no existe hasta la declaración. Default y
