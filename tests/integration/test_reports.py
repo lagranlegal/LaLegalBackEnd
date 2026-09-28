@@ -101,6 +101,8 @@ async def reports_tenant(
         "accounts.settle",
         # F7-05: el flujo de ventas de caja descuenta las anuladas.
         "sales.void",
+        # F7-16: pagar una compra a crédito mueve «Pagos de compras».
+        "inventory.pay_purchase",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -1998,3 +2000,91 @@ async def test_F7_06_rendimiento_del_empeno_sobre_el_interes_neto(
         empeno["interest_discounts"]
     )
     assert "net_yield_on_current_portfolio_pct" in empeno
+
+
+def _compra(client: TestClient, tenant: dict, *, costo: str, pago: str | None) -> dict:
+    body: dict = {
+        "origin_type": "purchase",
+        "supplier_id": str(tenant["supplier_id"]),
+        "lines": [
+            {
+                "name": f"Compra {uuid4().hex[:6]}",
+                "cat1_id": str(tenant["cat1_id"]),
+                "cat2_id": str(tenant["cat2_id"]),
+                "cat3_id": str(tenant["cat3_id"]),
+                "unit_cost": costo,
+                "photos": ["http://example.com/x.jpg"],
+                "sale_price": costo,
+            }
+        ],
+    }
+    if pago is not None:
+        body["payment_method"] = pago
+    r = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(tenant["token"], idempotency_key=str(uuid4())),
+        json=body,
+    )
+    assert r.status_code == 201, r.text
+    return dict(r.json())
+
+
+def test_F7_16_compras_causadas_y_pagos_de_compras_por_separado(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """F7-16: la pantalla decía «Compras a proveedor» 4.600.666,67 (Σ
+    `purchase/out` de caja: por fecha de PAGO, con el costo de proceso de una
+    transformación) y el estado de resultados 4.575.666,67
+    (`inventory_purchased`: por `entry_date`, a crédito incluido). Son dos
+    preguntas distintas con el mismo nombre; ahora las dos cifras salen del
+    backend, cada una con su rótulo."""
+    token = reports_tenant["token"]
+    client.post("/api/v1/cashbox/sessions/open", headers=_headers(token), json={})
+    _compra(client, reports_tenant, costo="100000.00", pago="cash")
+    credito = _compra(client, reports_tenant, costo="50000.00", pago=None)
+    estado = _estado(client, token)
+    assert estado["inventory_purchased"] == "150000.00", "causado: incluye el crédito"
+    assert estado["inventory_purchases_paid"] == "100000.00", "pagado: solo lo que salió"
+    assert estado["transformation_costs_paid"] == "0.00"
+
+    pagada = client.post(
+        f"/api/v1/inventory/entries/{credito['id']}/pay",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={"payment_method": "cash"},
+    )
+    assert pagada.status_code == 200, pagada.text
+    assert _estado(client, token)["inventory_purchases_paid"] == "150000.00"
+
+
+def test_F7_13_la_posicion_resta_pasivos_y_da_el_patrimonio_neto(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """F7-13: `total_capital` sumaba activos y nunca restaba lo que se debe:
+    en la reproducción, 200.000 a proveedores y 1.000.000 en una nota
+    crédito por redimir."""
+    token = reports_tenant["token"]
+    client.post("/api/v1/cashbox/sessions/open", headers=_headers(token), json={})
+    _compra(client, reports_tenant, costo="200000.00", pago=None)
+    venta = _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="300000.00")
+    devolucion = client.post(
+        f"/api/v1/sales/{venta['id']}/returns",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "reason": "defect",
+            "settlement_method": "credit_note",
+            "customer_id": str(reports_tenant["customer_id"]),
+            "lines": [{"sale_line_id": venta["lines"][0]["id"], "quantity": "1", "restock": True}],
+        },
+    )
+    assert devolucion.status_code == 201, devolucion.text
+
+    hoy = date.today().isoformat()
+    p = client.get(
+        "/api/v1/capital/position",
+        headers=_headers(token),
+        params={"from_date": hoy, "to_date": hoy},
+    ).json()
+    assert p["accounts_payable"] == "200000.00"
+    assert p["credit_notes_outstanding"] == "300000.00"
+    assert p["total_liabilities"] == "500000.00"
+    assert Decimal(p["net_worth"]) == Decimal(p["total_capital"]) - Decimal("500000.00")

@@ -441,6 +441,9 @@ async def get_income_statement(
     comisiones = await repository.settlement_commissions(
         db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
     )
+    pagos_compras = await repository.inventory_purchase_payments(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
     descuadres = await repository.cash_differences(
         db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
     )
@@ -505,6 +508,8 @@ async def get_income_statement(
         capital_disbursed=_dec(e["capital_disbursed"]),
         capital_recovered=_dec(e["capital_recovered"]),
         inventory_purchased=compras,
+        inventory_purchases_paid=_dec(pagos_compras._mapping["purchases_paid"]),
+        transformation_costs_paid=_dec(pagos_compras._mapping["transformation_paid"]),
     )
 
 

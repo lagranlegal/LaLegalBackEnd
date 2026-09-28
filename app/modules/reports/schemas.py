@@ -429,7 +429,18 @@ class IncomeStatementOut(BaseModel):
     #: Mercancía comprada en el período. Tampoco es gasto: es efectivo que se
     #: convirtió en inventario. Se vuelve gasto cuando se VENDE, y ahí ya está
     #: contado en `cost_of_goods_sold`.
+    #:
+    #: Es lo CAUSADO: por `entry_date`, compras a crédito incluidas, solo
+    #: `origin_type='purchase'`. Rótulo sugerido: «Compras causadas».
     inventory_purchased: MoneyOut
+    #: Lo PAGADO a proveedores en el período, por la fecha del pago (F7-16):
+    #: Σ `purchase/out` de compras. Rótulo: «Pagos de compras». Difiere de
+    #: `inventory_purchased` por las compras a crédito y los pagos de compras
+    #: de otros períodos — y eso es información, no un error.
+    inventory_purchases_paid: MoneyOut = Decimal("0.00")
+    #: Costo de proceso pagado en transformaciones (00039): también sale como
+    #: `purchase/out` pero no es una compra a un proveedor.
+    transformation_costs_paid: MoneyOut = Decimal("0.00")
 
 
 class MonthlySeriesPointOut(BaseModel):

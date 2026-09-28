@@ -882,6 +882,65 @@ async def inventory_purchased(
     return Decimal(str(result.scalar_one() or 0))
 
 
+async def inventory_purchase_payments(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> Row[Any]:
+    """Lo PAGADO por mercancía en el período (F7-16), por la fecha del pago.
+
+    Es la otra mitad de «Compras a proveedor»: `inventory_purchased` es lo
+    CAUSADO (por `entry_date`, a crédito incluido) y esto es lo que salió de
+    las cuentas — lo que la pantalla sumaba de `purchase/out` del desglose de
+    caja, con el mismo nombre y otra cifra (4.600.666,67 contra 4.575.666,67
+    en la reproducción). Se separa el costo de proceso de una transformación
+    (00039), que también es `purchase/out` pero no es una compra a nadie.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              coalesce(sum(m.amount) filter (where e.origin_type = 'purchase'), 0)::numeric(14,2)
+                as purchases_paid,
+              coalesce(
+                sum(m.amount) filter (where e.origin_type = 'transformation'), 0
+              )::numeric(14,2) as transformation_paid
+            from public.cash_movement m
+            join public.inventory_entry e
+              on e.id = m.reference_id and e.company_id = m.company_id
+            where m.company_id = :company_id
+              and m.concept = 'purchase'
+              and m.direction = 'out'
+              and m.reference_type = 'inventory_entry'
+              and (m.created_at at time zone :tz)::date between :from_date and :to_date
+            """
+        ),
+        {"company_id": str(company_id), "tz": tz_name, "from_date": from_date, "to_date": to_date},
+    )
+    return result.one()
+
+
+async def credit_notes_outstanding(db: AsyncSession, *, company_id: UUID) -> Decimal:
+    """Saldo de notas crédito por redimir, HOY (F7-13): plata que el negocio
+    le debe a sus clientes en mercancía. Emitida − redimida por nota; una
+    nota no vence, así que todo su saldo es pasivo vigente."""
+    result = await db.execute(
+        text(
+            """
+            select coalesce(sum(n.amount - coalesce(r.redimido, 0)), 0)::numeric(14,2)
+            from public.credit_note n
+            left join (
+                select credit_note_id, sum(amount) as redimido
+                from public.credit_note_redemption
+                where company_id = :company_id
+                group by credit_note_id
+            ) r on r.credit_note_id = n.id
+            where n.company_id = :company_id
+            """
+        ),
+        {"company_id": str(company_id)},
+    )
+    return Decimal(str(result.scalar_one()))
+
+
 async def monthly_series(
     db: AsyncSession, *, company_id: UUID, tz_name: str, months: int
 ) -> list[Row[Any]]:

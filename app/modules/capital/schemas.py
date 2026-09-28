@@ -101,3 +101,13 @@ class CapitalPositionOut(BaseModel):
     #: Cuánto se puede retirar sin tocar el capital: la utilidad del período
     #: menos lo ya retirado en él. Puede ser NEGATIVO, y ese es el aviso.
     distributable: MoneyOut
+    #: --- Pasivos al corte de HOY (F7-13), aditivos ---
+    #: Compras a crédito sin pagar: la misma cifra que `/reports/payables`.
+    accounts_payable: MoneyOut = Decimal("0.00")
+    #: Saldo de notas crédito por redimir: mercancía que se le debe a clientes.
+    credit_notes_outstanding: MoneyOut = Decimal("0.00")
+    #: `accounts_payable + credit_notes_outstanding`.
+    total_liabilities: MoneyOut = Decimal("0.00")
+    #: «Patrimonio neto»: `total_capital − total_liabilities`. `total_capital`
+    #: conserva su significado (activos) por compatibilidad.
+    net_worth: MoneyOut = Decimal("0.00")

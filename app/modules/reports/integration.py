@@ -19,7 +19,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.reports import service
+from app.modules.reports import repository, service
 
 
 async def get_operating_profit(
@@ -69,3 +69,12 @@ async def get_payables_summary(db: AsyncSession, *, company_id: UUID) -> dict[st
         "entry_count": payables.entry_count,
         "days_over_60": str(payables.days_over_60),
     }
+
+
+async def get_liabilities(db: AsyncSession, *, company_id: UUID) -> tuple[Decimal, Decimal]:
+    """Pasivos vigentes HOY para `capital/position` (F7-13): cuentas por
+    pagar a proveedores —la misma cifra que `GET /reports/payables`— y saldo
+    de notas crédito por redimir."""
+    payables = await service.get_payables(db, company_id=company_id)
+    notas = await repository.credit_notes_outstanding(db, company_id=company_id)
+    return payables.total, notas

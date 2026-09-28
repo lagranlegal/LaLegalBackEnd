@@ -378,6 +378,12 @@ async def get_position(
     disponible = await accounts_integration.get_liquid_capital(db, company_id=company_id)
     cartera = await repository.loan_portfolio(db, company_id=company_id)
     inventario = await repository.inventory_at_cost(db, company_id=company_id)
+    # F7-13: lo que se DEBE. Sin esto `total_capital` era solo activos, y con
+    # 200.000 a proveedores y 1.000.000 en notas crédito por redimir decía
+    # que el negocio valía 1.200.000 más de lo que vale.
+    por_pagar, notas_credito = await reports_integration.get_liabilities(db, company_id=company_id)
+    activos = disponible + cartera + inventario
+    pasivos = por_pagar + notas_credito
 
     return CapitalPositionOut(
         from_date=from_date,
@@ -389,6 +395,10 @@ async def get_position(
         cash_and_bank=disponible,
         loan_portfolio=cartera,
         inventory_at_cost=inventario,
-        total_capital=disponible + cartera + inventario,
+        total_capital=activos,
         distributable=utilidad - retiros,
+        accounts_payable=por_pagar,
+        credit_notes_outstanding=notas_credito,
+        total_liabilities=pasivos,
+        net_worth=activos - pasivos,
     )
