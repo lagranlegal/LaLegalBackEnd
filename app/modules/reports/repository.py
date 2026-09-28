@@ -273,6 +273,10 @@ async def profit_summary(
     ventas, no un defecto aparte — quien "arregle" también la valorización
     estaría restando dos veces.
 
+    El mismo razonamiento, al revés, para `restock = false` (F6-04): la pieza
+    NO vuelve a la valorización, así que su costo tampoco sale del costo de
+    ventas. Restarlo hacía desaparecer la pérdida: ni inventario ni costo.
+
     Solo se cuentan devoluciones de ventas `completed`, igual que el ingreso:
     si la venta se anula después, su ingreso desaparece entero de su propio
     período y restar además la devolución lo descontaría dos veces.
@@ -290,7 +294,9 @@ async def profit_summary(
             lineas as (
                 select
                   coalesce(sum(sl.subtotal), 0)                  as bruto,
-                  coalesce(sum(sl.unit_cost * sl.quantity), 0)   as costo,
+                  -- Redondeado por línea, como el costo de lo devuelto: con
+                  -- gramos, `costo × cantidad` trae milésimas.
+                  coalesce(sum(round(sl.unit_cost * sl.quantity, 2)), 0) as costo,
                   coalesce(sum(sl.quantity), 0)                  as unidades
                 from public.sale_line sl
                 join ventas v on v.id = sl.sale_id
@@ -314,7 +320,15 @@ async def profit_summary(
                 select
                   count(distinct r.id)                                      as return_count,
                   coalesce(sum(ra.gross), 0)                                as bruto,
-                  coalesce(sum(round(srl.quantity * srl.unit_cost, 2)), 0)  as costo,
+                  -- Solo lo que VOLVIÓ al inventario sale del costo de ventas
+                  -- (F6-04 / B-08). Con `restock = false` la pieza no regresa:
+                  -- el cliente recuperó su plata y la mercancía se perdió, así
+                  -- que su costo sigue siendo costo —no hay inventario que lo
+                  -- respalde— y la utilidad baja en ese monto.
+                  coalesce(
+                    sum(round(srl.quantity * srl.unit_cost, 2)) filter (where srl.restock),
+                    0
+                  )                                                         as costo,
                   coalesce(sum(ra.discount), 0)                             as descuento
                 from public.sale_return r
                 join public.sale_return_line srl

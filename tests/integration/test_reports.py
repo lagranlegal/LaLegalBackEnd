@@ -1473,3 +1473,40 @@ def test_reportes_con_cantidades_fraccionarias(client: TestClient, reports_tenan
     assert valor.status_code == 200, valor.text
     assert Decimal(valor.json()["units"]) == Decimal("1.4")
     assert valor.json()["cost_value"] == "280000.00"
+
+
+# --------------------------------------------------------------------------
+# F6-04 / B-08 (27/09/2026): una devolución sin reingreso no descuenta su
+# costo del costo de ventas.
+# --------------------------------------------------------------------------
+def test_devolucion_sin_reingreso_deja_su_costo_en_el_costo_de_ventas(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
+    )
+    today = date.today().isoformat()
+    venta = _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="900000.00")
+    _return_sale(
+        client,
+        reports_tenant["token"],
+        venta["id"],
+        [{"sale_line_id": venta["lines"][0]["id"], "quantity": "1"}],
+        restock=False,
+    )
+
+    utilidad = _profit(client, reports_tenant["token"], today, today)
+    assert utilidad["net_revenue"] == "0.00"
+    assert Decimal(utilidad["returns_cost"]) == 0
+    assert utilidad["cost_of_goods_sold"] == "100000.00"
+    assert utilidad["gross_profit"] == "-100000.00"
+
+    estado = client.get(
+        "/api/v1/reports/income-statement",
+        headers=headers,
+        params={"from_date": today, "to_date": today},
+    )
+    assert estado.status_code == 200, estado.text
+    assert estado.json()["cost_of_goods_sold"] == "100000.00"
+    assert estado.json()["gross_profit"] == "-100000.00"

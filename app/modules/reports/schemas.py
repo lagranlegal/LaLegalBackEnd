@@ -104,8 +104,11 @@ class ProfitSummaryOut(BaseModel):
     #: inventario, así que dejar su costo acá lo contaría dos veces — una como
     #: costo de algo vendido y otra como mercancía disponible.
     cost_of_goods_sold: Decimal
-    #: Costo de lo devuelto, ya descontado de `cost_of_goods_sold`. Se expone
-    #: para poder auditar el neto, no para volver a restarlo.
+    #: Costo de lo devuelto CON reingreso (`restock=true`), ya descontado de
+    #: `cost_of_goods_sold`. Una devolución sin reingreso no descuenta su
+    #: costo: la pieza no volvió, así que es costo sin inventario que lo
+    #: respalde (F6-04). Se expone para poder auditar el neto, no para volver
+    #: a restarlo.
     returns_cost: Decimal
     #: `net_revenue - cost_of_goods_sold`.
     gross_profit: Decimal
