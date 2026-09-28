@@ -80,8 +80,12 @@ async def inventory_kpis(db: AsyncSession, *, company_id: UUID) -> Row[Any]:
             """
             select
               count(*) filter (where status = 'available') as available_count,
+              -- Redondeado POR LOTE antes de sumar, igual que
+              -- `inventory_valuation` (F6-02): con gramos `costo × cantidad`
+              -- trae milésimas, y sin esto el dashboard decía "2317208.20100"
+              -- mientras la valorización decía 2.317.208,20 (F7-09).
               coalesce(
-                sum(cost * quantity) filter (where status = 'available'), 0
+                sum(round(cost * quantity, 2)) filter (where status = 'available'), 0
               ) as available_value,
               count(*) filter (where status = 'draft') as draft_count
             from public.inventory_item

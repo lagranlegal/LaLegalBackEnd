@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.common.money import PositiveMoney
+from app.common.money import MoneyOut, PositiveMoney
 
 AccountType = Literal["cash", "bank", "settlement", "vault"]
 
@@ -88,12 +88,14 @@ class SettlementIn(BaseModel):
 
 
 class SettlementOut(BaseModel):
-    settled: Decimal
-    received: Decimal
+    #: `MoneyOut` (F7-15): con la entrada "1300000" la respuesta devolvía
+    #: "1300000" sin escala; ahora siempre "1300000.00".
+    settled: MoneyOut
+    received: MoneyOut
     #: `settled - received`. Es lo que cobró el convenio.
-    commission: Decimal
+    commission: MoneyOut
     commission_pct: Decimal | None
-    new_pending_balance: Decimal
+    new_pending_balance: MoneyOut
 
 
 class TransferIn(BaseModel):

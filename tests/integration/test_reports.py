@@ -89,6 +89,9 @@ async def reports_tenant(
         # contrato importado, que no son desembolsos nuevos.
         "contracts.import",
         "contracts.extend_loan",
+        # Fase 7: `capital/position` repite la valoración del inventario y
+        # ahora los pasivos, así que se cruza contra los reportes.
+        "capital.view",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -1539,3 +1542,74 @@ def test_devolucion_sin_reingreso_deja_su_costo_en_el_costo_de_ventas(
     assert estado.status_code == 200, estado.text
     assert estado.json()["cost_of_goods_sold"] == "100000.00"
     assert estado.json()["gross_profit"] == "-100000.00"
+
+
+# --------------------------------------------------------------------------
+# F7-09 / F7-15 (auditoría fase 7, 28/09/2026): el dinero sale SIEMPRE con
+# dos decimales. El dashboard y `capital/position` respondían "2317208.20100"
+# —`sum(cost * quantity)` sin redondear, con cantidades de tres decimales— y
+# las sumas vacías salían "0" en vez de "0.00".
+# --------------------------------------------------------------------------
+def test_el_dinero_de_los_reportes_sale_con_dos_decimales(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    token = reports_tenant["token"]
+    read = {"Authorization": f"Bearer {token}"}
+    hoy = date.today().isoformat()
+
+    # Empresa vacía: los ceros son "0.00", no "0".
+    dash = client.get("/api/v1/reports/dashboard", headers=read).json()
+    assert dash["contracts"]["capital_outstanding"] == "0.00"
+    assert dash["sales"]["today_total"] == "0.00"
+    assert dash["sales"]["month_total"] == "0.00"
+    assert dash["inventory"]["available_value"] == "0.00"
+    estado = client.get(
+        "/api/v1/reports/income-statement",
+        headers=read,
+        params={"from_date": hoy, "to_date": hoy},
+    ).json()
+    for campo in ("sales_revenue", "interest_revenue", "total_revenue", "operating_profit"):
+        assert estado[campo] == "0.00", (campo, estado[campo])
+    empeno = client.get(
+        "/api/v1/reports/pawn-performance",
+        headers=read,
+        params={"from_date": hoy, "to_date": hoy},
+    ).json()
+    assert empeno["interest_collected"] == "0.00"
+    assert empeno["capital_disbursed"] == "0.00"
+
+    # 0,333 g a 1.001 = 333,333: el lote vale 333,33.
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=_headers(token), json={"opening_balance": "0.00"}
+    )
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "initial_stock",
+            "lines": [
+                {
+                    "name": "Hilo por gramo",
+                    "cat1_id": str(reports_tenant["cat1_id"]),
+                    "cat2_id": str(reports_tenant["cat2_id"]),
+                    "cat3_id": str(reports_tenant["cat3_id"]),
+                    "unit": "gram",
+                    "quantity": "0.333",
+                    "unit_cost": "1001.00",
+                    "sale_price": "2000.00",
+                    "photos": ["http://example.com/hilo.jpg"],
+                }
+            ],
+        },
+    )
+    assert entry.status_code == 201, entry.text
+
+    dash = client.get("/api/v1/reports/dashboard", headers=read).json()
+    assert dash["inventory"]["available_value"] == "333.33"
+    posicion = client.get(
+        "/api/v1/capital/position", headers=read, params={"from_date": hoy, "to_date": hoy}
+    )
+    assert posicion.status_code == 200, posicion.text
+    assert posicion.json()["inventory_at_cost"] == "333.33"
+    valor = client.get("/api/v1/reports/inventory-valuation", headers=read).json()
+    assert valor["cost_value"] == "333.33", "las tres pantallas dicen lo mismo"

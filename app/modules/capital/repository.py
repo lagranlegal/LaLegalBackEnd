@@ -204,7 +204,9 @@ async def inventory_at_cost(db: AsyncSession, *, company_id: UUID) -> Decimal:
     result = await db.execute(
         text(
             """
-            select coalesce(sum(i.cost * i.quantity), 0)
+            -- Redondeado POR LOTE, como la valorización (F7-09): sin esto
+            -- respondía "2317208.20100" con cantidades de tres decimales.
+            select coalesce(sum(round(i.cost * i.quantity, 2)), 0)
             from public.inventory_item i
             where i.company_id = :cid and i.status = 'available'
             """

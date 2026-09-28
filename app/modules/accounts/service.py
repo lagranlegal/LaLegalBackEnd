@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
 from app.core.errors import AppError, CashSessionNotOpenError, ConflictError, NotFoundError
 from app.modules.accounts import repository
@@ -323,10 +324,13 @@ async def settle_account(
         action="settle_account",
         entity_type="account",
         entity_id=account_id,
+        # Con escala fija (F7-15): la entrada "1300000" quedaba auditada como
+        # "1300000" y la de "1300000.00" como "1300000.00" — el mismo monto
+        # escrito de dos formas en un registro que se compara a ojo.
         after={
-            "settled": str(body.amount_settled),
-            "received": str(body.amount_received),
-            "commission": str(comision),
+            "settled": str(quantize(body.amount_settled)),
+            "received": str(quantize(body.amount_received)),
+            "commission": str(quantize(comision)),
         },
     )
 

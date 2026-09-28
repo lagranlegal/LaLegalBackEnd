@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.common.money import MoneyOut
+
 
 class ContractKpisOut(BaseModel):
     active_count: int
@@ -11,18 +13,18 @@ class ContractKpisOut(BaseModel):
     in_extension_count: int
     ready_for_auction_count: int
     auctioned_count: int
-    capital_outstanding: Decimal
+    capital_outstanding: MoneyOut
 
 
 class SalesKpisOut(BaseModel):
-    today_total: Decimal
+    today_total: MoneyOut
     today_count: int
-    month_total: Decimal
+    month_total: MoneyOut
 
 
 class InventoryKpisOut(BaseModel):
     available_count: int
-    available_value: Decimal
+    available_value: MoneyOut
     draft_count: int
 
 
@@ -30,7 +32,7 @@ class CashboxKpisOut(BaseModel):
     session_open: bool
     session_id: UUID | None
     opened_at: datetime | None
-    opening_balance: Decimal | None
+    opening_balance: MoneyOut | None
 
 
 class DashboardOut(BaseModel):
@@ -44,10 +46,10 @@ class DashboardOut(BaseModel):
 class ClosingHistoryOut(BaseModel):
     session_id: UUID
     session_date: date
-    opening_balance: Decimal
-    expected_cash: Decimal
-    counted_cash: Decimal
-    difference: Decimal
+    opening_balance: MoneyOut
+    expected_cash: MoneyOut
+    counted_cash: MoneyOut
+    difference: MoneyOut
     difference_reason: str | None
     closed_by: UUID
     closed_at: datetime
@@ -62,7 +64,7 @@ class ClosingsBreakdownLineOut(BaseModel):
     account_name: str
     account_type: str
     session_date: date
-    total: Decimal
+    total: MoneyOut
 
 
 class ClosingsBreakdownOut(BaseModel):
@@ -86,32 +88,32 @@ class ProfitSummaryOut(BaseModel):
     #: vende por gramos (F6-02): 1,1 g no es un entero.
     units_sold: Decimal
     #: Suma de los subtotales de las líneas, antes de descuentos.
-    gross_revenue: Decimal
+    gross_revenue: MoneyOut
     #: Descuentos aplicados a nivel de venta — menor ingreso, no un gasto.
-    discounts: Decimal
+    discounts: MoneyOut
     #: CONTRA-INGRESO por devoluciones (*devoluciones en ventas*), ya neto del
     #: descuento prorrateado de su venta original. Cae en el período de la
     #: DEVOLUCIÓN (`sale_return.return_date`), no en el de la venta: así un mes
     #: ya cerrado no se reescribe hacia atrás.
-    sales_returns: Decimal
+    sales_returns: MoneyOut
     #: Cuántas devoluciones cayeron en el rango.
     return_count: int
     #: `gross_revenue - discounts - sales_returns`: lo que realmente entró por
     #: ventas y se quedó adentro.
-    net_revenue: Decimal
+    net_revenue: MoneyOut
     #: Costo congelado de lo vendido (`sale_line.unit_cost * quantity`), NETO
     #: de `returns_cost`. Neto y no bruto a propósito: lo devuelto volvió al
     #: inventario, así que dejar su costo acá lo contaría dos veces — una como
     #: costo de algo vendido y otra como mercancía disponible.
-    cost_of_goods_sold: Decimal
+    cost_of_goods_sold: MoneyOut
     #: Costo de lo devuelto CON reingreso (`restock=true`), ya descontado de
     #: `cost_of_goods_sold`. Una devolución sin reingreso no descuenta su
     #: costo: la pieza no volvió, así que es costo sin inventario que lo
     #: respalde (F6-04). Se expone para poder auditar el neto, no para volver
     #: a restarlo.
-    returns_cost: Decimal
+    returns_cost: MoneyOut
     #: `net_revenue - cost_of_goods_sold`.
-    gross_profit: Decimal
+    gross_profit: MoneyOut
     #: Margen sobre el ingreso neto, en %. `null` si no hubo ventas (evita
     #: mostrar 0% cuando el dato correcto es "no aplica").
     margin_pct: Decimal | None
@@ -127,23 +129,23 @@ class PawnPerformanceOut(BaseModel):
     to_date: date
     #: Intereses efectivamente cobrados en el rango (`contract_payment`, el
     #: documento — no el movimiento de caja, que solo cubre sesiones cerradas).
-    interest_collected: Decimal
+    interest_collected: MoneyOut
     #: Descuentos de interés otorgados (permiso especial). Erosionan el
     #: rendimiento: son interés que se dejó de cobrar.
-    interest_discounts: Decimal
+    interest_discounts: MoneyOut
     #: Capital recuperado vía abonos — reduce cartera, NO es ingreso.
-    capital_recovered: Decimal
+    capital_recovered: MoneyOut
     #: Capital que SALIÓ de caja por préstamos en el rango (contratos nuevos
     #: y el delta de cada recargo, por la fecha del movimiento; un importado
     #: no suma) — NO es gasto (F4-06).
-    capital_disbursed: Decimal
+    capital_disbursed: MoneyOut
     payment_count: int
     #: Préstamos nuevos del rango: ni sucesores de recargo ni importados.
     contracts_opened: int
     #: Cartera al corte de HOY, no del final del rango: el esquema no guarda
     #: `closed_at` ni histórico de saldos, así que no hay forma exacta de
     #: saber cuánta cartera había en una fecha pasada.
-    capital_outstanding: Decimal
+    capital_outstanding: MoneyOut
     open_contracts: int
     #: `interest_collected / capital_outstanding * 100` — rendimiento del
     #: período sobre la cartera ACTUAL. `null` si no hay cartera abierta.
@@ -163,11 +165,11 @@ class SupplierPayableOut(BaseModel):
     supplier_id: UUID | None
     supplier_name: str
     entry_count: int
-    total: Decimal
+    total: MoneyOut
     #: Antigüedad por tramos — el corte estándar de una cartera por pagar.
-    days_0_30: Decimal
-    days_31_60: Decimal
-    days_over_60: Decimal
+    days_0_30: MoneyOut
+    days_31_60: MoneyOut
+    days_over_60: MoneyOut
     #: La compra pendiente MÁS ANTIGUA: la que más urge.
     oldest_entry_date: date | None
 
@@ -181,11 +183,11 @@ class PayablesOut(BaseModel):
     """
 
     as_of: date
-    total: Decimal
+    total: MoneyOut
     entry_count: int
-    days_0_30: Decimal
-    days_31_60: Decimal
-    days_over_60: Decimal
+    days_0_30: MoneyOut
+    days_31_60: MoneyOut
+    days_over_60: MoneyOut
     by_supplier: list[SupplierPayableOut]
 
 
@@ -194,8 +196,8 @@ class InventoryValuationCategoryOut(BaseModel):
     cat1_name: str
     #: `Decimal`: una cantidad puede ser fraccionaria (gramos, F6-02).
     units: Decimal
-    cost_value: Decimal
-    retail_value: Decimal
+    cost_value: MoneyOut
+    retail_value: MoneyOut
 
 
 class InventoryValuationOut(BaseModel):
@@ -216,11 +218,11 @@ class InventoryValuationOut(BaseModel):
     units: Decimal
     lot_count: int
     #: Valor al costo. Este es EL número del inventario.
-    cost_value: Decimal
+    cost_value: MoneyOut
     #: A precio de venta. Referencia, no valoración.
-    retail_value: Decimal
+    retail_value: MoneyOut
     #: `retail_value - cost_value`: utilidad potencial, aún no realizada.
-    potential_profit: Decimal
+    potential_profit: MoneyOut
     by_category: list[InventoryValuationCategoryOut]
 
 
@@ -230,7 +232,7 @@ class StaleItemOut(BaseModel):
     product_name: str
     #: `Decimal`: una cantidad puede ser fraccionaria (gramos, F6-02).
     units: Decimal
-    cost_value: Decimal
+    cost_value: MoneyOut
     #: Días desde que entró el lote disponible más ANTIGUO de ese producto.
     days_in_stock: int
 
@@ -250,7 +252,7 @@ class StaleInventoryOut(BaseModel):
     #: umbral en toda la empresa, aunque `limit` recorte la lista (F21-25).
     product_count: int
     #: Ídem: el costo detenido TOTAL, no el de la página.
-    total_cost_value: Decimal
+    total_cost_value: MoneyOut
     #: Ranking de los más dormidos primero, topado por `limit`. NO es el
     #: inventario completo: para eso están los dos totales de arriba.
     items: list[StaleItemOut]
@@ -284,35 +286,35 @@ class IncomeStatementOut(BaseModel):
     #: --- Ingresos ---
     #: Ventas netas de descuento (tienda), BRUTAS de devoluciones: las
     #: devoluciones bajan en su propia línea, `sales_returns`.
-    sales_revenue: Decimal
+    sales_revenue: MoneyOut
     #: Devoluciones en ventas del período — CONTRA-INGRESO, con su propia
     #: línea en el estado de resultados y no restado en silencio de «Ventas».
     #: Un número que baja sin explicación es lo que hace que nadie confíe en
     #: el reporte; y una devolución es un hecho del negocio que merece verse.
     #: Cae en el período de la DEVOLUCIÓN (`sale_return.return_date`).
-    sales_returns: Decimal
+    sales_returns: MoneyOut
     #: Intereses efectivamente cobrados (empeño). El empeño no tiene costo de
     #: ventas: su rentabilidad son los intereses sobre el capital prestado.
-    interest_revenue: Decimal
+    interest_revenue: MoneyOut
     #: `sales_revenue − sales_returns + interest_revenue`.
-    total_revenue: Decimal
+    total_revenue: MoneyOut
 
     #: --- Costo de ventas ---
     #: Costo congelado de la mercancía vendida, NETO del costo de lo devuelto.
     #: Solo tienda. Que lo devuelto vuelva a contar como inventario disponible
     #: es correcto una vez que su costo sale de acá: era el mismo activo
     #: contado dos veces, y se cierra por este lado (F21-12).
-    cost_of_goods_sold: Decimal
+    cost_of_goods_sold: MoneyOut
     #: `total_revenue − cost_of_goods_sold`.
-    gross_profit: Decimal
+    gross_profit: MoneyOut
 
     #: --- Gastos ---
-    operating_expenses: Decimal
+    operating_expenses: MoneyOut
     expense_count: int
 
     #: --- Resultado ---
     #: `gross_profit − operating_expenses`. ESTE es "cuánto ganó el negocio".
-    operating_profit: Decimal
+    operating_profit: MoneyOut
     #: Sobre el ingreso total, en %. `null` si no hubo ingresos — mostrar 0%
     #: cuando el dato correcto es "no aplica" es peor que no mostrar nada.
     margin_pct: Decimal | None
@@ -320,16 +322,16 @@ class IncomeStatementOut(BaseModel):
     #: --- Contexto que NO es resultado, y por eso va aparte ---
     #: Descuentos de interés otorgados: interés que se dejó de cobrar. Erosiona
     #: el resultado del empeño pero no es un gasto.
-    interest_discounts: Decimal
+    interest_discounts: MoneyOut
     #: Capital prestado y recuperado en el período. NO son gasto ni ingreso —
     #: es cartera moviéndose. Van acá para que nadie tenga que buscarlos en
     #: otra pantalla y concluir que faltan.
-    capital_disbursed: Decimal
-    capital_recovered: Decimal
+    capital_disbursed: MoneyOut
+    capital_recovered: MoneyOut
     #: Mercancía comprada en el período. Tampoco es gasto: es efectivo que se
     #: convirtió en inventario. Se vuelve gasto cuando se VENDE, y ahí ya está
     #: contado en `cost_of_goods_sold`.
-    inventory_purchased: Decimal
+    inventory_purchased: MoneyOut
 
 
 class MonthlySeriesPointOut(BaseModel):
@@ -339,18 +341,18 @@ class MonthlySeriesPointOut(BaseModel):
 
     month: date
     #: Intereses cobrados (`contract_payment`) — el ingreso del empeño.
-    interest_revenue: Decimal
+    interest_revenue: MoneyOut
     #: Ventas netas de descuento, solo `completed` — el ingreso de la tienda.
     #: BRUTAS de devoluciones, igual que en `/reports/income-statement`: el
     #: mismo nombre significa lo mismo en los dos endpoints.
-    sales_revenue: Decimal
+    sales_revenue: MoneyOut
     #: Devoluciones del mes (contra-ingreso, neto de descuento prorrateado).
     #: Van por su cuenta para que la serie pueda pintarse neta sin que el
     #: significado de `sales_revenue` cambie entre endpoints.
-    sales_returns: Decimal
+    sales_returns: MoneyOut
     #: Gastos operativos (`expense`). NO incluye compras de mercancía ni
     #: capital desembolsado: ninguno de los dos es gasto.
-    expenses: Decimal
+    expenses: MoneyOut
 
 
 class MonthlySeriesOut(BaseModel):

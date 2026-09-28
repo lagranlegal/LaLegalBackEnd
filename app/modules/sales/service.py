@@ -371,7 +371,8 @@ async def create_sale(
     effective_discount = discount_amount + price_discount
     if effective_discount > 0:
         after: dict[str, Any] = {
-            "discount_amount": str(discount_amount),
+            # Escala fija (F7-15): "5000" y "5000.00" eran el mismo descuento.
+            "discount_amount": str(quantize(discount_amount)),
             "discount_reason": body.discount_reason,
         }
         if price_discount > 0:

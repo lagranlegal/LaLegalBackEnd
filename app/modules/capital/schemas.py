@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from app.common.money import PositiveMoney
+from app.common.money import MoneyOut, PositiveMoney
 from app.common.text import Reason
 
 
@@ -80,23 +80,23 @@ class CapitalPositionOut(BaseModel):
     #: Utilidad operativa del período, de `/reports/income-statement`. Es la
     #: MISMA definición (ingresos − costo de ventas − gastos), calculada por
     #: el mismo código: acá solo se trae, no se reimplementa.
-    operating_profit: Decimal
+    operating_profit: MoneyOut
     #: Aportes y retiros del período, y el neto.
-    contributions: Decimal
-    withdrawals: Decimal
-    net_capital_movement: Decimal
+    contributions: MoneyOut
+    withdrawals: MoneyOut
+    net_capital_movement: MoneyOut
     #: Dónde está realmente la plata del negocio, hoy.
-    cash_and_bank: Decimal
+    cash_and_bank: MoneyOut
     #: Capital prestado y todavía no recuperado (la suma de los
     #: `capital_balance` de los contratos vivos). Es plata del negocio que
     #: no está disponible.
-    loan_portfolio: Decimal
+    loan_portfolio: MoneyOut
     #: Inventario AL COSTO, nunca al precio de venta: contar la utilidad
     #: antes de venderla es el error clásico.
-    inventory_at_cost: Decimal
+    inventory_at_cost: MoneyOut
     #: `cash_and_bank + loan_portfolio + inventory_at_cost`. Es lo que
     #: encoge cuando el dueño retira.
-    total_capital: Decimal
+    total_capital: MoneyOut
     #: Cuánto se puede retirar sin tocar el capital: la utilidad del período
     #: menos lo ya retirado en él. Puede ser NEGATIVO, y ese es el aviso.
-    distributable: Decimal
+    distributable: MoneyOut
