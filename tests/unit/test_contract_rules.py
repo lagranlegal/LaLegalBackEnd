@@ -190,6 +190,20 @@ class TestComputeStatus:
         assert status == "in_extension"
         assert ext == original_ext  # no se recalcula
 
+    def test_en_prorroga_sin_fecha_la_recalcula_desde_el_ancla(self) -> None:
+        """F4-03: un abono en prórroga mueve el ancla y pasa `None`; si la
+        deuda sigue en la ventana, el fin de prórroga sale del ancla nueva."""
+        status, ext = compute_status(
+            current_status="in_extension",
+            interest_paid_until=date(2026, 5, 1),  # abonó 1 de los 5 meses
+            arrears_window_months=4,
+            extension_months=1,
+            extension_ends_at=None,
+            today=date(2026, 9, 27),
+        )
+        assert status == "in_extension"
+        assert ext == date(2026, 10, 1)  # 05-01 + 4 meses de ventana + 1 de prórroga
+
     def test_terminal_statuses_never_change(self) -> None:
         for terminal in ("paid", "auctioned"):
             status, _ = compute_status(

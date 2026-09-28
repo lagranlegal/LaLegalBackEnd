@@ -903,6 +903,9 @@ async def create_payment(
         new_status: str = "paid"
         new_extension_ends_at: date | None = None
     else:
+        # `extension_ends_at=None` a propósito: el abono movió el ancla y la
+        # fecha de fin de prórroga se deriva de ella. `compute_status` la
+        # recalcula si el contrato sigue en prórroga (F4-03).
         new_status, new_extension_ends_at = rules.compute_status(
             current_status=m["status"],
             interest_paid_until=new_interest_paid_until,

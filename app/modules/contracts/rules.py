@@ -137,6 +137,17 @@ def compute_status(
     y `superseded` la ampliación de préstamo (00051).
     `in_extension` se dispara UNA vez; no se vuelve a calcular `extension_ends_at`
     mientras siga en ese estado (aunque sigan pasando meses sin pagar).
+
+    **Salvo que no haya fecha que conservar** (F4-03 / B-06, 27/09/2026). La
+    fecha de fin de prórroga es función del ancla: `interest_paid_until + N`
+    meses de ventana `+ extension_months`. Un abono mueve el ancla, así que
+    `create_payment` pasa `extension_ends_at=None` para que se recalcule
+    desde la nueva; si el contrato sigue en prórroga, la fecha nueva es la
+    que corresponde a la deuda que queda (cada mes pagado corre el fin un
+    mes). Conservar un `None` dejaba un `in_extension` sin fin: fuera de la
+    lista de remate y sin poder rematarse, y ni el GET ni el job lo
+    reparaban. Con esta regla, además, una fila que ya quedó así se corrige
+    en la siguiente lectura.
     """
     if current_status in TERMINAL_STATUSES:
         return current_status, extension_ends_at
@@ -147,7 +158,7 @@ def compute_status(
     if owed < arrears_window_months:
         return "in_arrears", None
 
-    if current_status == "in_extension":
+    if current_status == "in_extension" and extension_ends_at is not None:
         return "in_extension", extension_ends_at
 
     trigger_date = add_months(interest_paid_until, arrears_window_months)

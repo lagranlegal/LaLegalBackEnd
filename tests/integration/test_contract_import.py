@@ -570,3 +570,46 @@ async def test_a_contract_does_not_downgrade_express_consent(
     )
     assert response.status_code == 201, response.text
     assert (await _basis(import_tenant["customer_id"]))[0] == "consent"
+
+
+# --------------------------------------------------------------------------
+# F4-03 / B-06 (27/09/2026): un abono en prórroga recalcula el fin de la
+# prórroga desde el ancla nueva; nunca la deja en NULL.
+# --------------------------------------------------------------------------
+async def test_abono_parcial_en_prorroga_recalcula_su_fin(
+    client: TestClient, import_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=import_tenant["company_id"], register_id=import_tenant["register_id"]
+    )
+    today = date.today()
+    start_date = add_months(today, -7)  # 7 meses adeudados, ventana 4 + 1 de prórroga
+    headers = _headers(import_tenant["full_token"])
+    imported = client.post(
+        "/api/v1/contracts/import",
+        headers=_headers(import_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_import_payload(
+            import_tenant,
+            start_date=start_date.isoformat(),
+            interest_paid_until=start_date.isoformat(),
+        ),
+    )
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["status"] == "in_extension"
+    assert imported.json()["extension_ends_at"] == add_months(start_date, 5).isoformat()
+
+    pago = client.post(
+        f"/api/v1/contracts/{imported.json()['id']}/payments",
+        headers=_headers(import_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 1, "payment_method": "cash"},
+    )
+    assert pago.status_code == 201, pago.text
+
+    despues = client.get(f"/api/v1/contracts/{imported.json()['id']}", headers=headers).json()
+    assert despues["status"] == "in_extension"
+    # ancla nueva = start + 1 mes; + 4 de ventana + 1 de prórroga
+    assert despues["extension_ends_at"] == add_months(start_date, 6).isoformat()
+
+    listos = client.get("/api/v1/contracts/ready-for-auction", headers=headers)
+    assert listos.status_code == 200, listos.text
+    assert imported.json()["id"] in {c["id"] for c in listos.json()}
