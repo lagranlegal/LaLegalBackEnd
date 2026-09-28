@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -644,6 +644,151 @@ async def operating_expenses(
     row = result.first()
     assert row is not None  # los agregados siempre devuelven una fila
     return row
+
+
+#: Egresos de inventario que son PÉRDIDA (F7-01): la pieza sale sin que entre
+#: nada a cambio. Fuera quedan `supplier_return` —vuelve al proveedor contra
+#: una deuda o un reembolso, no contra el resultado— y `transformation`, que
+#: no sale del inventario: se convierte en los lotes producidos (00039).
+#: `internal_use` sí entra: consumir mercancía propia es un gasto.
+SHRINKAGE_EXIT_TYPES = ("loss", "damage", "adjustment", "internal_use")
+
+
+async def inventory_shrinkage(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> Row[Any]:
+    """Mermas y bajas del período (F7-01, auditoría fase 7): la mercancía que
+    salió del inventario sin venderse, AL COSTO, por la fecha del egreso.
+
+    Hasta el 28/09/2026 el estado de resultados leía solo ventas, abonos y
+    gastos, y un egreso no dejaba rastro de valor: una merma de 0,5 g de oro
+    (75.000) y un cargador dañado (20.000) bajaban la valorización y el
+    kardex, y la utilidad no se enteraba. `distributable` quedaba
+    sobreestimado en todo el costo perdido.
+
+    El costo es el del LOTE —identificación específica, el mismo con que se
+    audita el egreso (F7-17)— sin la parte de interés capitalizado de un
+    remate (F7-04): ese interés nunca fue ingreso, así que perder la pieza
+    pierde el CAPITAL prestado, no el interés que no se cobró. Se lee de
+    `inventory_item`, que es inmutable en `cost` (solo cambian fotos y
+    cantidad). Redondeado por línea, como el costo de ventas.
+    """
+    result = await db.execute(
+        text(
+            """
+            select
+              coalesce(
+                sum(round(l.quantity * (i.cost - i.capitalized_interest), 2)), 0
+              )::numeric(14,2)          as total,
+              count(distinct x.id)      as exit_count
+            from public.inventory_exit x
+            join public.inventory_exit_line l
+              on l.exit_id = x.id and l.company_id = x.company_id
+            join public.inventory_item i
+              on i.id = l.item_id and i.company_id = l.company_id
+            where x.company_id = :company_id
+              and x.exit_type::text in :tipos
+              and (x.created_at at time zone :tz)::date between :from_date and :to_date
+            """
+        ).bindparams(bindparam("tipos", expanding=True)),
+        {
+            "company_id": str(company_id),
+            "tipos": list(SHRINKAGE_EXIT_TYPES),
+            "tz": tz_name,
+            "from_date": from_date,
+            "to_date": to_date,
+        },
+    )
+    return result.one()
+
+
+async def settlement_commissions(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> Decimal:
+    """Comisiones de convenios (F7-02 / B-10): lo que Sistecrédito o el
+    datáfono se quedó al liquidar — `liquidado − recibido` — como GASTO del
+    día de la liquidación.
+
+    La venta ya contó el total como ingreso (se reconoce al vender), así que
+    sin esta línea la utilidad quedaba sobreestimada por toda la comisión: en
+    la reproducción, 65.000 que solo aparecían en `audit_log.after.commission`.
+
+    Dos fuentes para UN concepto, sin solaparse:
+      · desde 00061 la liquidación es un documento (`account_settlement`);
+      · antes, solo quedaban sus dos movimientos (`settlement_out` de la
+        cuenta por cobrar y `settlement_in` en el destino), nacidos en la
+        misma transacción y por eso con el MISMO `created_at` (`now()` es la
+        hora de la transacción). Un `settlement_out` sin documento con esa
+        cuenta y ese instante es una liquidación vieja, y su comisión es él
+        menos su par.
+    No afecta `expected_cash`: es una lectura, no un movimiento nuevo.
+    """
+    result = await db.execute(
+        text(
+            """
+            with comisiones as (
+                select s.created_at, s.amount_settled - s.amount_received as comision
+                from public.account_settlement s
+                where s.company_id = :company_id
+                union all
+                select o.created_at,
+                       o.amount - coalesce((
+                         select sum(i.amount) from public.cash_movement i
+                         where i.company_id = o.company_id
+                           and i.concept = 'settlement_in'
+                           and i.reference_type = 'settlement'
+                           and i.reference_id = o.reference_id
+                           and i.created_at = o.created_at
+                       ), 0)
+                from public.cash_movement o
+                where o.company_id = :company_id
+                  and o.concept = 'settlement_out'
+                  and not exists (
+                    select 1 from public.account_settlement s
+                    where s.company_id = o.company_id
+                      and s.from_account_id = o.account_id
+                      and s.created_at = o.created_at
+                  )
+            )
+            select coalesce(sum(comision), 0)::numeric(14,2)
+            from comisiones
+            where (created_at at time zone :tz)::date between :from_date and :to_date
+            """
+        ),
+        {"company_id": str(company_id), "tz": tz_name, "from_date": from_date, "to_date": to_date},
+    )
+    return Decimal(str(result.scalar_one()))
+
+
+async def cash_differences(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> Decimal:
+    """Descuadres de caja del período (F7-03): sobrante suma, faltante resta,
+    en la fecha del ajuste.
+
+    Son los `adjustment` que emiten el conteo de apertura, el arqueo de
+    cierre y la reversa de una reapertura — `session_id = NULL` a propósito y
+    referencia a la sesión (`cashbox.service`). Mueven el saldo del cajón, así
+    que sin esta línea la utilidad y el patrimonio no cuadraban por ese monto
+    (−7.000 de faltante y +50.000 de conteo de apertura en la reproducción).
+    """
+    result = await db.execute(
+        text(
+            """
+            select coalesce(
+              sum(case when direction = 'in' then amount else -amount end), 0
+            )::numeric(14,2)
+            from public.cash_movement
+            where company_id = :company_id
+              and concept = 'adjustment'
+              and session_id is null
+              and reference_type = 'cash_session'
+              and (created_at at time zone :tz)::date between :from_date and :to_date
+            """
+        ),
+        {"company_id": str(company_id), "tz": tz_name, "from_date": from_date, "to_date": to_date},
+    )
+    return Decimal(str(result.scalar_one()))
 
 
 async def inventory_purchased(

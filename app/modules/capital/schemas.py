@@ -78,8 +78,9 @@ class CapitalPositionOut(BaseModel):
     from_date: date
     to_date: date
     #: Utilidad operativa del período, de `/reports/income-statement`. Es la
-    #: MISMA definición (ingresos − costo de ventas − gastos), calculada por
-    #: el mismo código: acá solo se trae, no se reimplementa.
+    #: MISMA definición (ingresos − costo de ventas − gastos − mermas −
+    #: comisiones de convenios ± descuadres de caja), calculada por el mismo
+    #: código: acá solo se trae, no se reimplementa.
     operating_profit: MoneyOut
     #: Aportes y retiros del período, y el neto.
     contributions: MoneyOut

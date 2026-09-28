@@ -271,8 +271,11 @@ class IncomeStatementOut(BaseModel):
     de utilidad. Para una tienda eso sobreestima la ganancia por todo el costo
     de la mercancía.
 
-    Sale de los DOCUMENTOS (`sale`, `contract_payment`, `expense`) y no de los
-    movimientos de caja. Dos razones, y las dos importan:
+    Sale de los DOCUMENTOS (`sale`, `contract_payment`, `expense`, y desde la
+    fase 7 `inventory_exit` y `account_settlement`) y no de los movimientos de
+    caja — con dos excepciones nombradas: los ajustes de arqueo, que no tienen
+    otro documento, y las liquidaciones anteriores a 00061. Dos razones, y las
+    dos importan:
 
       · El desglose de caja solo cubre sesiones CERRADAS: lo de hoy faltaría.
       · Una venta con Sistecrédito ES ingreso aunque no haya entrado plata —
@@ -311,9 +314,24 @@ class IncomeStatementOut(BaseModel):
     #: --- Gastos ---
     operating_expenses: MoneyOut
     expense_count: int
+    #: «Mermas y bajas» (F7-01): mercancía que salió del inventario sin
+    #: venderse —egresos `loss`, `damage`, `adjustment`, `internal_use`—, al
+    #: costo del lote (sin el interés capitalizado de un remate), en la fecha
+    #: del egreso. Una devolución al proveedor no es pérdida y no cuenta.
+    inventory_shrinkage: MoneyOut = Decimal("0.00")
+    shrinkage_exit_count: int = 0
+    #: «Comisiones de convenios» (F7-02): `liquidado − recibido` de cada
+    #: liquidación de una cuenta `settlement`, en la fecha de la liquidación.
+    settlement_commissions: MoneyOut = Decimal("0.00")
+    #: «Descuadres de caja» (F7-03): los ajustes del conteo de apertura, del
+    #: arqueo de cierre y de la reversa al reabrir. CON SIGNO: un sobrante es
+    #: positivo y suma; un faltante es negativo y resta.
+    cash_differences: MoneyOut = Decimal("0.00")
 
     #: --- Resultado ---
-    #: `gross_profit − operating_expenses`. ESTE es "cuánto ganó el negocio".
+    #: `gross_profit − operating_expenses − inventory_shrinkage −
+    #: settlement_commissions + cash_differences`. ESTE es "cuánto ganó el
+    #: negocio".
     operating_profit: MoneyOut
     #: Sobre el ingreso total, en %. `null` si no hubo ingresos — mostrar 0%
     #: cuando el dato correcto es "no aplica" es peor que no mostrar nada.

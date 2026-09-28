@@ -92,6 +92,13 @@ async def reports_tenant(
         # Fase 7: `capital/position` repite la valoración del inventario y
         # ahora los pasivos, así que se cruza contra los reportes.
         "capital.view",
+        # Fase 7: mermas, comisiones de convenio, remates y descuentos por
+        # precio llegan al estado de resultados, así que se generan acá.
+        "inventory.exit",
+        "contracts.auction",
+        "accounts.view",
+        "accounts.manage",
+        "accounts.settle",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -807,9 +814,9 @@ def test_income_statement_subtracts_the_cost_of_goods_sold(
     contradiciéndose.
     """
     headers = _headers(reports_tenant["token"])
-    client.post(
-        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "500000.00"}
-    )
+    # Sin conteo: desde la fase 7 un conteo de apertura distinto del efectivo
+    # derivado es un descuadre y entra al resultado (F7-03).
+    client.post("/api/v1/cashbox/sessions/open", headers=headers, json={})
 
     entry = client.post(
         "/api/v1/inventory/entries",
@@ -889,9 +896,9 @@ def test_income_statement_keeps_capital_and_purchases_out_of_the_result(
     en otra pantalla y concluya que faltan.
     """
     headers = _headers(reports_tenant["token"])
-    client.post(
-        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "5000000.00"}
-    )
+    # Sin conteo: desde la fase 7 un conteo de apertura distinto del efectivo
+    # derivado es un descuadre y entra al resultado (F7-03).
+    client.post("/api/v1/cashbox/sessions/open", headers=headers, json={})
 
     # Una compra de mercancía: sale plata, pero NO es gasto.
     client.post(
@@ -1613,3 +1620,191 @@ def test_el_dinero_de_los_reportes_sale_con_dos_decimales(
     assert posicion.json()["inventory_at_cost"] == "333.33"
     valor = client.get("/api/v1/reports/inventory-valuation", headers=read).json()
     assert valor["cost_value"] == "333.33", "las tres pantallas dicen lo mismo"
+
+
+# --------------------------------------------------------------------------
+# Fase 7 (auditoría 28/09/2026): lo que no pasaba por el resultado. El cuadre
+# patrimonial dejaba un residuo de 32.999,991 que se explicaba entero por
+# mermas, la comisión del convenio, el faltante de arqueo y el interés
+# capitalizado en el remate. Cada uno, con su línea.
+# --------------------------------------------------------------------------
+def _estado(client: TestClient, token: str) -> dict:
+    hoy = date.today().isoformat()
+    r = client.get(
+        "/api/v1/reports/income-statement",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": hoy, "to_date": hoy},
+    )
+    assert r.status_code == 200, r.text
+    return dict(r.json())
+
+
+def _stock_inicial(
+    client: TestClient, tenant: dict, *, name: str, unit_cost: str, quantity: str, unit: str
+) -> str:
+    entry = client.post(
+        "/api/v1/inventory/entries",
+        headers=_headers(tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "origin_type": "initial_stock",
+            "lines": [
+                {
+                    "name": name,
+                    "cat1_id": str(tenant["cat1_id"]),
+                    "cat2_id": str(tenant["cat2_id"]),
+                    "cat3_id": str(tenant["cat3_id"]),
+                    "unit": unit,
+                    "quantity": quantity,
+                    "unit_cost": unit_cost,
+                    "sale_price": unit_cost,
+                    "photos": ["http://example.com/x.jpg"],
+                }
+            ],
+        },
+    )
+    assert entry.status_code == 201, entry.text
+    return str(entry.json()["items"][0]["id"])
+
+
+def _egreso(client: TestClient, token: str, item_id: str, exit_type: str, qty: str) -> None:
+    r = client.post(
+        "/api/v1/inventory/exits",
+        headers=_headers(token),
+        json={
+            "exit_type": exit_type,
+            "reason": f"prueba {exit_type}",
+            "lines": [{"item_id": item_id, "quantity": qty}],
+        },
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_F7_01_las_mermas_y_bajas_restan_del_resultado_al_costo(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Reproducción de F7-01: merma de 0,5 g de oro (75.000 al costo) y un
+    cargador dañado (20.000). La valorización bajaba 95.000 y el estado de
+    resultados no lo mostraba en ninguna parte."""
+    token = reports_tenant["token"]
+    oro = _stock_inicial(
+        client,
+        reports_tenant,
+        name="Oro granel",
+        unit_cost="150000.00",
+        quantity="10.5",
+        unit="gram",
+    )
+    cargador = _stock_inicial(
+        client, reports_tenant, name="Cargador", unit_cost="20000.00", quantity="10", unit="unit"
+    )
+    antes = _estado(client, token)
+    assert antes["inventory_shrinkage"] == "0.00"
+
+    _egreso(client, token, oro, "loss", "0.5")
+    _egreso(client, token, cargador, "damage", "1")
+    # Devolver al proveedor NO es una pérdida: sale del inventario contra una
+    # deuda o un reembolso, no contra el resultado.
+    _egreso(client, token, cargador, "supplier_return", "2")
+
+    estado = _estado(client, token)
+    assert estado["inventory_shrinkage"] == "95000.00"
+    assert Decimal(estado["operating_profit"]) == Decimal(antes["operating_profit"]) - Decimal(
+        "95000.00"
+    )
+
+
+async def test_F7_02_la_comision_del_convenio_es_gasto_del_dia_de_la_liquidacion(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Reproducción de F7-02 (B-10): liquidación de 1.300.000 con 1.235.000
+    recibidos. Los 65.000 solo estaban en `audit_log.after.commission`."""
+    token = reports_tenant["token"]
+    client.post("/api/v1/cashbox/sessions/open", headers=_headers(token), json={})
+    cuenta = client.post(
+        "/api/v1/accounts",
+        headers=_headers(token),
+        json={"name": f"Sistecrédito {uuid4().hex[:6]}", "type": "settlement"},
+    )
+    assert cuenta.status_code == 201, cuenta.text
+    sistecredito = cuenta.json()["id"]
+    banco_resp = client.post(
+        "/api/v1/accounts",
+        headers=_headers(token),
+        json={"name": f"Banco {uuid4().hex[:6]}", "type": "bank"},
+    )
+    assert banco_resp.status_code == 201, banco_resp.text
+    banco = banco_resp.json()["id"]
+
+    # Lo que Sistecrédito debe: 1.400.000 de ventas simuladas.
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into public.cash_movement "
+                "(company_id, module, direction, concept, reference_type, reference_id, "
+                " amount, payment_method, account_id) "
+                "values (:cid, 'store', 'in', 'sale', 'sale', :ref, 1400000, 'other', :aid)"
+            ),
+            {"cid": str(reports_tenant["company_id"]), "ref": str(uuid4()), "aid": sistecredito},
+        )
+    antes = _estado(client, token)
+    liquidacion = client.post(
+        f"/api/v1/accounts/{sistecredito}/settle",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "to_account_id": banco,
+            "amount_settled": "1300000.00",
+            "amount_received": "1235000.00",
+        },
+    )
+    assert liquidacion.status_code == 200, liquidacion.text
+    estado = _estado(client, token)
+    assert estado["settlement_commissions"] == "65000.00"
+    assert Decimal(estado["operating_profit"]) == Decimal(antes["operating_profit"]) - Decimal(
+        "65000.00"
+    )
+
+    # Una liquidación ANTERIOR a 00061 no tiene documento: se reconstruye de
+    # su par de movimientos (mismo `created_at`, misma transacción).
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into public.cash_movement "
+                "(company_id, module, direction, concept, reference_type, reference_id, "
+                " amount, payment_method, account_id) values "
+                "(:cid, 'store', 'out', 'settlement_out', 'settlement', :aid, 100000, "
+                " 'other', :aid), "
+                "(:cid, 'store', 'in', 'settlement_in', 'settlement', :aid, 90000, "
+                " 'transfer', :banco)"
+            ),
+            {"cid": str(reports_tenant["company_id"]), "aid": sistecredito, "banco": banco},
+        )
+    assert _estado(client, token)["settlement_commissions"] == "75000.00"
+
+
+def test_F7_03_los_descuadres_de_arqueo_entran_al_resultado(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Reproducción de F7-03: conteo de apertura +50.000 sobre un cajón de 0
+    y faltante de cierre de 7.000. Se veían en `closings.difference` y nunca
+    en la utilidad."""
+    token = reports_tenant["token"]
+    abierta = client.post(
+        "/api/v1/cashbox/sessions/open",
+        headers=_headers(token),
+        json={"counted_cash": "50000.00", "difference_reason": "fondo encontrado"},
+    )
+    assert abierta.status_code == 201, abierta.text
+    antes_de_cerrar = _estado(client, token)
+    assert antes_de_cerrar["cash_differences"] == "50000.00"
+
+    cerrada = client.post(
+        f"/api/v1/cashbox/sessions/{abierta.json()['id']}/close",
+        headers=_headers(token),
+        json={"counted_cash": "43000.00", "difference_reason": "faltó un billete"},
+    )
+    assert cerrada.status_code == 200, cerrada.text
+    estado = _estado(client, token)
+    assert estado["cash_differences"] == "43000.00", "sobrante suma, faltante resta"
+    assert Decimal(estado["operating_profit"]) == Decimal(
+        antes_de_cerrar["operating_profit"]
+    ) - Decimal("7000.00")

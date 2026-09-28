@@ -25,13 +25,17 @@ from app.modules.reports import service
 async def get_operating_profit(
     db: AsyncSession, *, company_id: UUID, from_date: date, to_date: date
 ) -> Decimal:
-    """Utilidad operativa del período: ingresos − costo de ventas − gastos.
+    """Utilidad operativa del período: ingresos − costo de ventas − gastos −
+    mermas − comisiones de convenios ± descuadres de caja (fase 7).
 
     NO incluye los movimientos de capital del dueño, y no hace falta
     excluirlos: `get_income_statement` lee DOCUMENTOS (`sale`,
-    `contract_payment`, `expense`), nunca `cash_movement`. Un aporte o un
-    retiro no es ninguno de esos tres, así que queda fuera del resultado por
-    construcción — sin una línea de exclusión que alguien pueda olvidar.
+    `contract_payment`, `expense`, `inventory_exit`, `account_settlement`) y,
+    de `cash_movement`, solo conceptos nombrados uno por uno —el `adjustment`
+    de arqueo y el par `settlement_out`/`settlement_in` de las liquidaciones
+    anteriores a 00061—. Un aporte o un retiro no es ninguno, así que queda
+    fuera del resultado por construcción — sin una línea de exclusión que
+    alguien pueda olvidar.
     """
     estado = await service.get_income_statement(
         db, company_id=company_id, from_date=from_date, to_date=to_date

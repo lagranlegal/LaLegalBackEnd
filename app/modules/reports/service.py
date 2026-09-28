@@ -395,6 +395,15 @@ async def get_income_statement(
     compras = await repository.inventory_purchased(
         db, company_id=company_id, from_date=from_date, to_date=to_date
     )
+    mermas = await repository.inventory_shrinkage(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
+    comisiones = await repository.settlement_commissions(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
+    descuadres = await repository.cash_differences(
+        db, company_id=company_id, tz_name=tz_name, from_date=from_date, to_date=to_date
+    )
 
     t, e, g = tienda._mapping, empeno._mapping, gastos._mapping
 
@@ -420,7 +429,14 @@ async def get_income_statement(
     costo_ventas = _dec(t["cost_of_goods_sold"]) - _dec(t["returns_cost"])
     utilidad_bruta = ingresos - costo_ventas
     gastos_operativos = _dec(g["total"])
-    utilidad = utilidad_bruta - gastos_operativos
+    # FASE 7 (auditoría 28/09/2026): lo que movía el patrimonio sin pasar por
+    # el resultado. El cuadre patrimonial dejaba un residuo que se explicaba
+    # entero por estas tres líneas (y por el interés del remate, que se
+    # resuelve en el costo de ventas). Cada una en su propia línea y no
+    # dentro de «Gastos operativos»: son hechos distintos que el dueño quiere
+    # ver por separado, y `expense` es un documento que ellas no son.
+    mermas_total = _dec(mermas._mapping["total"])
+    utilidad = utilidad_bruta - gastos_operativos - mermas_total - comisiones + descuadres
 
     return IncomeStatementOut(
         from_date=from_date,
@@ -433,6 +449,10 @@ async def get_income_statement(
         gross_profit=utilidad_bruta,
         operating_expenses=gastos_operativos,
         expense_count=g["expense_count"] or 0,
+        inventory_shrinkage=mermas_total,
+        shrinkage_exit_count=mermas._mapping["exit_count"] or 0,
+        settlement_commissions=comisiones,
+        cash_differences=descuadres,
         operating_profit=utilidad,
         # `null` y no 0% cuando no hubo ingresos: un margen de cero sugiere que
         # se vendió sin ganar, y lo cierto es que no se vendió.
