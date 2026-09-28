@@ -85,6 +85,10 @@ async def reports_tenant(
         "sales.apply_discount",
         "reports.view",
         "audit.view",
+        # F4-06: lo prestado del período se prueba con un recargo y un
+        # contrato importado, que no son desembolsos nuevos.
+        "contracts.import",
+        "contracts.extend_loan",
     )
 
     async with AsyncSessionLocal() as session, session.begin():
@@ -674,6 +678,78 @@ async def test_pawn_interest_comes_from_documents_not_closed_cash_sessions(
     today = date.today().isoformat()
     body = _pawn(client, reports_tenant["token"], today, today)
     assert float(body["interest_collected"]) == 50000.0
+
+
+@pytest.mark.asyncio
+async def test_lo_prestado_es_lo_que_salio_de_caja_en_el_periodo(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """F4-06 (B-02, B-03): `capital_disbursed` es lo que salió de caja por
+    préstamos en el período. Un recargo aporta solo su delta, el día del
+    recargo; un contrato importado no aporta nada. `contracts_opened` cuenta
+    solo los préstamos nuevos."""
+    headers = _headers(reports_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "5000000.00"}
+    )
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.category set max_ltv_pct = 70 where company_id = :cid"),
+            {"cid": str(reports_tenant["company_id"])},
+        )
+    item = {"category_id": str(reports_tenant["category_id"]), "description": "Cadena"}
+    nativo = client.post(
+        "/api/v1/contracts",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(reports_tenant["customer_id"]),
+            "principal": "1000000.00",
+            "appraisal_value": "2000000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [item],
+        },
+    )
+    assert nativo.status_code == 201, nativo.text
+    recargo = client.post(
+        f"/api/v1/contracts/{nativo.json()['id']}/extend-loan",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={"amount": "300000.00", "payment_method": "cash"},
+    )
+    assert recargo.status_code == 201, recargo.text
+    assert recargo.json()["principal"] == "1300000.00"
+
+    today = date.today()
+    importado = client.post(
+        "/api/v1/contracts/import",
+        headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "legacy_code": f"LEGACY-{uuid4()}",
+            "customer_id": str(reports_tenant["customer_id"]),
+            "principal": "400000.00",
+            "capital_balance": "400000.00",
+            "interest_rate_pct": "5",
+            "term_months": 4,
+            "arrears_window_months": 4,
+            "extension_months": 1,
+            "start_date": today.isoformat(),
+            "interest_paid_until": today.isoformat(),
+            "items": [item],
+        },
+    )
+    assert importado.status_code == 201, importado.text
+
+    body = _pawn(client, reports_tenant["token"], today.isoformat(), today.isoformat())
+    assert body["capital_disbursed"] == "1300000.00"
+    assert body["contracts_opened"] == 1
+
+    estado = client.get(
+        "/api/v1/reports/income-statement",
+        headers=headers,
+        params={"from_date": today.isoformat(), "to_date": today.isoformat()},
+    )
+    assert estado.status_code == 200, estado.text
+    assert estado.json()["capital_disbursed"] == "1300000.00"
 
 
 def test_pawn_performance_empty_period_has_null_yield(

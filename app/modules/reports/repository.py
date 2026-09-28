@@ -383,12 +383,34 @@ async def pawn_performance(
                 where company_id = :company_id
                   and (paid_at at time zone :tz)::date between :from_date and :to_date
             ),
-            nuevos as (
-                select
-                  coalesce(sum(principal), 0) as capital_disbursed,
-                  count(*)                    as contracts_opened
+            -- Lo PRESTADO en el período es lo que SALIÓ de caja por préstamos
+            -- ese día (F4-06 / B-02 y B-03, 27/09/2026): Σ de los movimientos
+            -- `pawn/out/loan_disbursed` por la fecha del movimiento en la zona
+            -- de la empresa. Es el mismo hecho que registra la caja, así que
+            -- el reporte y el libro no pueden separarse:
+            --   · un sucesor de recargo solo movió el DELTA, el día del
+            --     recargo (su `principal` repite el capital viejo y su
+            --     `start_date` es el de la raíz);
+            --   · un importado no movió nada: su plata salió en el sistema
+            --     anterior, y contarla reescribía meses ya cerrados.
+            desembolsos as (
+                select coalesce(sum(amount), 0) as capital_disbursed
+                from public.cash_movement
+                where company_id = :company_id
+                  and module = 'pawn'
+                  and direction = 'out'
+                  and concept = 'loan_disbursed'
+                  and (created_at at time zone :tz)::date between :from_date and :to_date
+            ),
+            -- Contratos ABIERTOS en el período: solo los que nacen de un
+            -- préstamo nuevo. Un sucesor es el mismo préstamo ampliado y un
+            -- importado ya existía.
+            abiertos as (
+                select count(*) as contracts_opened
                 from public.contract
                 where company_id = :company_id
+                  and parent_contract_id is null
+                  and legacy_code is null
                   and start_date between :from_date and :to_date
             ),
             cartera as (
@@ -407,9 +429,9 @@ async def pawn_performance(
             select
               pagos.interest_collected, pagos.capital_recovered,
               pagos.interest_discounts, pagos.payment_count,
-              nuevos.capital_disbursed, nuevos.contracts_opened,
+              desembolsos.capital_disbursed, abiertos.contracts_opened,
               cartera.capital_outstanding, cartera.open_contracts
-            from pagos, nuevos, cartera
+            from pagos, desembolsos, abiertos, cartera
             """
         ),
         {

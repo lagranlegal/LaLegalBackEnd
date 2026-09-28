@@ -129,9 +129,12 @@ class PawnPerformanceOut(BaseModel):
     interest_discounts: Decimal
     #: Capital recuperado vía abonos — reduce cartera, NO es ingreso.
     capital_recovered: Decimal
-    #: Capital entregado en contratos nuevos del rango — NO es gasto.
+    #: Capital que SALIÓ de caja por préstamos en el rango (contratos nuevos
+    #: y el delta de cada recargo, por la fecha del movimiento; un importado
+    #: no suma) — NO es gasto (F4-06).
     capital_disbursed: Decimal
     payment_count: int
+    #: Préstamos nuevos del rango: ni sucesores de recargo ni importados.
     contracts_opened: int
     #: Cartera al corte de HOY, no del final del rango: el esquema no guarda
     #: `closed_at` ni histórico de saldos, así que no hay forma exacta de
