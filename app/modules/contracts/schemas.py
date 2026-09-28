@@ -215,6 +215,12 @@ class PaymentQuoteOut(BaseModel):
     months_owed: int
     monthly_interest: Decimal
     options: list[PaymentOptionOut]
+    #: Saldar hoy: meses de interés que exige (los adeudados, y como mínimo
+    #: uno si el contrato no ha causado ninguno — F4-11), su interés, y el
+    #: total con todo el capital. Es lo que la UI muestra en "Saldar".
+    payoff_months: int
+    payoff_interest: Decimal
+    payoff_total: Decimal
 
 
 class PaymentCreateIn(BaseModel):

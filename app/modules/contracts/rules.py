@@ -97,15 +97,46 @@ class PaymentQuote:
     months_owed: int
     monthly_interest: Decimal
     options: list[PaymentOption]
+    #: Meses de interés que exige SALDAR hoy: los adeudados, y como mínimo
+    #: uno si el contrato todavía no causó ninguno (F4-11).
+    payoff_months: int
+    payoff_interest: Decimal
+    #: `payoff_interest + capital_balance`: lo que cuesta recoger la prenda hoy.
+    payoff_total: Decimal
+
+
+def minimum_payoff_months(*, start_date: date, interest_paid_until: date) -> int:
+    """Saldar un contrato causa como mínimo UN mes de interés (decisión del
+    dueño, auditoría 27/09/2026, F4-11). La regla de meses completos, sola,
+    dejaba que quien empeña y devuelve dentro del primer mes no pagara
+    interés: `months_owed` es 0 hasta cumplir el mes.
+
+    El mínimo es sobre la vida del contrato, no sobre cada abono: si el ancla
+    ya se movió de la fecha de inicio, ya se cobró al menos un mes y el
+    mínimo está cumplido. Un sucesor de recargo hereda la fecha de inicio de
+    la raíz y el ancla del padre (00053), así que ampliar el préstamo no
+    reinicia ni esquiva el mínimo.
+    """
+    return 1 if interest_paid_until <= start_date else 0
 
 
 def quote_payment_options(
-    *, capital_balance: Decimal, interest_rate_pct: Decimal, interest_paid_until: date, today: date
+    *,
+    capital_balance: Decimal,
+    interest_rate_pct: Decimal,
+    interest_paid_until: date,
+    today: date,
+    start_date: date | None = None,
 ) -> PaymentQuote:
     """CLAUDE.md: "el endpoint debe devolver los montos exactos aceptables
     para que la UI los muestre (1 mes, 2 meses, ..., todo + capital libre)".
     Cada opción es un múltiplo exacto de `monthly_interest` — un pago parcial
     de un mes nunca es una opción válida, por construcción.
+
+    `start_date` activa el mínimo de un mes al saldar (F4-11). Las `options`
+    no cambian —siguen siendo los meses ADEUDADOS—; el mínimo solo aparece en
+    `payoff_*`, porque un mes por adelantado sin saldar no es un abono que
+    la regla admita.
     """
     owed = months_between(interest_paid_until, today)
     monthly = monthly_interest(interest_rate_pct, capital_balance)
@@ -118,7 +149,21 @@ def quote_payment_options(
         )
         for n in range(1, owed + 1)
     ]
-    return PaymentQuote(months_owed=owed, monthly_interest=monthly, options=options)
+    minimum = (
+        minimum_payoff_months(start_date=start_date, interest_paid_until=interest_paid_until)
+        if start_date is not None
+        else 0
+    )
+    payoff_months = max(owed, minimum)
+    payoff_interest = quantize(monthly * payoff_months)
+    return PaymentQuote(
+        months_owed=owed,
+        monthly_interest=monthly,
+        options=options,
+        payoff_months=payoff_months,
+        payoff_interest=payoff_interest,
+        payoff_total=quantize(payoff_interest + capital_balance),
+    )
 
 
 def compute_status(

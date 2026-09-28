@@ -377,12 +377,14 @@ def _with_sale(client: TestClient, shop: dict[str, Any], customer: UUID) -> dict
     return {"customer": customer, "sale": response.json()}
 
 
-def _pay(capital: str) -> Callable[[TestClient, dict[str, Any], dict[str, Any], str], Any]:
+def _pay(
+    capital: str, months: int = 0
+) -> Callable[[TestClient, dict[str, Any], dict[str, Any], str], Any]:
     def act(client: TestClient, shop: dict[str, Any], ctx: dict[str, Any], key: str) -> Any:
         return client.post(
             f"/api/v1/contracts/{ctx['contract']['id']}/payments",
             headers=_headers(shop["token"], key),
-            json={"months_covered": 0, "capital_amount": capital, "payment_method": "cash"},
+            json={"months_covered": months, "capital_amount": capital, "payment_method": "cash"},
         )
 
     return act
@@ -431,7 +433,7 @@ SCENARIOS: dict[str, Scenario] = {
     "C3": Scenario(
         "contract_paid_off",
         _with_contract,
-        _pay("1000000.00"),
+        _pay("1000000.00", months=1),
         lambda ctx, body: f"payment:{body['id']}",
     ),
     "C4": Scenario(
@@ -633,7 +635,7 @@ async def test_the_payoff_sends_ONE_mail_the_paid_off_and_not_also_the_receipt(
     se pierde, se incluye."""
     await _enable(shop["company_id"], "payment_registered", "contract_paid_off")
     ctx = _with_contract(client, shop, shop["with_mail"])
-    payment = _pay("1000000.00")(client, shop, ctx, str(uuid4()))
+    payment = _pay("1000000.00", months=1)(client, shop, ctx, str(uuid4()))
     assert payment.status_code == 201, payment.text
     p = payment.json()
 
@@ -643,7 +645,7 @@ async def test_the_payoff_sends_ONE_mail_the_paid_off_and_not_also_the_receipt(
     [message] = outbox.outbox
     number = ctx["contract"]["number"]
     assert f"Paz y salvo del contrato #{number}" in message.subject
-    assert "$1.000.000" in message.text
+    assert "$1.050.000" in message.text  # capital + el mes mínimo (F4-11)
     assert f"recibo #{p['receipt_number']}" in message.text
     assert "No nos debe nada" in message.text
 
@@ -655,7 +657,7 @@ async def test_with_paid_off_turned_off_the_payoff_still_gets_its_receipt(
     abono igual tiene su comprobante: apagar un aviso no puede apagar otro."""
     await _enable(shop["company_id"], "payment_registered")
     ctx = _with_contract(client, shop, shop["with_mail"])
-    payment = _pay("1000000.00")(client, shop, ctx, str(uuid4()))
+    payment = _pay("1000000.00", months=1)(client, shop, ctx, str(uuid4()))
     assert payment.status_code == 201, payment.text
     [delivery] = await _deliveries(shop["company_id"])
     assert delivery.event_type == "payment_registered"

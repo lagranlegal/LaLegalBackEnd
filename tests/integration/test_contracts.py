@@ -902,11 +902,13 @@ async def test_settlement_info_requires_paid_status_and_matches_the_payoff_payme
         f"/api/v1/contracts/{contract['id']}/payment-options", headers=headers
     ).json()
     assert quote["months_owed"] == 0, "contrato recién creado: nada adeudado todavía"
+    # F4-11: saldar causa como mínimo un mes de interés.
+    assert quote["payoff_months"] == 1
 
     payoff = client.post(
         f"/api/v1/contracts/{contract['id']}/payments",
         headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
-        json={"months_covered": 0, "capital_amount": "1000000.00", "payment_method": "cash"},
+        json={"months_covered": 1, "capital_amount": "1000000.00", "payment_method": "cash"},
     )
     assert payoff.status_code == 201, payoff.text
     assert payoff.json()["new_capital_balance"] == "0.00"
@@ -1924,7 +1926,8 @@ async def test_F4_01_dos_pagos_totales_en_paralelo_cobran_una_sola_vez(
     deuda de 300.000. Ahora el segundo encuentra el contrato `paid`."""
     contrato = await _contrato_para_carrera(client, contract_tenant, principal="300000.00")
     url = f"/api/v1/contracts/{contrato['id']}/payments"
-    cuerpo = {"months_covered": 0, "capital_amount": "300000.00", "payment_method": "cash"}
+    # `months_covered: 1`: saldar causa como mínimo un mes de interés (F4-11).
+    cuerpo = {"months_covered": 1, "capital_amount": "300000.00", "payment_method": "cash"}
     respuestas = await en_paralelo(
         [
             Peticion(
@@ -1949,7 +1952,7 @@ async def test_F4_01_dos_pagos_totales_en_paralelo_cobran_una_sola_vez(
     assert rechazo.json()["code"] == "CONTRACT_CLOSED"
     despues = await _estado_contrato(contrato["id"])
     assert despues["abonos"] == 1
-    assert despues["cobrado"] == Decimal("300000.00")
+    assert despues["cobrado"] == Decimal("315000.00")  # 300.000 + un mes al 5 %
     assert despues["status"] == "paid"
 
 
@@ -2026,7 +2029,7 @@ async def test_F4_02_pago_total_y_recargo_en_paralelo_no_cobran_y_prestan_a_la_v
                 f"/api/v1/contracts/{viejo['id']}/payments",
                 token=contract_tenant["full_token"],
                 json={
-                    "months_covered": 0,
+                    "months_covered": 1,  # saldar causa un mes como mínimo (F4-11)
                     "capital_amount": "1000000.00",
                     "payment_method": "cash",
                 },
@@ -2122,3 +2125,66 @@ async def test_sin_ltv_en_la_categoria_el_avaluo_sigue_opcional(
     )
     assert respuesta.status_code == 201, respuesta.text
     assert respuesta.json()["ltv_warning"] is False
+
+
+# --------------------------------------------------------------------------
+# F4-11 (27/09/2026, decisión del dueño): saldar un contrato causa como
+# mínimo un mes de interés.
+# --------------------------------------------------------------------------
+async def test_saldar_dentro_del_primer_mes_cobra_un_mes(
+    client: TestClient, contract_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=contract_tenant["company_id"], register_id=contract_tenant["register_id"]
+    )
+    headers = _headers(contract_tenant["full_token"])
+    contract = client.post(
+        "/api/v1/contracts",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_contract_payload(contract_tenant),
+    ).json()
+
+    quote = client.get(f"/api/v1/contracts/{contract['id']}/payment-options", headers=headers)
+    assert quote.status_code == 200, quote.text
+    assert quote.json()["months_owed"] == 0
+    assert quote.json()["payoff_months"] == 1
+    assert quote.json()["payoff_interest"] == "50000.00"
+    assert quote.json()["payoff_total"] == "1050000.00"
+
+    sin_interes = client.post(
+        f"/api/v1/contracts/{contract['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 0, "capital_amount": "1000000.00", "payment_method": "cash"},
+    )
+    assert sin_interes.status_code == 422, sin_interes.text
+    assert sin_interes.json()["code"] == "PAYMENT_MINIMUM_INTEREST_REQUIRED"
+    assert sin_interes.json()["details"]["months_required"] == 1
+    assert sin_interes.json()["details"]["payoff_total"] == "1050000.00"
+
+    # Un mes por adelantado SIN saldar sigue sin ser un abono válido.
+    adelantado = client.post(
+        f"/api/v1/contracts/{contract['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 1, "payment_method": "cash"},
+    )
+    assert adelantado.status_code == 400, adelantado.text
+    assert adelantado.json()["code"] == "BAD_REQUEST"
+
+    # Un abono parcial a capital sin saldar sigue libre con 0 meses.
+    parcial = client.post(
+        f"/api/v1/contracts/{contract['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 0, "capital_amount": "100000.00", "payment_method": "cash"},
+    )
+    assert parcial.status_code == 201, parcial.text
+
+    saldo = client.post(
+        f"/api/v1/contracts/{contract['id']}/payments",
+        headers=_headers(contract_tenant["full_token"], idempotency_key=str(uuid4())),
+        json={"months_covered": 1, "capital_amount": "900000.00", "payment_method": "cash"},
+    )
+    assert saldo.status_code == 201, saldo.text
+    assert saldo.json()["interest_amount"] == "45000.00"
+    assert saldo.json()["total"] == "945000.00"
+    despues = client.get(f"/api/v1/contracts/{contract['id']}", headers=headers).json()
+    assert despues["status"] == "paid"

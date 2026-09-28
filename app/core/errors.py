@@ -111,6 +111,14 @@ class PaymentPartialInterestRejectedError(AppError):
     code = "PAYMENT_PARTIAL_INTEREST_REJECTED"
 
 
+class PaymentMinimumInterestRequiredError(AppError):
+    """Saldar un contrato que no ha causado ningún mes de interés exige
+    cubrir uno (F4-11)."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "PAYMENT_MINIMUM_INTEREST_REQUIRED"
+
+
 class ContractAppraisalRequiredError(AppError):
     """Contrato sin avalúo en una categoría con `max_ltv_pct` (F4-05)."""
 

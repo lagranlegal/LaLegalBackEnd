@@ -128,6 +128,43 @@ class TestQuotePaymentOptions:
         assert quote.options[0].total == Decimal("50000.00")
         assert quote.options[1].total == Decimal("100000.00")
 
+    def test_saldar_en_el_primer_mes_exige_un_mes(self) -> None:
+        """F4-11: sin ningún mes causado, saldar hoy cobra uno."""
+        quote = quote_payment_options(
+            capital_balance=Decimal("1000000"),
+            interest_rate_pct=Decimal("5"),
+            interest_paid_until=date(2026, 9, 1),
+            today=date(2026, 9, 20),
+            start_date=date(2026, 9, 1),
+        )
+        assert quote.months_owed == 0
+        assert quote.options == []
+        assert quote.payoff_months == 1
+        assert quote.payoff_interest == Decimal("50000.00")
+        assert quote.payoff_total == Decimal("1050000.00")
+
+    def test_con_un_mes_ya_pagado_el_minimo_esta_cumplido(self) -> None:
+        quote = quote_payment_options(
+            capital_balance=Decimal("1000000"),
+            interest_rate_pct=Decimal("5"),
+            interest_paid_until=date(2026, 10, 1),
+            today=date(2026, 10, 20),
+            start_date=date(2026, 9, 1),
+        )
+        assert quote.payoff_months == 0
+        assert quote.payoff_total == Decimal("1000000.00")
+
+    def test_con_meses_adeudados_saldar_cobra_los_adeudados(self) -> None:
+        quote = quote_payment_options(
+            capital_balance=Decimal("1000000"),
+            interest_rate_pct=Decimal("5"),
+            interest_paid_until=date(2026, 1, 1),
+            today=date(2026, 3, 5),
+            start_date=date(2026, 1, 1),
+        )
+        assert quote.payoff_months == 2
+        assert quote.payoff_interest == Decimal("100000.00")
+
     def test_only_the_full_catch_up_option_allows_capital(self) -> None:
         quote = quote_payment_options(
             capital_balance=Decimal("1000000"),

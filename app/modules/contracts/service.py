@@ -15,6 +15,7 @@ from app.core.errors import (
     ImportCapitalExceedsPrincipalError,
     ImportDatesMisalignedError,
     NotFoundError,
+    PaymentMinimumInterestRequiredError,
     PaymentPartialInterestRejectedError,
     PermissionDeniedError,
 )
@@ -771,10 +772,14 @@ async def get_payment_quote(
         interest_rate_pct=m["interest_rate_pct"],
         interest_paid_until=m["interest_paid_until"],
         today=today,
+        start_date=m["start_date"],
     )
     return PaymentQuoteOut(
         months_owed=quote.months_owed,
         monthly_interest=quote.monthly_interest,
+        payoff_months=quote.payoff_months,
+        payoff_interest=quote.payoff_interest,
+        payoff_total=quote.payoff_total,
         options=[
             PaymentOptionOut(
                 months=o.months,
@@ -863,12 +868,19 @@ async def create_payment(
         interest_rate_pct=m["interest_rate_pct"],
         interest_paid_until=m["interest_paid_until"],
         today=today,
+        start_date=m["start_date"],
     )
 
     capital_amount = body.capital_amount or Decimal("0")
+    # Saldar = llevar el capital a cero. Solo ahí rige el mínimo de un mes
+    # (F4-11): `payoff_months` puede ser uno más que `months_owed` dentro
+    # del primer mes, y ese es el ÚNICO caso en que se acepta cubrir un mes
+    # que todavía no se adeuda.
+    is_payoff_attempt = capital_amount >= m["capital_balance"]
+    max_months = quote.payoff_months if is_payoff_attempt else quote.months_owed
     if body.months_covered == 0 and capital_amount <= 0:
         raise AppError("El abono no cubre ningún mes de interés ni capital.")
-    if body.months_covered > quote.months_owed:
+    if body.months_covered > max_months:
         raise AppError(
             f"Solo se adeudan {quote.months_owed} mes(es) de interés.",
             details={"months_owed": quote.months_owed},
@@ -876,6 +888,15 @@ async def create_payment(
     if capital_amount > 0 and body.months_covered < quote.months_owed:
         raise PaymentPartialInterestRejectedError(
             "El capital solo se abona cuando los intereses quedan al día."
+        )
+    if is_payoff_attempt and body.months_covered < quote.payoff_months:
+        raise PaymentMinimumInterestRequiredError(
+            "Saldar el contrato causa como mínimo un mes de interés.",
+            details={
+                "months_required": quote.payoff_months,
+                "payoff_interest": str(quote.payoff_interest),
+                "payoff_total": str(quote.payoff_total),
+            },
         )
 
     interest_amount = quantize(quote.monthly_interest * body.months_covered)
@@ -898,7 +919,7 @@ async def create_payment(
         raise AppError("El abono a capital no puede superar el saldo.")
     new_interest_paid_until = rules.add_months(m["interest_paid_until"], body.months_covered)
 
-    is_full_payoff = new_capital_balance == 0 and body.months_covered == quote.months_owed
+    is_full_payoff = new_capital_balance == 0 and body.months_covered == quote.payoff_months
     if is_full_payoff:
         new_status: str = "paid"
         new_extension_ends_at: date | None = None
