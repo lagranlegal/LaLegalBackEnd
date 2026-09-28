@@ -524,6 +524,7 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `SUBSCRIPTION_EXPIRED` | 402 | La empresa no tiene suscripción activa. |
 | `NOT_FOUND` | 404 | El recurso no existe (o no pertenece a tu empresa — mismo código, no se revela cuál). |
 | `CONFLICT` / `LAST_ADMIN_SAFEGUARD` | 409 | Ver salvaguarda del último admin arriba. |
+| `PURCHASE_ALREADY_PAID` | 409 | `POST /inventory/entries/{id}/pay` sobre una compra que ya está pagada (con otra `Idempotency-Key`; con la misma devuelve la compra pagada). |
 | `ROLE_NAME_TAKEN` | 409 | Crear o renombrar un rol con un nombre que ya existe en la empresa. `details.constraint`. |
 | `ACCOUNT_NAME_TAKEN` | 409 | Crear o renombrar una cuenta con un nombre que ya existe en la empresa. `details.constraint`. |
 | `EXPENSE_CATEGORY_NAME_TAKEN` | 409 | Categoría de gasto con un nombre que ya existe en la empresa (si el servicio no lo atajó antes). `details.constraint`. |

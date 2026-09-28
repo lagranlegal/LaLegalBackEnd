@@ -807,8 +807,8 @@ async def pay_entry(
     la compra se lee `FOR UPDATE`; la clave se busca DESPUÉS del bloqueo (un
     reintento, en vuelo o tardío, recibe la compra pagada en vez de un 409);
     se guarda en `pay_idempotency_key` (00061); y un segundo pago con otra
-    clave recibe `409 CONFLICT` "ya fue pagada" (el código genérico que ya
-    está en el catálogo de API_GUIDE §15; uno propio exige documentarlo allí).
+    clave recibe `409 PURCHASE_ALREADY_PAID`, un código propio para que el
+    front distinga "ya está pagada" de cualquier otro conflicto.
     """
     row = await repository.get_entry_for_update(db, company_id=company_id, entry_id=entry_id)
     if row is None:
@@ -823,7 +823,7 @@ async def pay_entry(
     if m["origin_type"] != "purchase":
         raise AppError("Solo un ingreso de compra puede tener un pago asociado.")
     if m["paid_at"] is not None:
-        raise ConflictError("Esta compra ya fue pagada.")
+        raise ConflictError("Esta compra ya fue pagada.", code="PURCHASE_ALREADY_PAID")
 
     resolved = await cashbox_integration.resolve_account_for_movement(
         db,
@@ -841,7 +841,7 @@ async def pay_entry(
         idempotency_key=idempotency_key,
     ):
         # Inalcanzable con el `FOR UPDATE` de arriba; si se llega, nada sale.
-        raise ConflictError("Esta compra ya fue pagada.")
+        raise ConflictError("Esta compra ya fue pagada.", code="PURCHASE_ALREADY_PAID")
     await cashbox_integration.record_movement(
         db,
         session_id=resolved.session_id,

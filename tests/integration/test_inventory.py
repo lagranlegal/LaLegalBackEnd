@@ -2325,7 +2325,7 @@ async def test_F6_01_dos_pagos_simultaneos_con_claves_distintas_pagan_una_vez(
     client: TestClient, inventory_tenant: dict
 ) -> None:
     """Con claves distintas el segundo es otro intento de pagar lo ya pagado:
-    409 `CONFLICT` "ya fue pagada", y la plata sale una sola vez."""
+    409 `PURCHASE_ALREADY_PAID`, y la plata sale una sola vez."""
     entry_id = _compra_a_credito(client, inventory_tenant)
     url = f"/api/v1/inventory/entries/{entry_id}/pay"
     respuestas = await en_paralelo(
@@ -2342,8 +2342,7 @@ async def test_F6_01_dos_pagos_simultaneos_con_claves_distintas_pagan_una_vez(
     )
     assert sorted(r.status_code for r in respuestas) == [200, 409], [r.text for r in respuestas]
     rechazo = next(r for r in respuestas if r.status_code == 409)
-    assert rechazo.json()["code"] == "CONFLICT"
-    assert "ya fue pagada" in rechazo.json()["message"]
+    assert rechazo.json()["code"] == "PURCHASE_ALREADY_PAID"
     assert await _pagos_de(inventory_tenant, entry_id) == (1, Decimal("500000.00"))
 
 
