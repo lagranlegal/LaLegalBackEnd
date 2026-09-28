@@ -133,6 +133,8 @@ async def create_sale(
 
     items = []
     subtotal_sum = Decimal("0")
+    price_discount = Decimal("0")
+    below_price_lines: list[dict[str, str]] = []
     for line in body.lines:
         item = await inventory_repo.get_item(db, company_id=company_id, item_id=line.item_id)
         if item is None:
@@ -177,12 +179,44 @@ async def create_sale(
         # debe moverse si alguien corrige el costo del artículo después.
         items.append((line, subtotal, m["cost"]))
 
+        # Vender por DEBAJO del precio publicado es un descuento, llegue como
+        # `discount_amount` o como un `unit_price` menor (decisión del dueño,
+        # auditoría 27/09/2026, F6-05). Los dos caminos llevan a lo mismo
+        # —la pieza sale por menos de lo que la empresa pidió—, así que
+        # exigen lo mismo: `sales.apply_discount`, motivo, auditoría y la
+        # alerta A2. Por encima del precio publicado es libre: cobrar más no
+        # le quita nada a nadie.
+        sale_price = m["sale_price"]
+        if sale_price is not None and line.unit_price < sale_price:
+            below = quantize((sale_price - line.unit_price) * line.quantity)
+            price_discount += below
+            below_price_lines.append(
+                {
+                    "item_id": str(line.item_id),
+                    "sale_price": str(sale_price),
+                    "unit_price": str(line.unit_price),
+                    "quantity": str(line.quantity),
+                    "discount": str(below),
+                }
+            )
+
     discount_amount = body.discount_amount or Decimal("0")
-    if discount_amount > 0:
+    if discount_amount > 0 or price_discount > 0:
         if not body.discount_reason:
-            raise AppError("El descuento requiere un motivo.")
+            raise AppError(
+                "El descuento requiere un motivo."
+                if discount_amount > 0
+                else "Vender por debajo del precio publicado es un descuento: requiere un motivo.",
+                details={"price_discount": str(price_discount)} if price_discount > 0 else {},
+            )
         if not await has_permission(db, user.role_id, "sales.apply_discount"):
-            raise PermissionDeniedError("Falta el permiso 'sales.apply_discount'.")
+            raise PermissionDeniedError(
+                "Falta el permiso 'sales.apply_discount'."
+                if discount_amount > 0
+                else "Vender por debajo del precio publicado es un descuento: falta el "
+                "permiso 'sales.apply_discount'.",
+                details={"permission": "sales.apply_discount"},
+            )
         if discount_amount > subtotal_sum:
             raise AppError("El descuento no puede superar el total de la venta.")
 
@@ -255,7 +289,7 @@ async def create_sale(
         customer_id=body.customer_id,
         sold_by=user.id,
         discount_amount=discount_amount,
-        discount_by=user.id if discount_amount > 0 else None,
+        discount_by=user.id if discount_amount > 0 or price_discount > 0 else None,
         total=total,
         payment_method=body.payment_method,
         idempotency_key=idempotency_key,
@@ -332,7 +366,17 @@ async def create_sale(
         entity_id=sale_id,
         after={"number": number, "total": str(total), "payment_method": body.payment_method},
     )
-    if discount_amount > 0:
+    # El descuento efectivo es el explícito MÁS lo que se vendió por debajo
+    # del precio publicado (F6-05): los dos se auditan y alertan igual.
+    effective_discount = discount_amount + price_discount
+    if effective_discount > 0:
+        after: dict[str, Any] = {
+            "discount_amount": str(discount_amount),
+            "discount_reason": body.discount_reason,
+        }
+        if price_discount > 0:
+            after["price_discount"] = str(price_discount)
+            after["below_price_lines"] = below_price_lines
         await identity_repo.insert_audit_log(
             db,
             company_id=company_id,
@@ -341,10 +385,7 @@ async def create_sale(
             action="apply_sale_discount",
             entity_type="sale",
             entity_id=sale_id,
-            after={
-                "discount_amount": str(discount_amount),
-                "discount_reason": body.discount_reason,
-            },
+            after=after,
         )
 
     # C6 (NOTIFICACIONES §2.1): solo con cliente. El total, nunca los
@@ -365,7 +406,7 @@ async def create_sale(
     # umbral. Después del aviso al cliente: la alerta es lo ÚLTIMO de la
     # transacción, y si algo la hiciera fallar no queda ni la venta.
     alerts: tuple[UUID, ...] = ()
-    if discount_amount > 0:
+    if effective_discount > 0:
         alerts = await notifications_integration.record_company_alert(
             db,
             company_id=company_id,
@@ -374,12 +415,13 @@ async def create_sale(
             dedupe_key=f"alert:discount:sale:{sale_id}",
             entity_type="sale",
             entity_id=sale_id,
-            discount_amount=discount_amount,
+            discount_amount=effective_discount,
             payload={
                 "kind": "sale",
                 "sale_number": number,
-                "subtotal": str(subtotal_sum),
-                "discount_amount": str(discount_amount),
+                # A precio publicado: lo que la pieza "valía" antes de rebajarla.
+                "subtotal": str(subtotal_sum + price_discount),
+                "discount_amount": str(effective_discount),
                 "total": str(total),
                 "reason": body.discount_reason,
             },

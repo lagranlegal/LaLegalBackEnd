@@ -834,3 +834,79 @@ async def test_una_venta_solo_acepta_clientes_de_la_misma_empresa(
         assert await _ventas(sales_tenant["company_id"]) == 0
     finally:
         await _borrar_empresa(otra)
+
+
+# --------------------------------------------------------------------------
+# F6-05 (27/09/2026): vender por debajo del precio publicado es un descuento
+# --------------------------------------------------------------------------
+def _venta_a(tenant: dict, precio: str, **extra: object) -> dict:
+    return {
+        "payment_method": "cash",
+        "lines": [{"item_id": str(tenant["item_id"]), "quantity": 1, "unit_price": precio}],
+        **extra,
+    }
+
+
+async def test_vender_debajo_del_precio_exige_permiso_de_descuento(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=sales_tenant["company_id"], register_id=sales_tenant["register_id"]
+    )
+    # El producto se publica a 500.000 (fixture).
+    denegada = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "1.00", discount_reason="precio especial"),
+    )
+    assert denegada.status_code == 403, denegada.text
+    assert denegada.json()["code"] == "PERMISSION_DENIED"
+    assert denegada.json()["details"]["permission"] == "sales.apply_discount"
+    assert await _ventas(sales_tenant["company_id"]) == 0
+
+    # Por encima del precio publicado es libre, aun sin el permiso.
+    arriba = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "550000.00"),
+    )
+    assert arriba.status_code == 201, arriba.text
+    assert arriba.json()["total"] == "550000.00"
+
+
+async def test_vender_debajo_del_precio_exige_motivo_y_queda_auditado(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=sales_tenant["company_id"], register_id=sales_tenant["register_id"]
+    )
+    sin_motivo = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "450000.00"),
+    )
+    assert sin_motivo.status_code == 400, sin_motivo.text
+    assert sin_motivo.json()["code"] == "BAD_REQUEST"
+    assert sin_motivo.json()["details"]["price_discount"] == "50000.00"
+
+    venta = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "450000.00", discount_reason="cliente frecuente"),
+    )
+    assert venta.status_code == 201, venta.text
+    assert venta.json()["total"] == "450000.00"
+
+    async with AsyncSessionLocal() as session:
+        after = (
+            await session.execute(
+                text(
+                    "select after from public.audit_log where company_id = :cid "
+                    "and action = 'apply_sale_discount' and entity_id = :sid"
+                ),
+                {"cid": str(sales_tenant["company_id"]), "sid": venta.json()["id"]},
+            )
+        ).scalar_one()
+    assert after["price_discount"] == "50000.00"
+    assert after["discount_reason"] == "cliente frecuente"
+    assert after["below_price_lines"][0]["sale_price"] == "500000.00"

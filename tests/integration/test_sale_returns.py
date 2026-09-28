@@ -151,11 +151,15 @@ async def returns_tenant(
             ),
             {"id": str(cat3), "cid": str(company_id), "parent": str(cat2)},
         )
+        # Precio publicado 300.000: el MENOR con que venden los tests de este
+        # archivo. Desde F6-05 vender por debajo del precio publicado es un
+        # descuento (permiso + motivo), y acá lo que se prueba son las
+        # devoluciones, no el descuento.
         await session.execute(
             text(
                 "insert into public.product "
                 "(id, company_id, code, name, cat1_id, cat2_id, cat3_id, sale_price) "
-                "values (:id, :cid, 'JOC0001', 'Cadena de oro', :cat1, :cat2, :cat3, 500000)"
+                "values (:id, :cid, 'JOC0001', 'Cadena de oro', :cat1, :cat2, :cat3, 300000)"
             ),
             {
                 "id": str(product_id),
