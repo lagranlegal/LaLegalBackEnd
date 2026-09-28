@@ -90,8 +90,9 @@ la consolidación la hace el orquestador.
 | 1 | ✅ 27/09 — cinco informes; ~95 sospechas. Confirmados en código por el orquestador: **P0-1** (CRÍTICO, seguridad — detalle fuera del repo), **B-01** (abono ignora la cuenta elegida), **B-04** (liquidación con caja cerrada no registra nada), **multiplyMoney** con cantidades fraccionarias; y los permisos base viven solo en `seed.sql` (prod) |
 | 2 | ✅ 27/09 — `scripts/qa/lab_zzai.py` (`9f463e3`): 8 empresas `ZZ AI — *` (Identidad A/B, Contratos, Caja, Inventario, Reportes, Documentos, UI), 83 usuarios activos (en Identidad A, un rol por cada uno de los 43 permisos), catálogo con herencia, 5 cuentas (cash, 2 bank, settlement, vault) y 3 clientes ficticios por empresa. `--verificar` en verde. Credenciales fuera del workspace (el repo es público). Contraseña vieja de QA retirada y rotada |
 | 3–6 | ✅ 27/09 — ola 2 en paralelo, una empresa ZZ AI por frente. Identidad: matriz 48 actores × 127 endpoints = 6096 checks sin discrepancias, 0 fugas por id entre empresas. Contratos, caja e inventario: el patrón sistémico es la **concurrencia** (solo `sales` y `notifications` usan `FOR UPDATE`): doble cobro, dos sucesores, cuentas sobregiradas, doble pago de factura, idempotencia exigida e ignorada. Hallazgos con reproducción en los informes de la ola |
-| — | ⏳ Tanda de arreglos: A (back, concurrencia e idempotencia) y D (front) en curso; B (back, permisos, reglas, reportes y errores) después de A |
-| 12, 13 | ⏳ en curso (guía de usuario; `PRODUCCION.md`) |
+| — | ✅ Tanda de arreglos (commits locales, 21 back + 18 front): A concurrencia e idempotencia (+00061), B permisos/Storage (+00062)/referencias entre empresas/decisiones de Mateo/reportes/errores 500, D y E front. Back 867 tests, front 495 |
+| 12 | ✅ guía revisada (54 errores corregidos); se publica tras desplegar |
+| 13 | ✅ `PRODUCCION.md` |
 | 7–11, 14–16 | pendiente |
 
 ## Hallazgos confirmados en la fase 1
