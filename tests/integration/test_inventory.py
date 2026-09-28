@@ -1597,7 +1597,7 @@ def test_inventory_valuation_counts_only_available(
     # La utilidad potencial es la diferencia — lo que se ganaría vendiendo todo
     # hoy. NO forma parte del valor del inventario.
     assert Decimal(body["potential_profit"]) == Decimal("160000.00")
-    assert body["units"] == 2
+    assert Decimal(body["units"]) == 2  # Decimal desde F6-02 (gramos)
     assert body["by_category"], "desglosado por categoría de primer nivel"
 
 
