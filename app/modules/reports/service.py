@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
 from app.common.tenant_time import today_in
-from app.core.errors import AppError
+from app.core.errors import InvalidDateRangeError
 from app.modules.platform import integration as platform_integration
 from app.modules.reports import repository
 from app.modules.reports.schemas import (
@@ -146,6 +146,28 @@ async def get_closings_breakdown(
 _MAX_PROFIT_RANGE_DAYS = 366
 
 
+def _validate_range(from_date: date, to_date: date, *, max_days: int | None = None) -> None:
+    """Una sola regla de rango para todos los reportes por período (F7-14,
+    auditoría fase 7): el estado de resultados —y `capital/position`, que lo
+    llama— aceptaba un rango invertido y respondía 200 con todo en cero, un
+    «no hubo nada» que no es cierto. Y los dos que sí lo rechazaban lo hacían
+    con el 400 genérico, indistinguible de cualquier otra falla.
+
+    El tope de días es por endpoint y OPCIONAL: `capital/position` pide la
+    utilidad «desde siempre» y es una sola consulta agregada."""
+    details = {"from_date": str(from_date), "to_date": str(to_date)}
+    if from_date > to_date:
+        raise InvalidDateRangeError(
+            "La fecha inicial no puede ser posterior a la final.", details=details
+        )
+    if max_days is not None and (to_date - from_date).days > max_days:
+        raise InvalidDateRangeError(
+            f"El rango no puede superar {max_days} días.",
+            details={**details, "max_days": max_days},
+            code="DATE_RANGE_TOO_LONG",
+        )
+
+
 async def get_profit_summary(
     db: AsyncSession, *, company_id: UUID, from_date: date, to_date: date
 ) -> ProfitSummaryOut:
@@ -154,13 +176,7 @@ async def get_profit_summary(
     consulta agregada en Postgres, así que un rango de un año no cuesta más
     que uno de un día.
     """
-    if from_date > to_date:
-        raise AppError("`from_date` no puede ser posterior a `to_date`.")
-    if (to_date - from_date).days > _MAX_PROFIT_RANGE_DAYS:
-        raise AppError(
-            f"El rango no puede superar {_MAX_PROFIT_RANGE_DAYS} días.",
-            details={"from_date": str(from_date), "to_date": str(to_date)},
-        )
+    _validate_range(from_date, to_date, max_days=_MAX_PROFIT_RANGE_DAYS)
 
     tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
     row = await repository.profit_summary(
@@ -208,13 +224,7 @@ async def get_profit_summary(
 async def get_pawn_performance(
     db: AsyncSession, *, company_id: UUID, from_date: date, to_date: date
 ) -> PawnPerformanceOut:
-    if from_date > to_date:
-        raise AppError("`from_date` no puede ser posterior a `to_date`.")
-    if (to_date - from_date).days > _MAX_PROFIT_RANGE_DAYS:
-        raise AppError(
-            f"El rango no puede superar {_MAX_PROFIT_RANGE_DAYS} días.",
-            details={"from_date": str(from_date), "to_date": str(to_date)},
-        )
+    _validate_range(from_date, to_date, max_days=_MAX_PROFIT_RANGE_DAYS)
 
     tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
     row = await repository.pawn_performance(
@@ -370,6 +380,7 @@ async def get_income_statement(
     que se vuelve activo, y se convierte en gasto cuando se VENDE, momento en
     el que ya está contado en `cost_of_goods_sold`.
     """
+    _validate_range(from_date, to_date)
     tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
 
     tienda = await repository.profit_summary(

@@ -109,6 +109,17 @@ class NoOpenCashSessionError(NotFoundError):
     code = "CASH_SESSION_NOT_OPEN"
 
 
+class InvalidDateRangeError(AppError):
+    """Un reporte por período con `from_date` posterior a `to_date`, o más
+    largo que el tope del endpoint (F7-14). 422 con código propio y no el 400
+    genérico: el front tiene que poder decir «el rango está al revés» en vez
+    de «algo falló», y un rango invertido que responde 200 con ceros afirma
+    un período vacío que no existe."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "INVALID_DATE_RANGE"
+
+
 class PaymentPartialInterestRejectedError(AppError):
     status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
     code = "PAYMENT_PARTIAL_INTEREST_REJECTED"

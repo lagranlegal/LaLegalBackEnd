@@ -557,14 +557,43 @@ def test_profit_summary_rejects_inverted_and_huge_ranges(
         headers=headers,
         params={"from_date": "2026-08-10", "to_date": "2026-08-01"},
     )
-    assert inverted.status_code == 400
+    assert inverted.status_code == 422
+    assert inverted.json()["code"] == "INVALID_DATE_RANGE"
 
     huge = client.get(
         "/api/v1/reports/profit",
         headers=headers,
         params={"from_date": "2020-01-01", "to_date": "2026-01-01"},
     )
-    assert huge.status_code == 400
+    assert huge.status_code == 422
+    assert huge.json()["code"] == "DATE_RANGE_TOO_LONG"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/reports/profit",
+        "/api/v1/reports/pawn-performance",
+        "/api/v1/reports/income-statement",
+    ],
+)
+def test_rango_invertido_es_422_con_codigo_en_todos_los_reportes(
+    client: TestClient, reports_tenant: dict, path: str
+) -> None:
+    """F7-14 (auditoría fase 7, 28/09/2026): `income-statement` —y por él
+    `capital/position`— aceptaba `from=2026-09-28, to=2026-01-01` y respondía
+    200 con todo en cero: un «no hubo nada» falso. `/profit` y
+    `/pawn-performance` sí lo rechazaban, pero con el 400 genérico. Ahora los
+    tres responden lo mismo: 422 con un código que el front distingue.
+
+    El tope de 366 días NO se extiende al estado de resultados: `capital/
+    position` lo pide «desde siempre» y es una sola consulta agregada."""
+    headers = {"Authorization": f"Bearer {reports_tenant['token']}"}
+    inverted = client.get(
+        path, headers=headers, params={"from_date": "2026-09-28", "to_date": "2026-01-01"}
+    )
+    assert inverted.status_code == 422, inverted.text
+    assert inverted.json()["code"] == "INVALID_DATE_RANGE"
 
 
 # ---- Rentabilidad del empeño (docs/PENDIENTES_BACKEND_INFRA.md #24.1, parte

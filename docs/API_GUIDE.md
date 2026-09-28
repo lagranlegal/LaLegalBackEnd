@@ -570,6 +570,8 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `SALE_ACCOUNT_NOT_SETTLED` | 400 | Devolución en efectivo sobre una venta cobrada por una cuenta `settlement` (Sistecrédito) todavía sin liquidar. |
 | `RETURN_TIME_LIMIT_EXCEEDED` | 400 | Devolución pasado `company.settings.return_window_days`, sin el permiso `sales.return_override_time_limit`. |
 | `CREDIT_NOTE_INSUFFICIENT_BALANCE` | 400 | `POST /sales` con `credit_note_id` cuyo saldo no alcanza el monto solicitado. |
+| `INVALID_DATE_RANGE` | 422 | Reporte por período (`/reports/profit`, `/pawn-performance`, `/income-statement`, `/capital/position`) con `from_date` posterior a `to_date`. Antes el estado de resultados y `capital/position` respondían 200 con todo en cero —un período vacío que no existe— y los otros dos, 400 genérico (F7-14). `details: {from_date, to_date}`. |
+| `DATE_RANGE_TOO_LONG` | 422 | `/reports/profit` o `/reports/pawn-performance` con más de 366 días (antes 400 genérico). El estado de resultados y `capital/position` no tienen tope. `details: {from_date, to_date, max_days}`. |
 | `IDEMPOTENCY_KEY_REQUIRED` | 400 | Falta el header `Idempotency-Key` en un endpoint de dinero. |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | Llegó un reintento con la misma `Idempotency-Key` **mientras la petición original seguía en vuelo** — el caso típico de un timeout. La original va a terminar bien: no repetir, consultar el resultado. Antes esta carrera devolvía `500` (auditoría de QA, Fase 10). |
 | `VALIDATION_ERROR` | 422 | Body no cumple el schema Pydantic — `details.errors` trae el detalle campo por campo. |

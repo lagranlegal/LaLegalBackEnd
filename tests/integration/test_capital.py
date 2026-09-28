@@ -458,6 +458,18 @@ def test_la_posicion_dice_donde_esta_la_plata(client: TestClient, capital_tenant
     )
 
 
+def test_la_posicion_rechaza_un_rango_invertido(client: TestClient, capital_tenant: dict) -> None:
+    """F7-14: con `from` posterior a `to` respondía 200 con utilidad, aportes
+    y retiros en cero — un período vacío que no existe. Ahora 422 con código."""
+    r = client.get(
+        "/api/v1/capital/position",
+        headers=_read(capital_tenant["token"]),
+        params={"from_date": "2026-09-28", "to_date": "2026-01-01"},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["code"] == "INVALID_DATE_RANGE"
+
+
 def test_retirar_sin_utilidad_avisa_pero_no_bloquea(
     client: TestClient, capital_tenant: dict
 ) -> None:
