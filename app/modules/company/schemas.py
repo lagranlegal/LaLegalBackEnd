@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.common.nulls import no_null
+
 
 class DocumentSettingsOut(BaseModel):
     """Textos configurables de los documentos imprimibles (contrato, acta de
@@ -62,6 +64,8 @@ class CompanySettingsUpdateIn(BaseModel):
     signature_url: str | None = None
     documents: DocumentSettingsIn | None = None
     return_window_days: int | None = Field(default=None, ge=0)
+
+    _no_null = no_null("name", "return_window_days")
 
 
 DocumentType = Literal["contract", "settlement"]

@@ -1,10 +1,13 @@
-from typing import Any
+import logging
+from typing import Any, NamedTuple
 
 from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+
+logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
@@ -150,6 +153,65 @@ def _error_response(
     )
 
 
+class _UniqueCode(NamedTuple):
+    code: str
+    message: str
+
+
+#: Índices/constraints UNIQUE que tienen un nombre de negocio propio. La
+#: clave es el nombre en Postgres; se lee de la excepción de asyncpg, no se
+#: busca en el texto del mensaje. `code=` con nombre a propósito: así lo ve
+#: `tests/unit/test_error_catalog.py` y exige su fila en API_GUIDE §15.
+_UNIQUE_CODES: dict[str, _UniqueCode] = {
+    "role_company_id_name_key": _UniqueCode(
+        code="ROLE_NAME_TAKEN", message="Ya existe un rol con ese nombre."
+    ),
+    "account_company_id_name_key": _UniqueCode(
+        code="ACCOUNT_NAME_TAKEN", message="Ya existe una cuenta con ese nombre."
+    ),
+    "expense_category_company_id_name_key": _UniqueCode(
+        code="EXPENSE_CATEGORY_NAME_TAKEN",
+        message="Ya existe una categoría de gasto con ese nombre.",
+    ),
+    "category_company_id_parent_id_name_key": _UniqueCode(
+        code="CATEGORY_NAME_TAKEN",
+        message="Ya existe una categoría con ese nombre en ese nivel.",
+    ),
+}
+
+_UNIQUE_VIOLATION = "23505"
+_NOT_NULL_VIOLATION = "23502"
+_CHECK_VIOLATION = "23514"
+
+
+def _pg_error(exc: Exception) -> tuple[str | None, Any]:
+    """`(sqlstate, excepción de asyncpg)` detrás de la de SQLAlchemy. El
+    adaptador de asyncpg copia el `sqlstate` en `exc.orig`, y la original —con
+    `constraint_name`, `column_name`— queda como su `__cause__`."""
+    orig = getattr(exc, "orig", None)
+    return getattr(orig, "sqlstate", None), getattr(orig, "__cause__", None)
+
+
+def _db_validation_error(message: str, **ctx: Any) -> JSONResponse:
+    """Un valor que la BASE rechazó por inválido (CHECK, NOT NULL, fuera de
+    rango) es un error de validación como cualquier otro: 422 con el mismo
+    `code` y la misma forma que los de Pydantic, así el front no necesita
+    un segundo camino."""
+    error: dict[str, Any] = {
+        "loc": ["body", ctx["column"]] if ctx.get("column") else ["body"],
+        "msg": message,
+        "type": ctx.pop("type"),
+    }
+    if ctx:
+        error["ctx"] = ctx
+    return _error_response(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        "VALIDATION_ERROR",
+        "Los datos enviados no son válidos.",
+        {"errors": [error]},
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
@@ -210,7 +272,52 @@ def register_exception_handlers(app: FastAPI) -> None:
                 {},
             )
 
+        # Lo que sigue lo traduce por SQLSTATE y nombre de constraint (F5-04,
+        # F3-04, F3-05; auditoría 27/09/2026). La validación de primera línea
+        # es Pydantic (`PositiveMoney`, `Quantity`, `Reason`, rangos); esto es
+        # la red para lo que solo la base puede ver —un nombre repetido— o
+        # para un campo que se escape de esa validación. En todos los casos
+        # el valor lo mandó el cliente, así que el error es suyo: 409 o 422
+        # con envelope, nunca un 500 en texto plano. Se registra igual, para
+        # que un campo sin validar en el schema no pase inadvertido.
+        sqlstate, pg = _pg_error(exc)
+        constraint = getattr(pg, "constraint_name", None)
+        if sqlstate == _UNIQUE_VIOLATION:
+            code, message = _UNIQUE_CODES.get(
+                constraint or "",
+                _UniqueCode(code="CONFLICT", message="Ya existe un registro con esos datos."),
+            )
+            return _error_response(
+                status.HTTP_409_CONFLICT, code, message, {"constraint": constraint}
+            )
+        if sqlstate == _NOT_NULL_VIOLATION:
+            column = getattr(pg, "column_name", None)
+            logger.warning("NOT NULL violado por el cuerpo de la petición: %s", column)
+            return _db_validation_error(
+                "Este campo no puede quedar vacío.", type="not_null", column=column
+            )
+        if sqlstate == _CHECK_VIOLATION:
+            logger.warning("CHECK violado por el cuerpo de la petición: %s", constraint)
+            return _db_validation_error(
+                "Un valor está fuera de lo permitido.", type="check", constraint=constraint
+            )
+
         raise exc
+
+    @app.exception_handler(DBAPIError)
+    async def handle_data_error(_request: Request, exc: DBAPIError) -> JSONResponse:
+        """Clase 22 de SQLSTATE ("data exception"): un valor que no cabe en la
+        columna —`numeric(5,2)` con 1000, F3-06— o que no se puede convertir.
+        Mismo criterio que arriba: 422, no 500. El adaptador de asyncpg no la
+        sube como `DataError` sino como `DBAPIError`, así que se mira el
+        `sqlstate`; cualquier otra clase sigue subiendo como 500."""
+        sqlstate, _pg = _pg_error(exc)
+        if not (sqlstate or "").startswith("22"):
+            raise exc
+        logger.warning("Valor rechazado por la base: sqlstate=%s", sqlstate)
+        return _db_validation_error(
+            "Un valor no cabe en el formato permitido.", type="data", sqlstate=sqlstate
+        )
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(

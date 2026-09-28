@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.common.money import Money
+from app.common.money import Money, Quantity
 from app.modules.inventory.units import ProductUnit
 
 #: De dónde salió la mercancía. Cada uno se costea y se reporta distinto, así
@@ -92,7 +92,7 @@ class EntryLineIn(BaseModel):
     unit_cost: Money
     #: Cuánto entró. Decimal desde 00036 (gramos, metros). El servicio la
     #: valida contra la unidad del producto: `unit` no admite fracciones.
-    quantity: Decimal = Field(default=Decimal("1"), gt=0)
+    quantity: Quantity = Decimal("1")
     #: Unidad del producto — solo se usa cuando la línea CREA el producto; si
     #: ya existe, se conserva la suya (cambiarla reinterpretaría su stock).
     unit: ProductUnit = "unit"
@@ -159,7 +159,7 @@ class EntryPayIn(BaseModel):
 
 class ExitLineIn(BaseModel):
     item_id: UUID
-    quantity: Decimal = Field(gt=0)
+    quantity: Quantity
 
 
 class ExitCreateIn(BaseModel):
@@ -254,7 +254,7 @@ class TransformationInputLineIn(BaseModel):
     """Un artículo que se CONSUME. Deja de existir como tal."""
 
     item_id: UUID
-    quantity: Decimal = Field(gt=0)
+    quantity: Quantity
 
 
 class TransformationOutputLineIn(BaseModel):
@@ -270,7 +270,7 @@ class TransformationOutputLineIn(BaseModel):
     cat2_id: UUID
     cat3_id: UUID
     description: str | None = None
-    quantity: Decimal = Field(gt=0)
+    quantity: Quantity
     unit: ProductUnit = "unit"
     photos: list[str] = Field(default_factory=list)
     sale_price: Money | None = None

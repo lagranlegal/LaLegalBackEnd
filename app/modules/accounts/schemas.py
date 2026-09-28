@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.common.money import PositiveMoney
+
 AccountType = Literal["cash", "bank", "settlement", "vault"]
 
 #: Efectivo físico: se verifica CONTÁNDOLO, no conciliando un extracto.
@@ -52,7 +54,7 @@ class AccountCreateIn(BaseModel):
     #: Lo que ya había en esa cuenta antes de empezar a usar el sistema. Sin
     #: esto el saldo arrancaría en cero y quedaría negativo con el primer
     #: egreso — que fue justo el bug que motivó 00025.
-    opening_balance: Decimal = Decimal("0")
+    opening_balance: Decimal = Field(default=Decimal("0"), max_digits=14, decimal_places=2)
 
 
 class AccountUpdateIn(BaseModel):
@@ -79,9 +81,9 @@ class SettlementIn(BaseModel):
     #: Cuenta donde entró la plata — normalmente la bancaria.
     to_account_id: UUID
     #: Lo que realmente consignaron.
-    amount_received: Decimal = Field(gt=0)
+    amount_received: PositiveMoney
     #: Cuánto de lo pendiente cubre esta liquidación.
-    amount_settled: Decimal = Field(gt=0)
+    amount_settled: PositiveMoney
     notes: str | None = None
 
 
@@ -107,7 +109,7 @@ class TransferIn(BaseModel):
 
     from_account_id: UUID
     to_account_id: UUID
-    amount: Decimal = Field(gt=0)
+    amount: PositiveMoney
     #: Cuándo se movió la plata. Por defecto hoy; nunca futura.
     transfer_date: date | None = None
     notes: str | None = None

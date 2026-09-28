@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from app.common.money import Money
+from app.common.money import Money, PositiveMoney
 
 PaymentMethod = Literal["cash", "transfer", "other"]
 CashModule = Literal["pawn", "store", "general"]
@@ -98,7 +98,7 @@ class ExpenseCreateIn(BaseModel):
     account_id: UUID | None = None
     category_id: UUID
     description: str
-    amount: Money
+    amount: PositiveMoney
     payment_method: PaymentMethod
     module: CashModule = "general"
     receipt_url: str | None = None

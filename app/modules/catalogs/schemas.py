@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, Field
 
+from app.common.nulls import no_null
+
 AppliesTo = Literal["pawn", "store", "both"]
 DocType = Literal["cc", "ce", "passport", "nit"]
 
@@ -60,24 +62,34 @@ CodeLetter = Annotated[str, Field(min_length=1, max_length=3), AfterValidator(_n
 SupplierCodeLetter = Annotated[CodeLetter, AfterValidator(_letra_de_proveedor)]
 
 
+#: Rangos de los parámetros de préstamo de una categoría (F3-06, auditoría
+#: 27/09/2026). `null` sigue siendo válido y significa "hereda del padre";
+#: lo que no vale es un plazo de 0 o negativo, ni un LTV negativo o mayor
+#: que 100 % (la columna es `numeric(5,2)` y 1000 no cabe).
+TermMonths = Annotated[int, Field(ge=1)]
+LtvPct = Annotated[Decimal, Field(gt=0, le=100, max_digits=5, decimal_places=2)]
+
+
 class CategoryCreateIn(BaseModel):
     parent_id: UUID | None = None
-    name: str
+    name: str = Field(min_length=1)
     code_letter: CodeLetter
     applies_to: AppliesTo = "both"
-    default_term_months: int | None = None
-    arrears_window_months: int | None = None
-    max_ltv_pct: Decimal | None = None
+    default_term_months: TermMonths | None = None
+    arrears_window_months: TermMonths | None = None
+    max_ltv_pct: LtvPct | None = None
 
 
 class CategoryUpdateIn(BaseModel):
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1)
     code_letter: CodeLetter | None = None
     applies_to: AppliesTo | None = None
-    default_term_months: int | None = None
-    arrears_window_months: int | None = None
-    max_ltv_pct: Decimal | None = None
+    default_term_months: TermMonths | None = None
+    arrears_window_months: TermMonths | None = None
+    max_ltv_pct: LtvPct | None = None
     active: bool | None = None
+
+    _no_null = no_null("name", "code_letter", "applies_to", "active")
 
 
 class CategoryOut(BaseModel):

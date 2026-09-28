@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.common.money import Money
+from app.common.money import Money, PositiveMoney
 
 PaymentMethod = Literal["cash", "transfer", "other"]
 
@@ -36,7 +36,7 @@ class ContractCreateIn(BaseModel):
     #: medio de pago.
     account_id: UUID | None = None
     customer_id: UUID
-    principal: Money
+    principal: PositiveMoney
     interest_rate_pct: Decimal = Field(gt=0, le=100)
     appraisal_value: Money | None = None
     items: list[ContractItemIn] = Field(min_length=1)
@@ -77,8 +77,8 @@ class ContractImportIn(BaseModel):
 
     legacy_code: str
     customer_id: UUID
-    principal: Money
-    capital_balance: Decimal = Field(max_digits=14, decimal_places=2)
+    principal: PositiveMoney
+    capital_balance: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
     interest_rate_pct: Decimal = Field(gt=0, le=100)
     term_months: int
     arrears_window_months: int
@@ -132,7 +132,7 @@ class ContractExtendIn(BaseModel):
     """Lo que se entrega HOY. El capital viejo NO viaja: lo pone el backend
     desde el contrato que se está ampliando."""
 
-    amount: Money
+    amount: PositiveMoney
     payment_method: PaymentMethod
     account_id: UUID | None = None
 

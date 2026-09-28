@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.common.money import PositiveMoney
+
 
 class ContributionIn(BaseModel):
     """El dueño mete plata al negocio.
@@ -15,7 +17,7 @@ class ContributionIn(BaseModel):
     """
 
     account_id: UUID
-    amount: Decimal = Field(gt=0)
+    amount: PositiveMoney
     #: Cuándo entró la plata. Por defecto hoy; nunca futura.
     movement_date: date | None = None
     #: Opcional en el aporte y obligatorio en el retiro: meter plata al
@@ -33,7 +35,7 @@ class WithdrawalIn(BaseModel):
     """
 
     account_id: UUID
-    amount: Decimal = Field(gt=0)
+    amount: PositiveMoney
     movement_date: date | None = None
     #: Obligatorio. Un retiro sin motivo es la clase de línea que nadie
     #: puede explicar seis meses después, y es plata que salió del negocio.

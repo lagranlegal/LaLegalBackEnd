@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
+from app.common.nulls import no_null
+
 DocType = Literal["cc", "ce", "passport", "nit"]
 EmailBasis = Literal["contract", "consent"]
 EmailConsentSource = Literal["counter", "contract_form", "import"]
@@ -46,6 +48,8 @@ class CustomerCreateIn(BaseModel):
 
 
 class CustomerUpdateIn(BaseModel):
+    _no_null = no_null("full_name", "phone")
+
     full_name: str | None = None
     doc_issue_place: str | None = None
     address: str | None = None

@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
+from app.common.nulls import no_null
+
 
 class UserOut(BaseModel):
     id: UUID
@@ -71,13 +73,13 @@ class RoleOut(BaseModel):
 
 
 class RoleCreateIn(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
     description: str | None = None
     clone_from_role_id: UUID | None = None
 
 
 class RoleRenameIn(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
     description: str | None = None
 
 
@@ -118,6 +120,8 @@ class MeUpdateIn(BaseModel):
 
     full_name: str | None = Field(default=None, min_length=1, max_length=120)
     photo_url: str | None = None
+
+    _no_null = no_null("full_name")
 
 
 class MeCompanyOut(BaseModel):

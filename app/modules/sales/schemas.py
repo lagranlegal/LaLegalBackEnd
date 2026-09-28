@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.common.money import Money
+from app.common.money import Money, Quantity
 
 PaymentMethod = Literal["cash", "transfer", "other"]
 ReturnReason = Literal["defect", "change_of_mind", "other"]
@@ -17,7 +17,7 @@ class SaleLineIn(BaseModel):
     #: Decimal desde 00036: vender 12,5 g de oro o 3,25 m de cable. El
     #: servicio la valida contra la unidad del producto — si se mide en
     #: unidades, rechaza fracciones.
-    quantity: Decimal = Field(gt=0)
+    quantity: Quantity
     unit_price: Money
 
 
@@ -88,7 +88,7 @@ class VoidSaleIn(BaseModel):
 
 class SaleReturnLineIn(BaseModel):
     sale_line_id: UUID
-    quantity: Decimal = Field(gt=0)
+    quantity: Quantity
     #: Si la mercancía vuelve a inventario. `False` es una devolución
     #: puramente financiera: la pieza no regresa (se perdió, se dañó más
     #: allá de uso, o el negocio decide no reingresarla), pero el cliente
