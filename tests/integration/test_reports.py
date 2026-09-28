@@ -1808,3 +1808,118 @@ def test_F7_03_los_descuadres_de_arqueo_entran_al_resultado(
     assert Decimal(estado["operating_profit"]) == Decimal(
         antes_de_cerrar["operating_profit"]
     ) - Decimal("7000.00")
+
+
+async def test_F7_04_el_interes_capitalizado_en_el_remate_no_es_costo_de_ventas(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Reproducción de F7-04: un contrato de 800.000 rematado con meses de
+    interés adeudados queda en inventario a costo = capital + interés. Al
+    venderlo, el costo de ventas cargaba el interés como si fuera costo, y la
+    utilidad salía corta exactamente en ese interés — que nunca llegaba al
+    resultado por ningún otro lado.
+
+    Ahora la base de costo es el CAPITAL, el interés realizado se informa
+    aparte y la devolución con reingreso lo deshace entero."""
+    token = reports_tenant["token"]
+    client.post("/api/v1/cashbox/sessions/open", headers=_headers(token), json={})
+    contrato = client.post(
+        "/api/v1/contracts",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(reports_tenant["customer_id"]),
+            "principal": "800000.00",
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [
+                {
+                    "category_id": str(reports_tenant["category_id"]),
+                    "description": "Reloj",
+                    "photos": ["http://example.com/reloj.jpg"],
+                }
+            ],
+        },
+    )
+    assert contrato.status_code == 201, contrato.text
+    cid = contrato.json()["id"]
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text(
+                "update public.contract set interest_paid_until = interest_paid_until "
+                "- make_interval(months => 8) where company_id = :cid and id = :id"
+            ),
+            {"cid": str(reports_tenant["company_id"]), "id": cid},
+        )
+    client.get(f"/api/v1/contracts/{cid}", headers=_headers(token))
+    remate = client.post(
+        f"/api/v1/contracts/{cid}/auction", headers=_headers(token, idempotency_key=str(uuid4()))
+    )
+    assert remate.status_code == 200, remate.text
+    item_id = remate.json()["items"][0]["inventory_item_id"]
+    async with AsyncSessionLocal() as s:
+        costo, interes = (
+            await s.execute(
+                text("select cost, capitalized_interest from public.inventory_item where id = :i"),
+                {"i": item_id},
+            )
+        ).one()
+    assert interes > 0
+    assert costo - interes == Decimal("800000.00"), "el resto del costo es el capital"
+
+    publicado = client.post(
+        f"/api/v1/inventory/items/{item_id}/publish",
+        headers=_headers(token),
+        json={"sale_price": "1300000.00"},
+    )
+    assert publicado.status_code == 200, publicado.text
+    venta = _vender_uno(client, reports_tenant, item_id, unit_price="1300000.00")
+
+    hoy = date.today().isoformat()
+    utilidad = _profit(client, token, hoy, hoy)
+    assert utilidad["cost_of_goods_sold"] == "800000.00"
+    assert utilidad["auction_interest_realized"] == f"{interes:.2f}"
+    assert utilidad["gross_profit"] == "500000.00", "1.300.000 vendidos sobre 800.000 prestados"
+    estado = _estado(client, token)
+    assert estado["cost_of_goods_sold"] == "800000.00"
+    assert estado["auction_interest_realized"] == f"{interes:.2f}"
+
+    # Devuelta con reingreso: el costo sale entero y el interés se deshace.
+    _return_sale(
+        client, token, venta["id"], [{"sale_line_id": venta["lines"][0]["id"], "quantity": "1"}]
+    )
+    utilidad = _profit(client, token, hoy, hoy)
+    assert utilidad["cost_of_goods_sold"] == "0.00"
+    assert utilidad["auction_interest_realized"] == "0.00"
+    assert utilidad["gross_profit"] == "0.00"
+
+
+def test_F7_08_vender_bajo_el_precio_publicado_figura_como_descuento(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """Reproducción de F7-08: S3 se vendió a 400.000 contra 450.000
+    publicados. `/profit.discounts` decía 55.000 (solo cabecera) y el
+    descuento efectivo del día fue 105.000."""
+    token = reports_tenant["token"]
+    client.post("/api/v1/cashbox/sessions/open", headers=_headers(token), json={})
+    anillo = _ingresar_uno(client, reports_tenant, unit_cost="300000.00", unit_price="450000.00")
+    rebajado = client.post(
+        "/api/v1/sales",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "payment_method": "cash",
+            "discount_reason": "cliente frecuente",
+            "lines": [{"item_id": anillo, "quantity": "1", "unit_price": "400000.00"}],
+        },
+    )
+    assert rebajado.status_code == 201, rebajado.text
+    celular = _ingresar_uno(client, reports_tenant, unit_cost="600000.00", unit_price="800000.00")
+    _vender_uno(client, reports_tenant, celular, unit_price="800000.00", discount="55000.00")
+
+    hoy = date.today().isoformat()
+    utilidad = _profit(client, token, hoy, hoy)
+    assert utilidad["discounts"] == "55000.00", "la cabecera no cambia de significado"
+    assert utilidad["price_discounts"] == "50000.00"
+    assert utilidad["total_discounts"] == "105000.00"
+    # El neto no cambia: el subtotal ya venía rebajado.
+    assert utilidad["net_revenue"] == "1145000.00"
+    assert _estado(client, token)["sales_discounts"] == "105000.00"

@@ -300,7 +300,23 @@ async def profit_summary(
                   coalesce(sum(sl.subtotal), 0)                  as bruto,
                   -- Redondeado por línea, como el costo de lo devuelto: con
                   -- gramos, `costo × cantidad` trae milésimas.
-                  coalesce(sum(round(sl.unit_cost * sl.quantity, 2)), 0) as costo,
+                  --
+                  -- BASE DE COSTO = capital (F7-04, 00063): sin la parte de
+                  -- interés que el remate capitalizó en el costo. Ese interés
+                  -- nunca fue ingreso; dejarlo como costo achicaba la utilidad
+                  -- de la pieza justo en lo que el contrato rindió.
+                  coalesce(
+                    sum(round((sl.unit_cost - sl.unit_cost_interest) * sl.quantity, 2)), 0
+                  )                                              as costo,
+                  coalesce(sum(round(sl.unit_cost_interest * sl.quantity, 2)), 0)
+                                                                 as interes_remate,
+                  -- Descuento por vender bajo el precio PUBLICADO (F7-08), la
+                  -- misma fórmula que `sales.service._price_discount`.
+                  coalesce(sum(
+                    case when sl.list_price > sl.unit_price
+                         then round((sl.list_price - sl.unit_price) * sl.quantity, 2)
+                         else 0 end
+                  ), 0)                                          as descuento_precio,
                   coalesce(sum(sl.quantity), 0)                  as unidades
                 from public.sale_line sl
                 join ventas v on v.id = sl.sale_id
@@ -329,14 +345,25 @@ async def profit_summary(
                   -- el cliente recuperó su plata y la mercancía se perdió, así
                   -- que su costo sigue siendo costo —no hay inventario que lo
                   -- respalde— y la utilidad baja en ese monto.
+                  --
+                  -- Con la misma base de costo que la venta (F7-04): sin el
+                  -- interés capitalizado de un remate, que se lee de la LÍNEA
+                  -- de venta original.
                   coalesce(
-                    sum(round(srl.quantity * srl.unit_cost, 2)) filter (where srl.restock),
+                    sum(round(srl.quantity * (srl.unit_cost - osl.unit_cost_interest), 2))
+                      filter (where srl.restock),
                     0
                   )                                                         as costo,
+                  -- El interés del remate se deshace con TODA devolución, con
+                  -- o sin reingreso: la venta que lo realizaba ya no está.
+                  coalesce(sum(round(srl.quantity * osl.unit_cost_interest, 2)), 0)
+                                                                            as interes_remate,
                   coalesce(sum(ra.discount), 0)                             as descuento
                 from public.sale_return r
                 join public.sale_return_line srl
                   on srl.return_id = r.id and srl.company_id = r.company_id
+                join public.sale_line osl
+                  on osl.id = srl.sale_line_id and osl.company_id = srl.company_id
                 join public.sale s
                   on s.id = r.sale_id and s.company_id = r.company_id
                 join {return_line_amounts_sql(_SALES_WITH_RETURNS_IN_RANGE)} ra
@@ -351,6 +378,8 @@ async def profit_summary(
               lineas.bruto                                                 as gross_revenue,
               lineas.costo                                                 as cost_of_goods_sold,
               lineas.unidades                                              as units_sold,
+              lineas.descuento_precio                                      as price_discounts,
+              lineas.interes_remate - devoluciones.interes_remate          as auction_interest,
               devoluciones.return_count                                    as return_count,
               devoluciones.bruto                                           as returns_gross,
               devoluciones.descuento                                       as returns_discounts,

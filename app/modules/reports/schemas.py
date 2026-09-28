@@ -90,7 +90,22 @@ class ProfitSummaryOut(BaseModel):
     #: Suma de los subtotales de las líneas, antes de descuentos.
     gross_revenue: MoneyOut
     #: Descuentos aplicados a nivel de venta — menor ingreso, no un gasto.
+    #: Solo la CABECERA (`sale.discount_amount`); el total está abajo.
     discounts: MoneyOut
+    #: Descuento por vender bajo el precio PUBLICADO (F7-08): Σ
+    #: `max(list_price − unit_price, 0) × quantity` de las líneas. Ya está
+    #: dentro de `gross_revenue` (el subtotal viene rebajado), así que NO se
+    #: resta otra vez: es informativo. Las ventas anteriores a 00063 solo lo
+    #: tienen si quedó en la auditoría.
+    price_discounts: MoneyOut = Decimal("0.00")
+    #: `discounts + price_discounts`: todo lo que se dejó de cobrar sobre el
+    #: precio publicado. El número de «descuentos aplicados».
+    total_discounts: MoneyOut = Decimal("0.00")
+    #: Interés que el remate capitalizó en el costo de las piezas vendidas,
+    #: neto de devoluciones (F7-04). Ya está DENTRO de `gross_profit`: el
+    #: costo de ventas usa como base el capital prestado, no el costo con
+    #: interés. Informativo — no se suma otra vez.
+    auction_interest_realized: MoneyOut = Decimal("0.00")
     #: CONTRA-INGRESO por devoluciones (*devoluciones en ventas*), ya neto del
     #: descuento prorrateado de su venta original. Cae en el período de la
     #: DEVOLUCIÓN (`sale_return.return_date`), no en el de la venta: así un mes
@@ -101,9 +116,11 @@ class ProfitSummaryOut(BaseModel):
     #: `gross_revenue - discounts - sales_returns`: lo que realmente entró por
     #: ventas y se quedó adentro.
     net_revenue: MoneyOut
-    #: Costo congelado de lo vendido (`sale_line.unit_cost * quantity`), NETO
-    #: de `returns_cost`. Neto y no bruto a propósito: lo devuelto volvió al
-    #: inventario, así que dejar su costo acá lo contaría dos veces — una como
+    #: Costo congelado de lo vendido (`(sale_line.unit_cost −
+    #: unit_cost_interest) * quantity`: una pieza rematada cuesta el capital
+    #: prestado, no el interés capitalizado — F7-04), NETO de `returns_cost`.
+    #: Neto y no bruto a propósito: lo devuelto volvió al inventario, así
+    #: que dejar su costo acá lo contaría dos veces — una como
     #: costo de algo vendido y otra como mercancía disponible.
     cost_of_goods_sold: MoneyOut
     #: Costo de lo devuelto CON reingreso (`restock=true`), ya descontado de
@@ -341,6 +358,15 @@ class IncomeStatementOut(BaseModel):
     #: Descuentos de interés otorgados: interés que se dejó de cobrar. Erosiona
     #: el resultado del empeño pero no es un gasto.
     interest_discounts: MoneyOut
+    #: Descuentos de venta TOTALES (F7-08): cabecera + venta bajo el precio
+    #: publicado. Ya están restados de `sales_revenue`; informativo.
+    sales_discounts: MoneyOut = Decimal("0.00")
+    #: Interés del remate realizado al vender la pieza (F7-04), neto de
+    #: devoluciones. Ya está dentro de `gross_profit` porque
+    #: `cost_of_goods_sold` usa el capital como base de costo; informativo.
+    #: El interés que el contrato adeudaba al rematar se reconoce acá, cuando
+    #: la pieza se vende — no al rematar.
+    auction_interest_realized: MoneyOut = Decimal("0.00")
     #: Capital prestado y recuperado en el período. NO son gasto ni ingreso —
     #: es cartera moviéndose. Van acá para que nadie tenga que buscarlos en
     #: otra pantalla y concluir que faltan.

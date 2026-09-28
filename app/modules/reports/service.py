@@ -204,6 +204,7 @@ async def get_profit_summary(
         (gross_profit / net_revenue * 100).quantize(Decimal("0.01")) if net_revenue > 0 else None
     )
 
+    price_discounts = _dec(m["price_discounts"])
     return ProfitSummaryOut(
         from_date=from_date,
         to_date=to_date,
@@ -211,6 +212,9 @@ async def get_profit_summary(
         units_sold=m["units_sold"],
         gross_revenue=gross_revenue,
         discounts=discounts,
+        price_discounts=price_discounts,
+        total_discounts=discounts + price_discounts,
+        auction_interest_realized=_dec(m["auction_interest"]),
         sales_returns=returns,
         return_count=m["return_count"] or 0,
         net_revenue=net_revenue,
@@ -460,6 +464,8 @@ async def get_income_statement(
             (utilidad / ingresos * 100).quantize(Decimal("0.01")) if ingresos > 0 else None
         ),
         interest_discounts=_dec(e["interest_discounts"]),
+        sales_discounts=_dec(t["discounts"]) + _dec(t["price_discounts"]),
+        auction_interest_realized=_dec(t["auction_interest"]),
         capital_disbursed=_dec(e["capital_disbursed"]),
         capital_recovered=_dec(e["capital_recovered"]),
         inventory_purchased=compras,
