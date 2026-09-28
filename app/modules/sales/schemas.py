@@ -51,6 +51,15 @@ class SaleLineOut(BaseModel):
     # debe cambiar si alguien corrige el costo del artículo hoy.
     unit_cost: Decimal
     subtotal: Decimal
+    #: Precio PUBLICADO del producto al vender, congelado en la línea (00063,
+    #: F7-08). `null` en ventas anteriores a 00063 que no vendieron bajo el
+    #: precio, o si el producto no tenía precio publicado.
+    list_price: Decimal | None = None
+    #: `max(list_price − unit_price, 0) × quantity`: lo que se rebajó del
+    #: precio publicado en esta línea. Es un DESCUENTO —exige el mismo permiso
+    #: y motivo que `discount_amount`— y los reportes lo suman como tal. El
+    #: `subtotal` ya viene rebajado: esto NO se resta otra vez.
+    price_discount: Decimal = Decimal("0.00")
 
 
 class SaleOut(BaseModel):

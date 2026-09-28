@@ -74,3 +74,24 @@ def split_cost_by_appraisal(total: Decimal, appraisals: list[Decimal | None]) ->
 
     shares.append(total - sum(shares, Decimal("0")))
     return shares
+
+
+def split_capitalized_interest(interest: Decimal, costs: list[Decimal]) -> list[Decimal]:
+    """Reparte el interés capitalizado de un remate (F7-04) entre las piezas,
+    en proporción a su COSTO — que ya salió repartido por avalúo, así que es
+    el mismo reparto sin repetir la regla. La última absorbe el residuo del
+    redondeo para que la suma cuadre al centavo, como `split_cost_by_appraisal`.
+
+    Cada parte queda acotada a `[0, costo]`: la base es un CHECK de 00063, y
+    el interés de una pieza nunca puede ser más que lo que la pieza costó.
+    """
+    if not costs:
+        return []
+    total = sum(costs, Decimal("0"))
+    if interest <= 0 or total <= 0:
+        return [Decimal("0.00") for _ in costs]
+    shares = [quantize(interest * c / total) for c in costs[:-1]]
+    shares.append(interest - sum(shares, Decimal("0")))
+    return [
+        min(max(share, Decimal("0.00")), cost) for share, cost in zip(shares, costs, strict=True)
+    ]

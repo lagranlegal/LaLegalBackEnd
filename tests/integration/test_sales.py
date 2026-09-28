@@ -910,3 +910,97 @@ async def test_vender_debajo_del_precio_exige_motivo_y_queda_auditado(
     assert after["price_discount"] == "50000.00"
     assert after["discount_reason"] == "cliente frecuente"
     assert after["below_price_lines"][0]["sale_price"] == "500000.00"
+
+
+# --------------------------------------------------------------------------
+# F7-08 (auditoría fase 7, 28/09/2026): el precio publicado se congela en la
+# línea y la respuesta expone el descuento por precio.
+# --------------------------------------------------------------------------
+async def test_la_linea_expone_el_precio_publicado_y_el_descuento_por_precio(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=sales_tenant["company_id"], register_id=sales_tenant["register_id"]
+    )
+    venta = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "450000.00", discount_reason="cliente frecuente"),
+    )
+    assert venta.status_code == 201, venta.text
+    linea = venta.json()["lines"][0]
+    assert linea["list_price"] == "500000.00"
+    assert linea["price_discount"] == "50000.00"
+
+    # Por encima del precio publicado no hay descuento.
+    arriba = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "550000.00"),
+    ).json()["lines"][0]
+    assert arriba["list_price"] == "500000.00"
+    assert arriba["price_discount"] == "0.00"
+
+
+# --------------------------------------------------------------------------
+# Venta bajo COSTO (decisión del dueño, fase 7): una línea por debajo del
+# costo de su lote exige `sales.apply_discount` y queda auditada, aunque no
+# esté por debajo del precio publicado (un producto publicado bajo costo).
+# --------------------------------------------------------------------------
+async def test_vender_bajo_costo_exige_permiso_y_queda_auditado(
+    client: TestClient, sales_tenant: dict
+) -> None:
+    await _open_cash_session(
+        company_id=sales_tenant["company_id"], register_id=sales_tenant["register_id"]
+    )
+    # El lote costó 300.000 (fixture); se publica a 250.000.
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.product set sale_price = 250000 where company_id = :cid"),
+            {"cid": str(sales_tenant["company_id"])},
+        )
+
+    denegada = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "250000.00"),
+    )
+    assert denegada.status_code == 403, denegada.text
+    assert denegada.json()["code"] == "SALE_BELOW_COST_REQUIRES_PERMISSION"
+    assert denegada.json()["details"]["permission"] == "sales.apply_discount"
+    assert denegada.json()["details"]["below_cost_lines"][0]["unit_cost"] == "300000.00"
+    assert await _ventas(sales_tenant["company_id"]) == 0
+
+    # Al costo exacto es libre: no se pierde nada.
+    al_costo = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["limited_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "300000.00"),
+    )
+    assert al_costo.status_code == 201, al_costo.text
+
+    venta = client.post(
+        "/api/v1/sales",
+        headers=_headers(sales_tenant["full_token"], idempotency_key=str(uuid4())),
+        json=_venta_a(sales_tenant, "250000.00"),
+    )
+    assert venta.status_code == 201, venta.text
+    async with AsyncSessionLocal() as session:
+        after = (
+            await session.execute(
+                text(
+                    "select after from public.audit_log where company_id = :cid "
+                    "and action = 'create_sale' and entity_id = :sid"
+                ),
+                {"cid": str(sales_tenant["company_id"]), "sid": venta.json()["id"]},
+            )
+        ).scalar_one()
+    assert after["below_cost_lines"] == [
+        {
+            "item_id": str(sales_tenant["item_id"]),
+            "unit_cost": "300000.00",
+            "unit_price": "250000.00",
+            "quantity": "1.000",
+            "loss": "50000.00",
+        }
+    ]

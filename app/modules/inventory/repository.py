@@ -23,7 +23,7 @@ _ITEM_COLUMNS = (
     "i.id, i.code, p.name, p.cat1_id, p.cat2_id, p.cat3_id, p.description, "
     "i.origin, i.supplier_id, i.source_contract_id, i.source_transformation_id, "
     "i.source_return_id, "
-    "i.cost, p.sale_price, "
+    "i.cost, i.capitalized_interest, p.sale_price, "
     "i.quantity, p.unit, "
     "i.status, "
     "case when jsonb_array_length(i.photos) > 0 then i.photos else p.photos end as photos, "
@@ -69,6 +69,7 @@ async def insert_item(
     entry_date: date | None = None,
     source_transformation_id: UUID | None = None,
     source_return_id: UUID | None = None,
+    capitalized_interest: Decimal = Decimal("0"),
 ) -> None:
     """Un lote. Desde 00022 no lleva nombre ni categoría ni precio: eso es del
     producto, y por eso `product_id` es obligatorio al insertar — un lote sin
@@ -93,12 +94,13 @@ async def insert_item(
             insert into public.inventory_item
                 (id, company_id, product_id, lot_number, origin,
                  supplier_id, source_contract_id, cost, quantity, photos, created_by,
-                 entry_date, source_transformation_id, source_return_id)
+                 entry_date, source_transformation_id, source_return_id,
+                 capitalized_interest)
             values
                 (:id, :company_id, :product_id, :lot_number, :origin,
                  :supplier_id, :source_contract_id, :cost, :quantity, cast(:photos as jsonb),
                  :created_by, coalesce(:entry_date, current_date), :source_transformation_id,
-                 :source_return_id)
+                 :source_return_id, :capitalized_interest)
             """
         ),
         {
@@ -112,6 +114,7 @@ async def insert_item(
             "cost": cost,
             "quantity": quantity,
             "photos": json.dumps(photos),
+            "capitalized_interest": capitalized_interest,
             "created_by": str(created_by) if created_by else None,
             "entry_date": entry_date,
             "source_transformation_id": (

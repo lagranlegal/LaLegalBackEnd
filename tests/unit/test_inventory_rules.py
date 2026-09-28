@@ -4,6 +4,7 @@ from app.modules.inventory.rules import (
     build_code,
     build_lot_code,
     build_product_code,
+    split_capitalized_interest,
     split_cost_by_appraisal,
 )
 
@@ -101,3 +102,24 @@ def test_two_lots_of_the_same_product_share_the_sku() -> None:
     a = build_lot_code(product_code="JAO0007", lot_number=1, suffix_letter="I")
     b = build_lot_code(product_code="JAO0007", lot_number=2, suffix_letter="M")
     assert a.split("-")[0] == b.split("-")[0] == "JAO0007"
+
+
+class TestSplitCapitalizedInterest:
+    """F7-04: la parte de interés del costo de cada pieza rematada."""
+
+    def test_una_pieza_lleva_todo_el_interes(self) -> None:
+        assert split_capitalized_interest(Decimal("200000"), [Decimal("1000000")]) == [
+            Decimal("200000")
+        ]
+
+    def test_varias_piezas_en_proporcion_al_costo_y_cuadra_al_centavo(self) -> None:
+        costos = [Decimal("333333.33"), Decimal("333333.33"), Decimal("333333.34")]
+        partes = split_capitalized_interest(Decimal("100000.00"), costos)
+        assert partes[:2] == [Decimal("33333.33"), Decimal("33333.33")]
+        assert sum(partes) == Decimal("100000.00")
+
+    def test_sin_interes_todo_es_cero(self) -> None:
+        assert split_capitalized_interest(Decimal("0"), [Decimal("5"), Decimal("7")]) == [
+            Decimal("0.00"),
+            Decimal("0.00"),
+        ]

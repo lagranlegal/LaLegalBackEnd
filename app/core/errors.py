@@ -120,6 +120,15 @@ class InvalidDateRangeError(AppError):
     code = "INVALID_DATE_RANGE"
 
 
+class SaleBelowCostRequiresPermissionError(PermissionDeniedError):
+    """Una línea de venta con `unit_price` por debajo del COSTO de su lote,
+    sin `sales.apply_discount` (decisión del dueño, auditoría fase 7). Es un
+    403 propio y no `PERMISSION_DENIED` a secas porque el front tiene que
+    poder decir «esta venta pierde plata» en vez de «no tiene permiso»."""
+
+    code = "SALE_BELOW_COST_REQUIRES_PERMISSION"
+
+
 class PaymentPartialInterestRejectedError(AppError):
     status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
     code = "PAYMENT_PARTIAL_INTEREST_REJECTED"

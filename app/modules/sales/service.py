@@ -15,6 +15,7 @@ from app.core.errors import (
     ConflictError,
     NotFoundError,
     PermissionDeniedError,
+    SaleBelowCostRequiresPermissionError,
 )
 from app.core.security import CurrentUser, has_permission
 from app.modules.accounts import integration as accounts_integration
@@ -65,6 +66,18 @@ def _row_to_sale(
     )
 
 
+def _price_discount(
+    *, list_price: Decimal | None, unit_price: Decimal, quantity: Decimal
+) -> Decimal:
+    """Lo que una línea se rebajó del precio PUBLICADO (F6-05 / F7-08). Una
+    sola definición: la usan la validación de la venta, su auditoría y la
+    respuesta, y `reports.profit_summary` la replica en SQL con la misma
+    fórmula."""
+    if list_price is None or unit_price >= list_price:
+        return Decimal("0.00")
+    return quantize((list_price - unit_price) * quantity)
+
+
 def _row_to_line(row: Row[Any]) -> SaleLineOut:
     m = row._mapping
     return SaleLineOut(
@@ -74,6 +87,10 @@ def _row_to_line(row: Row[Any]) -> SaleLineOut:
         unit_price=m["unit_price"],
         unit_cost=m["unit_cost"],
         subtotal=m["subtotal"],
+        list_price=m["list_price"],
+        price_discount=_price_discount(
+            list_price=m["list_price"], unit_price=m["unit_price"], quantity=m["quantity"]
+        ),
     )
 
 
@@ -135,6 +152,7 @@ async def create_sale(
     subtotal_sum = Decimal("0")
     price_discount = Decimal("0")
     below_price_lines: list[dict[str, str]] = []
+    below_cost_lines: list[dict[str, str]] = []
     for line in body.lines:
         item = await inventory_repo.get_item(db, company_id=company_id, item_id=line.item_id)
         if item is None:
@@ -177,7 +195,23 @@ async def create_sale(
         # congela en la línea (00019). No se lee al consultar: el costo de una
         # venta es un hecho histórico y un reporte de un período ya cerrado no
         # debe moverse si alguien corrige el costo del artículo después.
-        items.append((line, subtotal, m["cost"]))
+        items.append((line, subtotal, m["cost"], m["sale_price"], m["capitalized_interest"]))
+
+        # Vender por debajo del COSTO del lote (decisión del dueño, auditoría
+        # fase 7) es perder plata en la pieza, y no siempre pasa por debajo
+        # del precio publicado: un producto puede estar publicado bajo costo,
+        # o no tener precio. Exige el mismo permiso que un descuento y queda
+        # en la auditoría de la venta. Al costo exacto es libre.
+        if line.unit_price < m["cost"]:
+            below_cost_lines.append(
+                {
+                    "item_id": str(line.item_id),
+                    "unit_cost": str(quantize(m["cost"])),
+                    "unit_price": str(quantize(line.unit_price)),
+                    "quantity": str(line.quantity.quantize(Decimal("0.001"))),
+                    "loss": str(quantize((m["cost"] - line.unit_price) * line.quantity)),
+                }
+            )
 
         # Vender por DEBAJO del precio publicado es un descuento, llegue como
         # `discount_amount` o como un `unit_price` menor (decisión del dueño,
@@ -187,8 +221,10 @@ async def create_sale(
         # alerta A2. Por encima del precio publicado es libre: cobrar más no
         # le quita nada a nadie.
         sale_price = m["sale_price"]
-        if sale_price is not None and line.unit_price < sale_price:
-            below = quantize((sale_price - line.unit_price) * line.quantity)
+        below = _price_discount(
+            list_price=sale_price, unit_price=line.unit_price, quantity=line.quantity
+        )
+        if below > 0:
             price_discount += below
             below_price_lines.append(
                 {
@@ -219,6 +255,15 @@ async def create_sale(
             )
         if discount_amount > subtotal_sum:
             raise AppError("El descuento no puede superar el total de la venta.")
+    # Después de las reglas del descuento, para no cambiar su respuesta: si la
+    # línea además está bajo el precio publicado, el 403 de siempre llega
+    # primero. Este código aparece cuando la pérdida NO es un descuento sobre
+    # el precio publicado.
+    if below_cost_lines and not await has_permission(db, user.role_id, "sales.apply_discount"):
+        raise SaleBelowCostRequiresPermissionError(
+            "Vender por debajo del costo requiere el permiso 'sales.apply_discount'.",
+            details={"permission": "sales.apply_discount", "below_cost_lines": below_cost_lines},
+        )
 
     total = subtotal_sum - discount_amount
     if total < 0:
@@ -295,7 +340,7 @@ async def create_sale(
         idempotency_key=idempotency_key,
         account_id=resolved.account_id if resolved is not None else None,
     )
-    for line, subtotal, unit_cost in items:
+    for line, subtotal, unit_cost, list_price, cost_interest in items:
         await repository.insert_sale_line(
             db,
             line_id=uuid4(),
@@ -306,6 +351,8 @@ async def create_sale(
             unit_price=line.unit_price,
             unit_cost=unit_cost,
             subtotal=subtotal,
+            list_price=list_price,
+            unit_cost_interest=cost_interest,
         )
         item = await inventory_repo.get_item(db, company_id=company_id, item_id=line.item_id)
         assert item is not None
@@ -364,7 +411,13 @@ async def create_sale(
         action="create_sale",
         entity_type="sale",
         entity_id=sale_id,
-        after={"number": number, "total": str(total), "payment_method": body.payment_method},
+        after={
+            "number": number,
+            "total": str(total),
+            "payment_method": body.payment_method,
+            # Solo si alguna línea se vendió bajo el costo de su lote.
+            **({"below_cost_lines": below_cost_lines} if below_cost_lines else {}),
+        },
     )
     # El descuento efectivo es el explícito MÁS lo que se vendió por debajo
     # del precio publicado (F6-05): los dos se auditan y alertan igual.
@@ -966,6 +1019,10 @@ async def create_return(
                     source_contract_id=None,
                     source_return_id=return_id,
                     cost=sale_line_m["unit_cost"],
+                    # F7-04: el lote nuevo hereda la parte de interés de su
+                    # costo; sin esto, al revenderlo el interés del remate
+                    # volvería a entrar como costo de ventas.
+                    capitalized_interest=sale_line_m["unit_cost_interest"],
                     quantity=line_in.quantity,
                     photos=[],
                     created_by=user.id,

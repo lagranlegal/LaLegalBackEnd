@@ -1234,6 +1234,9 @@ async def auction_contract(
         source_contract_id=contract_id,
         created_by=actor_id,
         idempotency_key=idempotency_key,
+        # F7-04: el interés viaja aparte para que el resultado lo pueda
+        # separar del capital al vender la pieza.
+        capitalized_interest=pending_interest,
     )
     for contract_item_id, inventory_item_id in links.items():
         await repository.mark_item_auctioned(
@@ -1264,7 +1267,12 @@ async def auction_contract(
         action="auction_contract",
         entity_type="contract",
         entity_id=contract_id,
-        after={"total_cost": str(total_cost), "items_created": len(links)},
+        after={
+            "total_cost": str(total_cost),
+            "capital": str(m["capital_balance"]),
+            "capitalized_interest": str(pending_interest),
+            "items_created": len(links),
+        },
     )
 
     return await get_contract(db, company_id=company_id, contract_id=contract_id)

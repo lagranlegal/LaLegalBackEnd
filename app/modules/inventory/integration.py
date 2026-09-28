@@ -57,6 +57,7 @@ async def create_draft_items_from_auction(
     source_contract_id: UUID,
     created_by: UUID | None,
     idempotency_key: str | None = None,
+    capitalized_interest: Decimal = Decimal("0"),
 ) -> dict[UUID, UUID]:
     """Crea un `inventory_item` en `draft` por cada prenda del contrato
     rematado (`origin='auction'`), repartiendo `total_cost` con
@@ -68,6 +69,10 @@ async def create_draft_items_from_auction(
         raise AppError("El contrato no tiene artículos para rematar.")
 
     shares = rules.split_cost_by_appraisal(total_cost, [i.appraisal for i in items])
+    # F7-04: de cada costo, cuánto es interés que el contrato adeudaba. Se
+    # guarda aparte para que el resultado use el CAPITAL como base de costo
+    # (ver 00063); el costo del lote sigue siendo el total.
+    interest_shares = rules.split_capitalized_interest(capitalized_interest, shares)
 
     entry_id = uuid4()
     entry_number = await repository.next_counter(db, company_id=company_id, prefix="INV_ENTRY")
@@ -91,7 +96,7 @@ async def create_draft_items_from_auction(
     )
 
     result: dict[UUID, UUID] = {}
-    for auction_item, cost in zip(items, shares, strict=True):
+    for auction_item, cost, interest in zip(items, shares, interest_shares, strict=True):
         chain = await catalogs_repo.get_ancestor_chain(
             db, company_id=company_id, level3_category_id=auction_item.category_id
         )
@@ -142,6 +147,7 @@ async def create_draft_items_from_auction(
             supplier_id=None,
             source_contract_id=source_contract_id,
             cost=cost,
+            capitalized_interest=interest,
             quantity=Decimal("1"),
             # Vacío a propósito: las fotos ya quedaron en el producto, que
             # para un remate es esta misma pieza. `ItemOut.photos` las

@@ -11,7 +11,9 @@ _SALE_COLUMNS = (
     "id, number, sold_at, customer_id, discount_amount, total, payment_method, status, "
     "void_reason, created_at, account_id"
 )
-_LINE_COLUMNS = "id, item_id, quantity, unit_price, unit_cost, subtotal"
+_LINE_COLUMNS = (
+    "id, item_id, quantity, unit_price, unit_cost, subtotal, list_price, unit_cost_interest"
+)
 _RETURN_COLUMNS = (
     "id, company_id, number, sale_id, customer_id, reason, settlement_method, notes, "
     "return_date, created_at"
@@ -216,15 +218,21 @@ async def insert_sale_line(
     unit_price: Decimal,
     unit_cost: Decimal,
     subtotal: Decimal,
+    list_price: Decimal | None = None,
+    unit_cost_interest: Decimal = Decimal("0"),
 ) -> None:
+    """`list_price` y `unit_cost_interest` (00063) se congelan igual que
+    `unit_cost`: el precio publicado y la parte de interés del costo de un
+    remate son hechos del momento de la venta, no del día del reporte."""
     await db.execute(
         text(
             """
             insert into public.sale_line
-                (id, company_id, sale_id, item_id, quantity, unit_price, unit_cost, subtotal)
+                (id, company_id, sale_id, item_id, quantity, unit_price, unit_cost, subtotal,
+                 list_price, unit_cost_interest)
             values
                 (:id, :company_id, :sale_id, :item_id, :quantity, :unit_price, :unit_cost,
-                 :subtotal)
+                 :subtotal, :list_price, :unit_cost_interest)
             """
         ),
         {
@@ -236,6 +244,8 @@ async def insert_sale_line(
             "unit_price": unit_price,
             "unit_cost": unit_cost,
             "subtotal": subtotal,
+            "list_price": list_price,
+            "unit_cost_interest": unit_cost_interest,
         },
     )
 
