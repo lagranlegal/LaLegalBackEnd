@@ -450,35 +450,47 @@ async def get_income_statement(
 
     t, e, g = tienda._mapping, empeno._mapping, gastos._mapping
 
+    # Cada renglón se redondea a centavos UNA vez, acá, y los subtotales se
+    # derivan de los renglones YA redondeados. Antes se sumaba con los
+    # valores crudos (el costo sale de `costo × cantidad` con cantidades de 3
+    # decimales) y `MoneyOut` redondeaba cada campo al serializar, así que un
+    # subtotal podía no ser la resta de los renglones que se ven encima
+    # (verificación de la tanda F/G: «1 peso entre renglones»). Un estado de
+    # resultados que no se puede rehacer sumando a mano no se cree.
+    def _q(value: Any) -> Decimal:
+        return quantize(_dec(value))
+
     # Los dos ingresos se calculan igual: brutos MENOS los descuentos otorgados.
     # Un descuento es plata que se decidió no cobrar —una rebaja del ingreso—, no
     # un dato informativo, y da lo mismo que sea sobre una venta o sobre un
     # interés. Hasta el 09/09/2026 el de intereses no se restaba, así que la
     # utilidad se sobreestimaba por todos los descuentos de interés otorgados, y
     # `/reports/series` arrastraba el mismo sesgo por usar esta definición.
-    ventas = _dec(t["gross_revenue"]) - _dec(t["discounts"])
-    intereses = _dec(e["interest_collected"]) - _dec(e["interest_discounts"])
+    ventas = _q(t["gross_revenue"]) - _q(t["discounts"])
+    intereses = _q(e["interest_collected"]) - _q(e["interest_discounts"])
     # F21-12: las devoluciones son CONTRA-INGRESO con LÍNEA PROPIA, no un
     # descuento silencioso de «Ventas». Restarlas adentro dejaría a «Ventas»
     # bajando sin explicación, que es exactamente lo que hace que nadie
     # confíe en un reporte; y una devolución es un hecho del negocio que el
     # dueño quiere ver. Caen en el período de la devolución, así que un mes
     # ya cerrado no cambia hacia atrás.
-    devoluciones = _dec(t["returns_gross"]) - _dec(t["returns_discounts"])
+    devoluciones = _q(t["returns_gross"]) - _q(t["returns_discounts"])
     ingresos = ventas - devoluciones + intereses
     # Neto del costo de lo devuelto: volvió al inventario, así que ya no es
     # costo de nada vendido. Con eso se cierra el doble conteo — el artículo
     # cuenta como inventario disponible y NO como costo de ventas.
-    costo_ventas = _dec(t["cost_of_goods_sold"]) - _dec(t["returns_cost"])
+    costo_ventas = _q(t["cost_of_goods_sold"]) - _q(t["returns_cost"])
     utilidad_bruta = ingresos - costo_ventas
-    gastos_operativos = _dec(g["total"])
+    gastos_operativos = _q(g["total"])
     # FASE 7 (auditoría 28/09/2026): lo que movía el patrimonio sin pasar por
     # el resultado. El cuadre patrimonial dejaba un residuo que se explicaba
     # entero por estas tres líneas (y por el interés del remate, que se
     # resuelve en el costo de ventas). Cada una en su propia línea y no
     # dentro de «Gastos operativos»: son hechos distintos que el dueño quiere
     # ver por separado, y `expense` es un documento que ellas no son.
-    mermas_total = _dec(mermas._mapping["total"])
+    mermas_total = _q(mermas._mapping["total"])
+    comisiones = quantize(comisiones)
+    descuadres = quantize(descuadres)
     utilidad = utilidad_bruta - gastos_operativos - mermas_total - comisiones + descuadres
 
     return IncomeStatementOut(
