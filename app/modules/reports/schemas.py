@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.common.money import MoneyOut
 
@@ -397,7 +397,20 @@ class IncomeStatementOut(BaseModel):
     #: «Descuadres de caja» (F7-03): los ajustes del conteo de apertura, del
     #: arqueo de cierre y de la reversa al reabrir. CON SIGNO: un sobrante es
     #: positivo y suma; un faltante es negativo y resta.
-    cash_differences: MoneyOut = Decimal("0.00")
+    #:
+    #: La descripción va en el OpenAPI (y de ahí al tipo del front) porque la
+    #: verificación de la tanda F/G encontró la línea en +43.000 junto al
+    #: «Neto −7.000» del bloque de cierres, sin nada que dijera por qué: el
+    #: bloque de cierres solo cuenta el arqueo, esta línea también la apertura.
+    cash_differences: MoneyOut = Field(
+        default=Decimal("0.00"),
+        description=(
+            "Descuadres de caja del período, con signo (sobrante suma, faltante "
+            "resta). Incluye los ajustes del conteo de APERTURA y del arqueo de "
+            "CIERRE, y la reversa al reabrir un turno; por eso no coincide con "
+            "la diferencia de los cierres, que solo cuenta el arqueo."
+        ),
+    )
 
     #: --- Resultado ---
     #: `gross_profit − operating_expenses − inventory_shrinkage −
