@@ -102,3 +102,7 @@ class DocumentTemplateUpdateIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     body: dict[str, Any] | None = None
     layout: DocumentLayout | None = None
+
+    # `body: null` llegaba al UPDATE como jsonb `null` —que no es NULL de SQL
+    # y pasa el `not null`— y reventaba al leerla de vuelta: 500 (F8-02).
+    _no_null = no_null("name", "body", "layout")

@@ -4,8 +4,8 @@ from uuid import UUID, uuid4
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import ConflictError, NotFoundError
-from app.modules.company import repository
+from app.core.errors import AppError, ConflictError, NotFoundError
+from app.modules.company import repository, template_body
 from app.modules.company.schemas import (
     CompanySettingsOut,
     CompanySettingsUpdateIn,
@@ -146,9 +146,60 @@ async def get_active_template(
     return _row_to_template(row) if row is not None else None
 
 
+class TemplateBodyInvalidError(AppError):
+    status_code = 422
+    code = "TEMPLATE_BODY_INVALID"
+
+
+def _exigir_documento_valido(body: Any) -> None:
+    """422 si `body` no es un documento del editor (F8-03).
+
+    `{"content": [1, 2]}` se guardaba y hasta se activaba: el esquema aceptaba
+    cualquier `dict`. Lo que el front no sabe dibujar tampoco se guarda.
+    """
+    if not template_body.es_documento_valido(body):
+        raise TemplateBodyInvalidError(
+            "El cuerpo de la plantilla no es un documento del editor.",
+            details={"field": "body"},
+        )
+
+
+def _exigir_imprimible(document_type: str, body: Any) -> None:
+    """La misma regla para ACTIVAR y para editar la que YA está activa.
+
+    Antes vivía solo en `activate_template`, y un `PATCH {"body": {}}` sobre la
+    activa la vaciaba con 200: desde ahí todos los contratos salían sin
+    cliente, sin prendas y sin firmas (auditoría de QA, F8-01). La regla es
+    sobre lo que imprime la activa, no sobre el botón con que se llegó ahí.
+    """
+    # Una plantilla sin contenido se puede GUARDAR —un borrador a medias es
+    # legítimo— pero no dejar activa: el cuerpo del documento sale de acá.
+    # Medido en la auditoría de QA (Fase 8): 137 caracteres, sin cliente, sin
+    # prendas, sin monto y sin firmas. Un párrafo vacío o solo espacios cuenta
+    # como vacío (F8-03): imprime lo mismo que `{}`.
+    if not template_body.tiene_contenido(body):
+        raise ConflictError(
+            "Esta plantilla está vacía: activarla imprimiría los documentos sin "
+            "su contenido. Escribe el cuerpo antes de activarla.",
+            code="TEMPLATE_IS_EMPTY",
+        )
+    faltantes = template_body.faltantes_para_activar(document_type, body)
+    if faltantes:
+        etiquetas = template_body.describir_faltantes(faltantes)
+        raise ConflictError(
+            "A esta plantilla le falta "
+            + ", ".join(etiquetas)
+            + ". Un contrato de empeño tiene que decir a quién se le prestó, "
+            "sobre qué prendas y llevar la firma del cliente.",
+            code="TEMPLATE_MISSING_REQUIRED_FIELDS",
+            details={"missing": faltantes},
+        )
+
+
 async def create_template(
     db: AsyncSession, *, company_id: UUID, body: DocumentTemplateCreateIn, actor_id: UUID
 ) -> DocumentTemplateOut:
+    _exigir_documento_valido(body.body)
     template_id = uuid4()
     await repository.insert_template(
         db,
@@ -188,6 +239,10 @@ async def update_template(
         raise NotFoundError("La plantilla no existe.")
 
     fields = body.model_dump(exclude_unset=True)
+    if "body" in fields:
+        _exigir_documento_valido(fields["body"])
+        if existing._mapping["is_active"]:
+            _exigir_imprimible(existing._mapping["document_type"], fields["body"])
     if fields:
         await repository.update_template(
             db, company_id=company_id, template_id=template_id, fields=fields
@@ -237,18 +292,6 @@ async def delete_template(
     )
 
 
-def _tiene_contenido(body: Any) -> bool:
-    """¿Este documento ProseMirror imprimiría algo?
-
-    Un `{}` o un `{"type": "doc", "content": []}` son documentos válidos para
-    el editor y para el esquema, pero en papel no dejan nada.
-    """
-    if not isinstance(body, dict):
-        return False
-    contenido = body.get("content")
-    return isinstance(contenido, list) and len(contenido) > 0
-
-
 async def deactivate_template(
     db: AsyncSession, *, company_id: UUID, template_id: UUID, actor_id: UUID
 ) -> None:
@@ -288,18 +331,7 @@ async def activate_template(
     if existing is None:
         raise NotFoundError("La plantilla no existe.")
 
-    # Una plantilla sin contenido se puede GUARDAR —un borrador a medias es
-    # legítimo— pero no activar: el cuerpo del documento sale de acá, así que
-    # activarla imprime contratos con encabezado, título y pie, y nada más.
-    # Medido en la auditoría de QA (Fase 8): 137 caracteres, sin cliente, sin
-    # prendas, sin monto y sin firmas. Un contrato de empeño en blanco no
-    # ampara la prenda de nadie, y hasta hoy nada lo impedía ni lo advertía.
-    if not _tiene_contenido(existing._mapping["body"]):
-        raise ConflictError(
-            "Esta plantilla está vacía: activarla imprimiría los documentos sin "
-            "su contenido. Escribe el cuerpo antes de activarla.",
-            code="TEMPLATE_IS_EMPTY",
-        )
+    _exigir_imprimible(existing._mapping["document_type"], existing._mapping["body"])
 
     # Swap en dos pasos, misma transacción: desactivar la que esté activa HOY
     # antes de activar la nueva — en ese orden el índice único parcial nunca

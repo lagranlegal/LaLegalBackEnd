@@ -266,9 +266,21 @@ async def test_tenant_cannot_change_its_own_status(
 
 # ---- document_template (plantillas editables de documentos) ----
 
+# El mínimo que se deja activar como contrato (F8-01/03): el nombre del
+# cliente, la tabla de prendas y la firma del cliente.
 _SAMPLE_BODY = {
     "type": "doc",
-    "content": [{"type": "paragraph", "content": [{"type": "text", "text": "hola"}]}],
+    "content": [
+        {
+            "type": "paragraph",
+            "content": [
+                {"type": "text", "text": "Cliente: "},
+                {"type": "mergeField", "attrs": {"key": "cliente.nombre"}},
+            ],
+        },
+        {"type": "itemsTableBlock"},
+        {"type": "signatureBlock", "attrs": {"variant": "cliente"}},
+    ],
 }
 
 
@@ -487,7 +499,11 @@ def test_an_empty_template_can_be_saved_but_not_activated(
     vacia = client.post(
         "/api/v1/company/document-templates",
         headers=headers,
-        json={"document_type": "contract", "name": "Borrador a medias", "body": {}},
+        json={
+            "document_type": "contract",
+            "name": "Borrador a medias",
+            "body": {"type": "doc", "content": [{"type": "paragraph"}]},
+        },
     )
     assert vacia.status_code == 201, vacia.text  # guardarla es legítimo
 
@@ -524,10 +540,7 @@ def test_deactivating_returns_to_the_default_document(
     activada estaba vacía, para deshacerlo había que construir otra desde cero.
     """
     headers = _headers(company_tenant["token"])
-    doc = {
-        "type": "doc",
-        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Contrato"}]}],
-    }
+    doc = _SAMPLE_BODY
 
     creada = client.post(
         "/api/v1/company/document-templates",
@@ -560,3 +573,132 @@ def test_deactivating_returns_to_the_default_document(
     # Y ahora sí se puede borrar, porque ya no es la activa.
     borrado = client.delete(f"/api/v1/company/document-templates/{tid}", headers=headers)
     assert borrado.status_code == 204, borrado.text
+
+
+def _crear(client: TestClient, headers: dict[str, str], body: object, tipo: str = "contract"):
+    return client.post(
+        "/api/v1/company/document-templates",
+        headers=headers,
+        json={"document_type": tipo, "name": "QA", "body": body},
+    )
+
+
+def test_patch_cannot_empty_the_active_template(client: TestClient, company_tenant: dict) -> None:
+    """F8-01: `PATCH {"body": {}}` vaciaba la plantilla ACTIVA con 200.
+
+    `TEMPLATE_IS_EMPTY` solo vivía en `activate`, así que editar la que ya
+    estaba activa se saltaba la regla, y desde ahí todos los contratos se
+    imprimían sin cliente, sin prendas y sin firmas. Ahora el PATCH de la
+    activa pasa por la misma validación, y el cuerpo anterior se conserva.
+    """
+    headers = _headers(company_tenant["token"])
+    tid = _crear(client, headers, _SAMPLE_BODY).json()["id"]
+    assert (
+        client.post(
+            f"/api/v1/company/document-templates/{tid}/activate", headers=headers
+        ).status_code
+        == 200
+    )
+
+    parrafo_en_blanco = {
+        "type": "doc",
+        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "   "}]}],
+    }
+    for cuerpo in ({"type": "doc", "content": []}, parrafo_en_blanco):
+        r = client.patch(
+            f"/api/v1/company/document-templates/{tid}", headers=headers, json={"body": cuerpo}
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["code"] == "TEMPLATE_IS_EMPTY", r.text
+
+    # Quitarle la firma del cliente a la activa tampoco.
+    sin_firma = {"type": "doc", "content": _SAMPLE_BODY["content"][:2]}
+    r = client.patch(
+        f"/api/v1/company/document-templates/{tid}", headers=headers, json={"body": sin_firma}
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "TEMPLATE_MISSING_REQUIRED_FIELDS", r.text
+    assert r.json()["details"]["missing"] == ["signatureBlock:cliente"], r.text
+
+    listado = client.get(
+        "/api/v1/company/document-templates", headers=headers, params={"document_type": "contract"}
+    ).json()
+    (activa,) = [t for t in listado if t["is_active"]]
+    assert activa["body"] == _SAMPLE_BODY
+
+
+def test_an_inactive_draft_can_be_patched_to_anything_valid(
+    client: TestClient, company_tenant: dict
+) -> None:
+    """La regla es sobre lo que imprime la ACTIVA: un borrador inactivo se
+    puede dejar vacío (guardar ≠ activar)."""
+    headers = _headers(company_tenant["token"])
+    tid = _crear(client, headers, _SAMPLE_BODY).json()["id"]
+    r = client.patch(
+        f"/api/v1/company/document-templates/{tid}",
+        headers=headers,
+        json={"body": {"type": "doc", "content": []}},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_body_that_is_not_an_editor_document_is_rejected(
+    client: TestClient, company_tenant: dict
+) -> None:
+    """F8-03: `{"content": [1, 2]}` se guardaba y se ACTIVABA."""
+    headers = _headers(company_tenant["token"])
+    for basura in (
+        {},
+        {"content": [1, 2]},
+        {"type": "doc", "content": [1, 2]},
+        {"type": "doc", "content": "x"},
+    ):
+        r = _crear(client, headers, basura)
+        assert r.status_code == 422, r.text
+        assert r.json()["code"] == "TEMPLATE_BODY_INVALID", r.text
+
+    tid = _crear(client, headers, _SAMPLE_BODY).json()["id"]
+    r = client.patch(
+        f"/api/v1/company/document-templates/{tid}",
+        headers=headers,
+        json={"body": {"content": [1, 2]}},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["code"] == "TEMPLATE_BODY_INVALID", r.text
+
+
+def test_patch_body_null_is_422_not_500(client: TestClient, company_tenant: dict) -> None:
+    """F8-02: `{"body": null}` llegaba como jsonb `null` y reventaba al leer."""
+    headers = _headers(company_tenant["token"])
+    tid = _crear(client, headers, _SAMPLE_BODY).json()["id"]
+    r = client.patch(
+        f"/api/v1/company/document-templates/{tid}", headers=headers, json={"body": None}
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["code"] == "VALIDATION_ERROR", r.text
+
+
+def test_contract_template_needs_customer_items_and_signature_to_activate(
+    client: TestClient, company_tenant: dict
+) -> None:
+    """Un contrato de empeño que no dice a quién, sobre qué prendas ni lleva
+    la firma del cliente no ampara la prenda de nadie. El paz y salvo no
+    tiene esos mínimos: es una constancia de la empresa."""
+    headers = _headers(company_tenant["token"])
+    solo_texto = {
+        "type": "doc",
+        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Contrato"}]}],
+    }
+    tid = _crear(client, headers, solo_texto).json()["id"]
+    r = client.post(f"/api/v1/company/document-templates/{tid}/activate", headers=headers)
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "TEMPLATE_MISSING_REQUIRED_FIELDS", r.text
+    assert r.json()["details"]["missing"] == [
+        "cliente.nombre",
+        "itemsTableBlock",
+        "signatureBlock:cliente",
+    ]
+
+    pys = _crear(client, headers, solo_texto, tipo="settlement").json()["id"]
+    r = client.post(f"/api/v1/company/document-templates/{pys}/activate", headers=headers)
+    assert r.status_code == 200, r.text
