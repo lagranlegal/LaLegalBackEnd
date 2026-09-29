@@ -44,7 +44,7 @@ El laboratorio (empresas espejo, usuarios por rol, datos sembrados) está descri
 
 **Playwright — la app en vivo, con login real**
 
-Resuelven Playwright desde el caché de npx (no es dependencia del proyecto, ver `ESTADO.md` → "Trampas del entorno"); se puede apuntar a otra copia con `QA_PLAYWRIGHT`.
+Resuelven Playwright desde el caché de npx (no es dependencia del proyecto, ver `docs/OPERACION.md` §4.3); se puede apuntar a otra copia con `QA_PLAYWRIGHT`.
 
 > **El navegador puede no estar, aunque Playwright sí.** El 11/09/2026 `~/Library/Caches/ms-playwright` tenía solo `ffmpeg`: el Chromium se había ido, y `launch()` falla pidiendo `npx playwright install`. `ui_ltv.js` cae solo al **Chrome del sistema** (`channel: 'chrome'`), que no requiere descargar nada; los demás scripts todavía no. Si uno falla con *"Executable doesn't exist"*, es esto — no hace falta reinstalar nada si hay Chrome.
 

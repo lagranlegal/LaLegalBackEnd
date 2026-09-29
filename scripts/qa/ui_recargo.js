@@ -6,7 +6,7 @@
 // que se ve.
 //
 // Playwright no es dependencia del proyecto: se resuelve desde el caché de
-// npx (ver ESTADO.md, "Trampas del entorno").
+// npx (ver docs/OPERACION.md §4.3).
 //
 //   node scripts/qa/ui_recargo.js <email> <contrato_viejo_id> <contrato_nuevo_id>
 const { chromium } = require(process.env.QA_PLAYWRIGHT

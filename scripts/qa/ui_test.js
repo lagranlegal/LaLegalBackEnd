@@ -1,5 +1,5 @@
 // Playwright no es dependencia del proyecto: se resuelve desde el caché de npx
-// (ver ESTADO.md, "Trampas del entorno"). Se puede apuntar a otra copia con QA_PLAYWRIGHT.
+// (ver docs/OPERACION.md §4.3). Se puede apuntar a otra copia con QA_PLAYWRIGHT.
 const { chromium } = require(process.env.QA_PLAYWRIGHT
   || `${process.env.HOME}/.npm/_npx/e41f203b7505f1fb/node_modules/playwright`);
 const BASE = process.env.QA_FRONT_URL || 'https://la-legal-front-end.vercel.app';

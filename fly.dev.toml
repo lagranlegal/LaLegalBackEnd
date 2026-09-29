@@ -5,7 +5,7 @@
 # segundos de cold start). Billing de Fly es por segundo mientras corre —
 # en un ambiente de pruebas con uso intermitente esto puede quedar en
 # centavos al mes en vez de los ~$2-6/mes de un shared-cpu-1x siempre
-# encendido. Ver docs/ARCHITECTURE.md §8 para el resto del análisis de costos.
+# encendido. Costos: ver docs/PRODUCCION.md §0.4.
 #
 # A PROPÓSITO sin `[[http_service.checks]]` acá (sí los tiene fly.prod.toml):
 # un health check activo cuenta como tráfico real para el proxy de Fly, así
@@ -31,7 +31,7 @@
 #     DATABASE_URL=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=...
 #
 # Job nocturno (mismo patrón que prod, ver fly.prod.toml y
-# docs/ARCHITECTURE.md §11): NO va en [processes] a propósito — si lo
+# docs/ARQUITECTURA.md §11): NO va en [processes] a propósito — si lo
 # declarás ahí, `fly deploy` intenta mantener una máquina "nightly" viva
 # todo el tiempo (le suma cómputo 24/7 a un job que solo debe correr una
 # vez al día). En cambio se crea como una Fly Machine programada,

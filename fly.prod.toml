@@ -21,7 +21,7 @@
 # carga de página).
 #
 # Secretos (nunca acá — este ambiente necesita su PROPIO proyecto Supabase
-# "prod", todavía no creado — ver docs/ARCHITECTURE.md §8):
+# "prod", todavía no creado — ver docs/PRODUCCION.md):
 #   fly secrets set -a compraventa-backend-prod \
 #     DATABASE_URL=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=...
 #

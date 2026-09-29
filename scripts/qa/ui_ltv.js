@@ -6,7 +6,7 @@
 // `contracts.override_ltv`, que es justo la diferencia que importa.
 //
 // Playwright no es dependencia del proyecto: se resuelve desde el caché de
-// npx (ver ESTADO.md, "Trampas del entorno").
+// npx (ver docs/OPERACION.md §4.3).
 //
 //   node scripts/qa/ui_ltv.js <email>
 const { chromium } = require(process.env.QA_PLAYWRIGHT
