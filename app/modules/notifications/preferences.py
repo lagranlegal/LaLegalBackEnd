@@ -62,8 +62,12 @@ class ContactLimits:
     #: hacer en el mostrador no es cobranza. Con el tope aplicado, el segundo
     #: abono de la semana quedaba `throttled` y el cliente sin su comprobante.
     #: Si un abogado dice que sí cuenta, se pone en `True` y vuelve el
-    #: comportamiento anterior — sin código. **No toca la ventana horaria ni el
-    #: tope diario**: esos siguen valiendo para todo aviso al cliente.
+    #: comportamiento anterior — sin código. **No toca la ventana horaria**, que
+    #: sigue valiendo para todo aviso al cliente (§12.3-1, la lectura
+    #: conservadora). Desde la auditoría de QA (F8-08, 29/09/2026) gobierna
+    #: también el tope DIARIO: el cuarto abono del día quedaba `throttled`
+    #: —terminal— y el cliente sin constancia de un pago que sí hizo. El nombre
+    #: se conserva porque es contrato de la API.
     transactional_in_weekly_cap: bool = False
 
     def as_dict(self) -> dict[str, Any]:

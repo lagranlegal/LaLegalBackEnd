@@ -72,14 +72,24 @@ def test_weekly_and_daily_caps() -> None:
     assert not exceeds_cap(sent_last_day=2, sent_last_week=4, limits=three_a_week)
 
 
-def test_a_receipt_is_not_stopped_by_the_weekly_cap_but_is_by_the_daily_one() -> None:
-    """§18.1-1: el semanal es el de la Ley 2300, de cobranza; el diario (§3) es
-    de producto y cuenta todo."""
+def test_a_receipt_is_stopped_by_neither_cap() -> None:
+    """§18.1-1 y F8-08: los topes son de contactos, y un comprobante acusa algo
+    que el cliente acaba de hacer. Antes el diario sí lo frenaba: el cuarto
+    abono del día quedaba `throttled`, terminal."""
     assert not exceeds_cap(sent_last_day=1, sent_last_week=5, limits=DEFAULT, transactional=True)
-    assert exceeds_cap(sent_last_day=3, sent_last_week=0, limits=DEFAULT, transactional=True)
+    assert not exceeds_cap(sent_last_day=3, sent_last_week=0, limits=DEFAULT, transactional=True)
+    now = _at(2030, 9, 6, 12)
+    busy = [_at(2030, 9, 6, 9)] * 5
+    assert (
+        cap_release_moment(
+            now=now, sent_last_day=busy, sent_last_week=busy, limits=DEFAULT, transactional=True
+        )
+        == now
+    )
     # La respuesta del abogado, como parámetro: el comprobante vuelve a contar.
     strict = ContactLimits(transactional_in_weekly_cap=True)
     assert exceeds_cap(sent_last_day=0, sent_last_week=1, limits=strict, transactional=True)
+    assert exceeds_cap(sent_last_day=3, sent_last_week=0, limits=strict, transactional=True)
     # Y un recordatorio sigue frenado por el semanal, como siempre.
     assert exceeds_cap(sent_last_day=0, sent_last_week=1, limits=DEFAULT, transactional=False)
 
@@ -117,9 +127,9 @@ def test_with_a_cap_of_two_it_is_the_second_most_recent_that_must_leave() -> Non
 
 
 def test_the_daily_cap_frees_up_after_24_hours_and_both_caps_must_allow() -> None:
-    """Tres comprobantes hoy (no cuentan en el semanal) frenan un recordatorio
-    por el DIARIO: se libera cuando el primero cumple 24 h. Con los dos topes
-    llenos, gana el que se libera más tarde."""
+    """Tres contactos hoy frenan un recordatorio por el DIARIO (desde F8-08 el
+    despachador ya no cuenta ahí los comprobantes): se libera cuando el primero
+    cumple 24 h. Con los dos topes llenos, gana el que se libera más tarde."""
     receipts = [_at(2030, 9, 6, 9), _at(2030, 9, 6, 10), _at(2030, 9, 6, 11)]
     now = _at(2030, 9, 6, 12)
     daily = cap_release_moment(now=now, sent_last_day=receipts, sent_last_week=[], limits=DEFAULT)

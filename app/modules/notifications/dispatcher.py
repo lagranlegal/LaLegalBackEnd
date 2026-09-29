@@ -25,7 +25,8 @@ Orden de decisión por entrega, y el porqué del orden:
    sin contar intento), si para entonces todavía dice la verdad; si no, y
    todo lo demás, `throttled` (§20.6). El semanal es de cobranza:
    un comprobante (familia `transactional`) ni lo consume ni lo gasta, salvo
-   `transactional_in_weekly_cap` (§18.1-1). La hora y el diario, para todos.
+   `transactional_in_weekly_cap` (§18.1-1), y desde F8-08 tampoco el diario.
+   La hora, para todos (§12.3-1).
 3. **Sin proveedor** → `skipped_no_provider`. El job NO falla: registra.
 4. **Envío**, FUERA de toda transacción (§5.1). Éxito → `sent`; falla
    reintentable → `failed` con backoff +1 h / +6 h / +24 h, y al cuarto
@@ -255,18 +256,23 @@ async def _prepare(
             next_ok = limits.next_allowed_moment(local_now, contact_limits)
             if next_ok > local_now:
                 return _Prepared(None, reschedule_to=next_ok.astimezone(UTC))
-            # §18.1-1: el tope semanal es de cobranza. Un comprobante no lo
-            # consume ni lo gasta; el diario (§3) cuenta todo.
-            weekly_cobranza_only = not contact_limits.transactional_in_weekly_cap
+            # §18.1-1 y F8-08: los topes son de contactos. Un comprobante no
+            # los consume ni los gasta —ni el semanal ni el diario—, salvo
+            # `transactional_in_weekly_cap` (la respuesta del abogado).
+            cobranza_only = not contact_limits.transactional_in_weekly_cap
             sent_week = await repository.sent_times_to(
                 db,
                 company_id=c["id"],
                 to_address=d["to_address"],
                 since=now - limits.WEEK,
-                exclude_transactional=weekly_cobranza_only,
+                exclude_transactional=cobranza_only,
             )
             sent_day = await repository.sent_times_to(
-                db, company_id=c["id"], to_address=d["to_address"], since=now - limits.DAY
+                db,
+                company_id=c["id"],
+                to_address=d["to_address"],
+                since=now - limits.DAY,
+                exclude_transactional=cobranza_only,
             )
             transactional = catalog.get(e["event_type"]).family == "transactional"
             if limits.exceeds_cap(

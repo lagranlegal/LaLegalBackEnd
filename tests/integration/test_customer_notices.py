@@ -823,17 +823,18 @@ async def test_the_lawyers_answer_is_configuration_receipts_can_count_again(
     assert [d.status for d in await _deliveries(shop["company_id"])] == ["sent", "throttled"]
 
 
-async def test_the_daily_cap_still_counts_receipts(
+async def test_the_daily_cap_does_not_stop_receipts(
     client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
 ) -> None:
-    """§3: el tope de 3 correos por cliente por día cuenta los transaccionales —
-    es la regla de producto contra el cliente de 13 contratos, no la Ley 2300."""
+    """F8-08 (auditoría de QA, 28/09/2026): el cuarto abono del día quedaba
+    `throttled` —terminal— y el cliente sin constancia de un pago que sí hizo.
+    Un comprobante no es un contacto: ni el tope diario lo frena ni lo gasta."""
     await _enable(shop["company_id"], "payment_registered")
     ctx = _with_contract(client, shop, shop["with_mail"])
     for _ in range(4):
         assert _pay("100000.00")(client, shop, ctx, str(uuid4())).status_code == 201
     statuses = [d.status for d in await _deliveries(shop["company_id"])]
-    assert statuses == ["sent", "sent", "sent", "throttled"]
+    assert statuses == ["sent", "sent", "sent", "sent"]
 
 
 async def _send_reminder_now(company_id: UUID, customer_id: UUID) -> str:

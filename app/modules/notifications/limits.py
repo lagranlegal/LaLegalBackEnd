@@ -90,19 +90,24 @@ def exceeds_cap(
     Dos topes que no son la misma regla (docs/NOTIFICACIONES.md §18.1-1):
 
     - **El diario** (§3) es de producto, contra el cliente de 13 contratos que
-      recibiría 16 correos en un día. Cuenta TODO aviso al cliente, también los
-      comprobantes.
+      recibiría 16 correos en un día.
     - **El semanal** es el de la Ley 2300, que limita los contactos de
-      COBRANZA. Un comprobante (`transactional`) no es cobranza: no lo frena —
-      salvo `transactional_in_weekly_cap`, que es la respuesta del abogado
-      puesta como parámetro. Quien cuenta `sent_last_week` tiene que contar
-      con el mismo criterio (`repository.sent_times_to`)."""
+      COBRANZA.
+
+    Un comprobante (`transactional`) no es cobranza ni un contacto que el
+    negocio decida: acusa algo que el cliente acaba de hacer. No lo frena
+    NINGUNO de los dos — salvo `transactional_in_weekly_cap`, que es la
+    respuesta del abogado puesta como parámetro. Hasta la auditoría de QA
+    (F8-08) el diario sí lo frenaba: el cuarto abono del día quedaba
+    `throttled`, terminal, y el cliente sin constancia de un pago real. Quien
+    cuenta `sent_last_*` tiene que contar con el mismo criterio
+    (`repository.sent_times_to`)."""
     if not limits.enabled:
+        return False
+    if transactional and not limits.transactional_in_weekly_cap:
         return False
     if sent_last_day >= limits.max_per_day:
         return True
-    if transactional and not limits.transactional_in_weekly_cap:
-        return False
     return sent_last_week >= limits.max_per_week
 
 
@@ -145,10 +150,13 @@ def cap_release_moment(
     aplicado DESPUÉS sobre lo que devuelve esto."""
     if not limits.enabled:
         return now
+    if transactional and not limits.transactional_in_weekly_cap:
+        return now  # F8-08: un comprobante no espera cupo (`exceeds_cap`).
     moment = now
-    windows = [(sent_last_day, limits.max_per_day, DAY)]
-    if not transactional or limits.transactional_in_weekly_cap:
-        windows.append((sent_last_week, limits.max_per_week, WEEK))
+    windows = [
+        (sent_last_day, limits.max_per_day, DAY),
+        (sent_last_week, limits.max_per_week, WEEK),
+    ]
     for sent, cap, window in windows:
         if len(sent) < cap:
             continue
