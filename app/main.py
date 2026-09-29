@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.common.cors import build_cors_config
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
-from app.core.settings import get_settings
+from app.core.settings import Settings, get_settings
 from app.modules.accounts.router import router as accounts_router
 from app.modules.audit.router import router as audit_router
 from app.modules.capital.router import router as capital_router
@@ -24,14 +24,28 @@ from app.modules.sales.router import credit_notes_router
 from app.modules.sales.router import router as sales_router
 
 
-def create_app() -> FastAPI:
+def api_docs_enabled(environment: str) -> bool:
+    """La documentación interactiva (`/docs`, `/redoc`, `/openapi.json`) se
+    sirve en todos los ambientes salvo producción: el front genera sus tipos
+    contra dev, y en producción no hay quién la necesite."""
+    return environment != "production"
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging()
-    settings = get_settings()
+    settings = settings or get_settings()
     origins, origin_regex = build_cors_config(
         cors_allow_origins=settings.cors_allow_origins, environment=settings.environment
     )
 
-    app = FastAPI(title="Prendo API", version="0.1.0")
+    docs = api_docs_enabled(settings.environment)
+    app = FastAPI(
+        title="Prendo API",
+        version="0.1.0",
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
