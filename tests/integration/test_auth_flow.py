@@ -20,6 +20,7 @@ from app.core import security
 from app.core.db import AsyncSessionLocal, engine
 from app.core.errors import register_exception_handlers
 from app.core.security import CurrentUser, require_permission
+from app.core.settings import get_settings
 
 
 async def _postgres_available() -> bool:
@@ -49,11 +50,14 @@ class _FakeJwkClient:
         return _FakeSigningKey(self._public_key)
 
 
-def _make_token(private_pem: str, *, sub: str, company_id: str, role_id: str) -> str:
+def _make_token(
+    private_pem: str, *, sub: str, company_id: str, role_id: str, iss: str | None = None
+) -> str:
     now = datetime.now(UTC)
     payload = {
         "sub": sub,
         "aud": "authenticated",
+        "iss": iss or get_settings().jwt_issuer,
         "iat": now,
         "exp": now + timedelta(minutes=5),
         "company_id": company_id,
@@ -237,6 +241,28 @@ def test_valid_token_with_permission_is_200(
         response = client.get("/dummy", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json() == {"user_id": str(tenant_fixture["user_with_perm"])}
+
+
+def test_token_from_another_issuer_is_401(
+    monkeypatch: pytest.MonkeyPatch,
+    rsa_keypair: tuple[str, object],
+    tenant_fixture: dict[str, uuid.UUID],
+) -> None:
+    private_pem, public_key = rsa_keypair
+    monkeypatch.setattr(security, "get_jwk_client", lambda: _FakeJwkClient(public_key))
+
+    token = _make_token(
+        private_pem,
+        sub=str(tenant_fixture["user_with_perm"]),
+        company_id=str(tenant_fixture["company_id"]),
+        role_id=str(tenant_fixture["role_with_perm"]),
+        iss="https://otro-proyecto.supabase.co/auth/v1",
+    )
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/dummy", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHORIZED"
 
 
 async def _hook_claims(user_id: uuid.UUID) -> dict[str, object]:

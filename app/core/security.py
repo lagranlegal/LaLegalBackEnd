@@ -41,6 +41,8 @@ def decode_token(token: str) -> TokenClaims:
             signing_key.key,
             algorithms=["RS256", "ES256"],
             audience=settings.jwt_audience,
+            issuer=settings.jwt_issuer,
+            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
         )
     except jwt.PyJWTError as exc:
         raise UnauthorizedError("Token inválido o expirado.") from exc

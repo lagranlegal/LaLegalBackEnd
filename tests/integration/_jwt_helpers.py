@@ -23,10 +23,13 @@ class FakeJwkClient:
 def make_token(private_pem: str, **overrides: Any) -> str:
     import jwt
 
+    from app.core.settings import get_settings
+
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": overrides.pop("sub", None) or "00000000-0000-0000-0000-000000000000",
         "aud": "authenticated",
+        "iss": get_settings().jwt_issuer,
         "iat": now,
         "exp": now + timedelta(minutes=5),
     }

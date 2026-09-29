@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     # pero sin esas cabeceras (el enlace del cuerpo sigue siendo la salida).
     public_api_url: str = ""
 
+    @property
+    def jwt_issuer(self) -> str:
+        """Emisor que Supabase Auth pone en `iss` de cada access token: la URL
+        del proyecto más `/auth/v1` (verificado contra un token real del
+        ambiente dev). Un token de otro proyecto no pasa la verificación."""
+        return f"{self.supabase_url.rstrip('/')}/auth/v1"
+
     @model_validator(mode="after")
     def _resolve_jwks_url(self) -> "Settings":
         # .env usa `${SUPABASE_URL}/...` (así lo documenta CLAUDE.md), pero los

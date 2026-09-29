@@ -7,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from app.core import security
 from app.core.errors import UnauthorizedError
+from app.core.settings import get_settings
 
 
 class _FakeSigningKey:
@@ -27,7 +28,7 @@ def _make_token(private_pem: str, **overrides: object) -> str:
     payload = {
         "sub": str(uuid4()),
         "aud": "authenticated",
-        "iss": "https://project.supabase.co/auth/v1",
+        "iss": get_settings().jwt_issuer,
         "iat": now,
         "exp": now + timedelta(minutes=5),
         "company_id": str(uuid4()),
@@ -102,3 +103,39 @@ async def test_get_verified_claims_rejects_missing_tenant(
 async def test_get_verified_claims_rejects_missing_header() -> None:
     with pytest.raises(UnauthorizedError):
         await security.get_verified_claims(None)
+
+
+def test_decode_token_rejects_token_from_another_issuer(
+    monkeypatch: pytest.MonkeyPatch, rsa_keypair: tuple[str, object]
+) -> None:
+    private_pem, public_key = rsa_keypair
+    monkeypatch.setattr(security, "get_jwk_client", lambda: _FakeJwkClient(public_key))
+
+    other = _make_token(private_pem, iss="https://otro-proyecto.supabase.co/auth/v1")
+    with pytest.raises(UnauthorizedError):
+        security.decode_token(other)
+
+
+def test_decode_token_requires_issuer(
+    monkeypatch: pytest.MonkeyPatch, rsa_keypair: tuple[str, object]
+) -> None:
+    private_pem, public_key = rsa_keypair
+    monkeypatch.setattr(security, "get_jwk_client", lambda: _FakeJwkClient(public_key))
+
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "sub": str(uuid4()),
+            "aud": "authenticated",
+            "iat": now,
+            "exp": now + timedelta(minutes=5),
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+    with pytest.raises(UnauthorizedError):
+        security.decode_token(token)
+
+
+def test_jwt_issuer_is_the_project_auth_url() -> None:
+    assert get_settings().jwt_issuer == f"{get_settings().supabase_url.rstrip('/')}/auth/v1"
