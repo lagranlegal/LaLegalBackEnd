@@ -116,6 +116,11 @@ interés que el contrato adeudaba se reconoce **dentro de la utilidad bruta**, i
 `auction_interest_realized`. Si se sumara aparte, se contaría dos veces. El valor del inventario sí es el costo
 completo. Publicar el artículo (con precio y, en piezas únicas, foto) emite su código.
 
+La **prenda en garantía** (`contract_item`: categoría, descripción, peso o serial, avalúo; estados custodia,
+devuelta, transferida, rematada) y el **artículo de inventario** (código, precio, stock) son entidades distintas;
+`contract_item.inventory_item_id` solo las enlaza al rematar, para poder recorrer la cadena hacia atrás. El remate es
+**asistido**: el sistema lista los candidatos, una persona con permiso decide, y la ejecución es automática.
+
 ### 2.5 Contratos que vienen de otro sistema
 
 `POST /contracts/import` (`contracts.import`, especial). **Se migra la foto financiera al corte, no la
@@ -210,6 +215,9 @@ terminan divergiendo (ya pasó).
   `reference_type`/`reference_id`.
 - **Reabrir** (`cashbox.reopen`, especial, motivo, auditado, alerta A4) **revierte el ajuste que emitió el
   cierre**: deshacer una operación es deshacer sus efectos, no su registro (F21-32).
+- **Una venta es un documento; el movimiento de caja es el libro del dinero**, generado automáticamente desde cada
+  documento (venta, abono, préstamo, compra, gasto), etiquetado por módulo (`pawn`/`store`/`general`), medio y
+  referencia. Nada se digita dos veces.
 - **Gastos** (`cashbox.expense`): documento con cuenta y medio; es el único movimiento "manual" junto con los
   ajustes.
 - **Una sesión abierta durante días** ensucia el acta y los reportes por fecha de sesión; es un hábito que el
@@ -470,3 +478,12 @@ una empresa: `python scripts/qa/verificar_sedes.py` (sale con 1 si la premisa se
 - **Partida doble y cierre de ejercicio**: la utilidad se mide por período consultado.
 - **WhatsApp** como canal de avisos; **correo certificado** para el aviso de remate (anotado como mejora).
 - Socios con porcentajes, aportes en especie, impuestos.
+
+## 14. Las especificaciones retiradas
+
+Este documento reemplazó a las especificaciones por módulo (`NOTIFICACIONES.md`, `RECARGOS.md`,
+`CAJA_TRAZABILIDAD.md`, `CAPITAL_DEL_DUENO.md`, `MIGRACION_CONTRATOS.md`, `CONTEXTO.md`) y a los registros
+(`QA_AUDITORIA.md`, `PENDIENTES_BACKEND_INFRA.md`, `CONTINUAR.md`, `STORAGE_PENDIENTE.md`). Varios comentarios del
+código y de los tests todavía los citan por sección: esas citas son **historia**, no la regla vigente. Para leer el
+original: `git show 3b6b409:docs/NOTIFICACIONES.md` (mismo commit para los demás). Si una cita histórica y este
+documento no coinciden, manda el código y después este documento.
