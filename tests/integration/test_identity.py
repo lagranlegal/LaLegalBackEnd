@@ -811,3 +811,55 @@ async def test_clonar_un_rol_exige_tener_sus_permisos(client: TestClient, tenant
     )
     assert response.status_code == 403, response.text
     assert response.json()["code"] == "ROLE_EXCEEDS_ACTOR_PERMISSIONS"
+
+
+async def test_reactivar_a_quien_nunca_completo_su_invitacion_lo_deja_invitado(
+    client: TestClient, tenant: dict
+) -> None:
+    """`active` significa que la persona ya puede entrar con su contraseña.
+    Quien fue desactivado antes de completar su invitación vuelve a
+    `invited` al reactivarlo, para que el enlace de activación siga
+    siendo el camino y la lista no lo muestre como listo para entrar."""
+    invitado = await _crear_invitado(tenant)
+    headers = _headers(tenant["admin_token"])
+
+    r = client.post(f"/api/v1/identity/users/{invitado}/deactivate", headers=headers)
+    assert r.status_code == 204, r.text
+    assert await _estado(invitado) == "inactive"
+
+    r = client.post(f"/api/v1/identity/users/{invitado}/reactivate", headers=headers)
+    assert r.status_code == 204, r.text
+    assert await _estado(invitado) == "invited"
+
+
+async def test_reactivar_a_un_invitado_no_lo_activa(client: TestClient, tenant: dict) -> None:
+    invitado = await _crear_invitado(tenant)
+
+    r = client.post(
+        f"/api/v1/identity/users/{invitado}/reactivate",
+        headers=_headers(tenant["admin_token"]),
+    )
+    assert r.status_code == 204, r.text
+    assert await _estado(invitado) == "invited"
+
+
+async def test_reactivar_a_un_usuario_que_ya_entraba_lo_deja_activo(
+    client: TestClient, tenant: dict
+) -> None:
+    invitado = await _crear_invitado(tenant)
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("update public.app_user set status = 'active' where id = :id"),
+            {"id": str(invitado)},
+        )
+    headers = _headers(tenant["admin_token"])
+
+    assert (
+        client.post(f"/api/v1/identity/users/{invitado}/deactivate", headers=headers).status_code
+        == 204
+    )
+    assert (
+        client.post(f"/api/v1/identity/users/{invitado}/reactivate", headers=headers).status_code
+        == 204
+    )
+    assert await _estado(invitado) == "active"

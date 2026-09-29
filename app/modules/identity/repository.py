@@ -111,6 +111,33 @@ async def set_user_status(
     )
 
 
+async def status_before_last_deactivation(
+    db: AsyncSession, *, company_id: UUID, user_id: UUID
+) -> str | None:
+    """Estado que tenía el usuario justo antes de su última desactivación,
+    leído del `audit_log` que la desactivación escribe en la misma
+    transacción. `None` si no hay registro."""
+    row = (
+        await db.execute(
+            text(
+                """
+                select before ->> 'status' as status
+                from public.audit_log
+                where company_id = :company_id
+                  and entity_type = 'app_user'
+                  and entity_id = :user_id
+                  and action = 'deactivate_user'
+                  and before ->> 'status' <> 'inactive'
+                order by created_at desc, id desc
+                limit 1
+                """
+            ),
+            {"company_id": str(company_id), "user_id": str(user_id)},
+        )
+    ).first()
+    return row[0] if row is not None else None
+
+
 async def lock_admin_safeguard(db: AsyncSession, *, company_id: UUID) -> None:
     """Candado por EMPRESA para la salvaguarda del último administrador.
 

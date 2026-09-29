@@ -284,7 +284,25 @@ async def _set_user_active_status(
                 code="LAST_ADMIN_SAFEGUARD",
             )
 
-    new_status = "active" if active else "inactive"
+    current_status = user._mapping["status"]
+    if not active:
+        new_status = "inactive"
+    elif current_status != "inactive":
+        # Reactivar a quien no está inactivo no cambia nada: un invitado sigue
+        # invitado hasta que entre con su propia contraseña.
+        new_status = current_status
+    else:
+        # Reactivar devuelve al estado que tenía antes de desactivarlo. Quien
+        # nunca completó su invitación vuelve a `invited`, no a `active`:
+        # `active` significa "ya puede entrar por su cuenta" (ver
+        # `get_current_user`), y esa persona todavía no tiene contraseña.
+        previous = await repository.status_before_last_deactivation(
+            db, company_id=company_id, user_id=user_id
+        )
+        new_status = "invited" if previous == "invited" else "active"
+
+    if new_status == current_status:
+        return
     await repository.set_user_status(db, company_id=company_id, user_id=user_id, status=new_status)
     await repository.insert_audit_log(
         db,
@@ -294,7 +312,7 @@ async def _set_user_active_status(
         action="reactivate_user" if active else "deactivate_user",
         entity_type="app_user",
         entity_id=user_id,
-        before={"status": user._mapping["status"]},
+        before={"status": current_status},
         after={"status": new_status},
     )
 
