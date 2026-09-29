@@ -8,7 +8,7 @@ Dos clases de consulta, y conviene no mezclarlas al leer:
 - Las de los **endpoints** corren con `get_tenant_db` y RLS encima.
 
 Las fechas "del día" se comparan en la zona horaria de la EMPRESA
-(`at time zone :tz`), nunca con `current_date` (ARCHITECTURE §10).
+(`at time zone :tz`), nunca con `current_date` (docs/ARQUITECTURA.md §9).
 """
 
 import json

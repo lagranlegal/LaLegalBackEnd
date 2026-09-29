@@ -56,8 +56,8 @@ def is_allowed_moment(local: datetime, limits: ContactLimits) -> bool:
 def next_allowed_moment(local: datetime, limits: ContactLimits) -> datetime:
     """El primer instante >= `local` en que se puede contactar al cliente.
 
-    `local` tiene que venir con la zona horaria de la EMPRESA (ARCHITECTURE
-    §10): "las 7 a. m." son las del cliente, no las de Fly en UTC.
+    `local` tiene que venir con la zona horaria de la EMPRESA (ARQUITECTURA.md
+    §9): "las 7 a. m." son las del cliente, no las de Fly en UTC.
     """
     if is_allowed_moment(local, limits):
         return local

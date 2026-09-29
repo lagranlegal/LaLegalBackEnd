@@ -272,8 +272,8 @@ async def profit_summary(
     descuenta del total (por eso el subquery en vez de un join plano — un join
     con las líneas repetiría el descuento por cada línea de la venta).
 
-    Las fechas se comparan en la zona horaria de la EMPRESA (§10
-    ARCHITECTURE.md), no en UTC: `sold_at` es timestamptz y el "hoy" del
+    Las fechas se comparan en la zona horaria de la EMPRESA (§9 de
+    docs/ARQUITECTURA.md), no en UTC: `sold_at` es timestamptz y el "hoy" del
     negocio termina a medianoche de Bogotá, no de Londres.
 
     --- DEVOLUCIONES (F21-12) ------------------------------------------------

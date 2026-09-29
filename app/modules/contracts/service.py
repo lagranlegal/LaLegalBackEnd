@@ -1128,7 +1128,7 @@ async def recompute_all_statuses(db: AsyncSession) -> int:
     """Job nocturno (CLAUDE.md): recalcula estados de todos los contratos no
     terminales, de todas las empresas. Corre con sesión de bypass (`get_db`,
     no tenant-scoped). Invocable manualmente hasta que exista un scheduler
-    real (pg_cron / Fly machine programada) — ver docs/ARCHITECTURE.md.
+    real (pg_cron / Fly machine programada) — ver docs/ARQUITECTURA.md §11.
     """
     rows = await repository.list_active_contracts_for_recompute(db)
     updated = 0

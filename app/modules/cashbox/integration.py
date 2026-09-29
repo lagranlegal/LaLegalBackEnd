@@ -1,7 +1,7 @@
 """Funciones de integración mínimas de `cashbox`, adelantadas para que
 `contracts` (paso 5) pueda desembolsar/cobrar de verdad. El resto del módulo
 (sesiones abrir/cerrar, gastos, cierre con acta, reapertura) es el paso 6 —
-ver docs/ARCHITECTURE.md.
+ver docs/ARQUITECTURA.md y docs/DOMINIO.md.
 """
 
 from dataclasses import dataclass

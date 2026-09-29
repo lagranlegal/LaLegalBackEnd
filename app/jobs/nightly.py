@@ -1,7 +1,7 @@
 """Job nocturno (CLAUDE.md): recalcula estados de contratos y marca
 suscripciones vencidas, para todas las empresas. Corre fuera del ciclo de
 request de FastAPI — invocado por un proceso programado (Fly Machine con
-`schedule`, ver `fly.toml` y `docs/ARCHITECTURE.md` §11), o a mano con
+`schedule`, ver `fly.toml` y `docs/ARQUITECTURA.md` §11), o a mano con
 `python -m app.jobs.nightly` mientras no haya scheduler configurado.
 
 Cada paso corre en su propia transacción de bypass (`AsyncSessionLocal`

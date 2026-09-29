@@ -412,7 +412,7 @@ async def expire_overdue_subscriptions(db: AsyncSession) -> int:
     """Job nocturno (CLAUDE.md): marca `expired` las suscripciones cuyo
     `expires_at` ya pasó — bloquea acceso (`get_current_user` rechaza con
     `SUBSCRIPTION_EXPIRED` en cuanto el `status` deja de ser `active`).
-    Compara contra el "hoy" de CADA empresa (§10 ARCHITECTURE.md), no un
+    Compara contra el "hoy" de CADA empresa (docs/ARQUITECTURA.md §9), no un
     corte único en UTC. Corre con sesión de bypass (`get_db`, no
     tenant-scoped): necesita ver todas las empresas.
     """
