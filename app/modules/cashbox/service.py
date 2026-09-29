@@ -80,7 +80,7 @@ async def _resolve_active_register(db: AsyncSession, *, company_id: UUID) -> UUI
     Hoy hay **una** registradora por empresa y ningún endpoint puede crear
     otra (solo `platform.create_company_defaults`, y crea una). Si algún día
     aparece una segunda, esto **falla en vez de elegir**: ver
-    `MultipleRegistersNotSupportedError` y `docs/SUCURSALES.md` §5.
+    `MultipleRegistersNotSupportedError` y `docs/diseno/SUCURSALES.md` §5.
     """
     registers = await repository.list_active_registers(db, company_id=company_id)
     if not registers:

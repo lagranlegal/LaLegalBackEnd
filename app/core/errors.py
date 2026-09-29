@@ -75,7 +75,7 @@ class MultipleRegistersNotSupportedError(AppError):
     se enteraría**. Fallar fuerte convierte un descuadre inexplicable en un
     mensaje que dice qué pasa.
 
-    Ver `docs/SUCURSALES.md` §5, Acción B.
+    Ver `docs/diseno/SUCURSALES.md` §5, Acción B.
     """
 
     status_code = status.HTTP_409_CONFLICT

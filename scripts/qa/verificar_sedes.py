@@ -11,7 +11,7 @@ código ya lo cubre `tests/integration/test_cashbox.py` y `test_platform.py`.
 
 QUÉ VIGILA, Y POR QUÉ IMPORTA
 =============================
-Multi-caja y multi-sucursal están aplazados (`docs/SUCURSALES.md`). Esa
+Multi-caja y multi-sucursal están aplazados (`docs/diseno/SUCURSALES.md`). Esa
 decisión es segura mientras se cumpla una premisa: **cada empresa opera en un
 solo lugar físico**. Mientras sea cierta, el día que se implementen sucursales
 todo lo registrado hasta entonces se atribuye a "Sede principal" sin
@@ -107,13 +107,13 @@ def main() -> int:
 
     if not hallazgos:
         print("\n  OK — una caja y un cajón ligado por empresa.")
-        print("  La premisa de SUCURSALES.md §3 se sostiene: aplazar sigue siendo seguro.\n")
+        print("  La premisa de diseno/SUCURSALES.md §3 se sostiene: aplazar sigue siendo seguro.\n")
         return 0
 
     print(f"\n  {len(hallazgos)} hallazgo(s):\n")
     for h in hallazgos:
         print(f"    · {h}")
-    print("\n  Ver docs/SUCURSALES.md — §5 (las acciones) y §7 (la ventana cerrándose).\n")
+    print("\n  Ver docs/diseno/SUCURSALES.md — §5 (las acciones) y §7 (la ventana cerrándose).\n")
     return 1
 
 

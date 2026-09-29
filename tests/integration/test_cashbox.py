@@ -238,7 +238,7 @@ async def test_a_second_active_register_fails_loudly_instead_of_picking_one(
     Este estado **no se puede alcanzar por la API** (ningún endpoint crea
     registradoras), así que el test lo fabrica insertando directo. Eso es
     justamente el caso para el que existe el error: que aparezca una segunda
-    por fuera de la aplicación. Ver `docs/SUCURSALES.md` §5, Acción B.
+    por fuera de la aplicación. Ver `docs/diseno/SUCURSALES.md` §5, Acción B.
     """
     company_id = cashbox_tenant["company_id"]
     async with AsyncSessionLocal() as session, session.begin():

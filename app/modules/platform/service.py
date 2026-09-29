@@ -146,7 +146,7 @@ async def create_company_defaults(
     )
     # El cajón nace ligado a su registradora (00052). Hoy nadie lee
     # `register_id`; existe para que el día que haya un segundo mostrador la
-    # atribución no haya que adivinarla. Ver `docs/SUCURSALES.md` §5.
+    # atribución no haya que adivinarla. Ver `docs/diseno/SUCURSALES.md` §5.
     register_id = await repository.insert_cash_register(db, company_id=company_id)
     await repository.insert_default_accounts(db, company_id=company_id, register_id=register_id)
 

@@ -255,7 +255,7 @@ async def insert_cash_register(db: AsyncSession, *, company_id: UUID) -> UUID:
     estas dos inserciones corrían seguidas y no se hablaban, así que **ninguna
     cuenta de efectivo del sistema sabía a qué caja pertenecía** — un dato
     trivial de poner hoy (una registradora, un cajón) e imposible de deducir
-    el día que haya dos. Ver `docs/SUCURSALES.md` §5.
+    el día que haya dos. Ver `docs/diseno/SUCURSALES.md` §5.
     """
     result = await db.execute(
         text("insert into public.cash_register (company_id) values (:company_id) returning id"),

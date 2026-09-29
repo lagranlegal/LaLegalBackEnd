@@ -1,4 +1,4 @@
-# SUCURSALES.md — Multi-caja y multi-sucursal (fase 2)
+# Multi-caja y multi-sucursal (diseño, aplazado)
 
 > **Estado: APLAZADO por decisión de Mateo (10/09/2026).** No se trabaja nada de multi-caja ni de multi-sucursal por ahora. Este documento es el análisis previo y el lugar donde se retoma el día que haga falta.
 >
@@ -20,26 +20,18 @@ El proyecto viene tratándolas como una sola cosa y **son dos trabajos de tamañ
 | Qué separa | El **cajón** — para que un faltante tenga dueño | El **inventario, la bóveda, la gente y la contabilidad** |
 | Qué existe hoy | Casi todo el modelo; falta trabajo de aplicación | **Nada** |
 | Tamaño | Días | Semanas, y toca los 13 módulos |
-| Dónde está descrito | [`CAJA_TRAZABILIDAD.md`](CAJA_TRAZABILIDAD.md) §6 | Este documento |
+| Dónde está descrito | [`../DOMINIO.md`](../DOMINIO.md) §4 (el modelo de efectivo) | Este documento |
 
 **Multi-caja ya está a medio camino:** `cash_register` existe desde `00007`, `cash_session` cuelga de `register_id`, el índice de sesión abierta ya es **por registradora** (o sea que la base ya admite dos turnos abiertos a la vez) y `account.register_id` quedó puesta y vacía en `00049`.
 
 **Multi-sucursal no empieza ahí.** Empieza en una pregunta que el modelo no puede responder: *¿dónde está esta cadena de oro?*
 
-## 2. Corrección: lo que `CONTEXTO.md` promete no existe
+## 2. Lo que no existe todavía
 
-`docs/CONTEXTO.md` §3 dice:
-
-> *"Sucursales: sin sedes hoy; **diseño listo para activar multi-sucursal en F2 sin migración** (tabla branch + branch_id nullable en cash_register y app_user; consecutivos siguen por empresa)."*
-
-Verificado contra el esquema real el 10/09/2026, y **es falso en dos puntos**:
-
-- **La tabla `branch` no existe.** No aparece en ninguna de las 51 migraciones. Lo único que hay es un comentario en `00007_cashbox.sql` que la anuncia.
-- **"Sin migración" no puede ser cierto.** Crear una tabla y una columna es una migración. Lo que el texto quiere decir es *"sin migración de DATOS"*, y eso sí es verdad (§4).
-
-Es el tercer caso del mismo patrón, y ya está escrito como principio del proyecto: **un comentario puede estar mintiendo; verificar lo que el SQL hace, no lo que promete.** Los dos anteriores fueron el índice de `00024` y la racionalización de `ARCHITECTURE §12`.
-
-Lo que sí es cierto de esa frase: **"consecutivos siguen por empresa"** es una decisión tomada y sigue siendo la correcta (§12).
+**La tabla `branch` no existe** (solo un comentario en `00007_cashbox.sql` la anuncia) e `inventory_item` no tiene
+ubicación. Un documento de traspaso de agosto decía que multi-sucursal estaba "listo sin migración": era falso, y
+por eso este diseño se verifica contra el esquema y no contra lo que se prometió. Lo que sí sigue en pie de aquella
+decisión: **los consecutivos siguen por empresa** (§12).
 
 ---
 
@@ -223,7 +215,7 @@ Si se opera con dos sitios sobre un solo registro, esto es lo que **sí** se pod
 
 ### R5 · Que este documento envejezca — BAJO, y ya mordió una vez
 
-`CONTEXTO.md` afirma desde agosto que esto está listo (§2). El antídoto es el mismo que el proyecto ya usa: que la afirmación tenga **fecha y forma de comprobarse**. Por eso §4 trae la consulta y no una descripción.
+Un documento de agosto afirmaba que esto estaba listo (§2). El antídoto es el mismo que el proyecto ya usa: que la afirmación tenga **fecha y forma de comprobarse**. Por eso §4 trae la consulta y no una descripción.
 
 ## 7. Cómo detectar que la ventana se está cerrando
 

@@ -223,7 +223,7 @@ async def test_create_company_defaults_creates_seed_roles_and_cash_register(
         # este test es que no vuelva a existir una empresa cuyo efectivo no se
         # pueda atribuir a un mostrador. Hoy el dato es trivial (una
         # registradora, un cajón) y el día que haya dos ya no se puede deducir
-        # — ver `docs/SUCURSALES.md` §5, Acción A.
+        # — ver `docs/diseno/SUCURSALES.md` §5, Acción A.
         cajon_register_id = (
             await session.execute(
                 text(
