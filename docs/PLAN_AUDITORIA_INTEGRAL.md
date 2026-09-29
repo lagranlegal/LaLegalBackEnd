@@ -93,7 +93,11 @@ la consolidación la hace el orquestador.
 | — | ✅ Tanda de arreglos (commits locales, 21 back + 18 front): A concurrencia e idempotencia (+00061), B permisos/Storage (+00062)/referencias entre empresas/decisiones de Mateo/reportes/errores 500, D y E front. Back 867 tests, front 495 |
 | 12 | ✅ guía revisada (54 errores corregidos); se publica tras desplegar |
 | 13 | ✅ `PRODUCCION.md` |
-| 7–11, 14–16 | pendiente |
+| 7 | ✅ 27–28/09 — libro paralelo en ZZ AI — Reportes: 136/142 comprobaciones; mermas, comisiones y descuadres faltaban en el estado de resultados |
+| 8 | ✅ 28–29/09 — 14 hallazgos (plantilla activa vaciable, acta, Ley 2300 sin piso, comprobantes) |
+| 10 | ✅ 28/09 — RLS, JWT, CSP y CORS sanos; defensa en profundidad aplicada en 00064 |
+| — | ✅ 29/09 Tandas F1 (reportes y ventas), F2 (seguridad) y G (front) desplegadas y verificadas en navegador |
+| 9, 11, 14–16 | pendiente |
 
 ## Hallazgos confirmados en la fase 1
 
