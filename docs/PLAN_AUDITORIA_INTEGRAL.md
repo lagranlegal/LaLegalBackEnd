@@ -5,7 +5,7 @@
 > mejoras. Es un documento de trabajo: cuando la auditoría cierre, lo que siga vigente se funde en la
 > documentación consolidada y este archivo se archiva.
 >
-> **Continuidad.** Retoma las fases 0–10 de [`QA_AUDITORIA.md`](QA_AUDITORIA.md) (08–09/09/2026) y los
+> **Continuidad.** Retoma las fases 0–10 de `QA_AUDITORIA.md` (08–09/09/2026; hoy en la historia de git, método vigente en [`QA.md`](QA.md)) y los
 > defectos F20/F21. No las repite: las usa como regresión y va sobre lo que nació después (notificaciones,
 > ampliaciones, capital del dueño, sucursales, notas crédito, landing, plantillas nuevas).
 

@@ -12,9 +12,9 @@
 > **Base verificada** (27/09/2026, solo lectura): `Dockerfile`, `fly.dev.toml`, `fly.prod.toml`,
 > `scripts/deploy_dev.sh`, `scripts/qa/verificar_job_nocturno.py`, `scripts/qa/verificar_cadenas.py`,
 > `app/core/{settings,db,security}.py`, `app/common/cors.py`, `app/jobs/nightly.py`,
-> `app/modules/platform/{router,schemas}.py`, `supabase/{config.toml,seed.sql,migrations/}` (61 migraciones,
-> `00001`–`00061`), `.github/workflows/guardianes.yml`, `docs/NOTIFICACIONES.md`, y del front `vercel.json`,
-> `package.json`, `vite.config.ts`, `.env.example`, `docs/DEPLOY.md`; `RUNBOOK_USUARIOS.md` en la raíz.
+> `app/modules/platform/{router,schemas}.py`, `supabase/{config.toml,seed.sql,migrations/}` (todas las migraciones
+> de la carpeta), `.github/workflows/guardianes.yml`, `docs/DOMINIO.md` §9, y del front `vercel.json`,
+> `package.json`, `vite.config.ts`, `.env.example`, `docs/DEPLOY.md`; `docs/OPERACION.md` §6.
 > En vivo: `fly apps list`, `fly machines list`, `fly secrets list` (solo nombres), `fly certs list`, y
 > lecturas `GET` de la API de Vercel (dominios, rama de producción, plan del team).
 
@@ -250,7 +250,7 @@ codificarlo.
 cd backend-starter
 read -s PROD_DB_URL; export PROD_DB_URL     # pegar la URL completa del session pooler
 supabase migration list --db-url "$PROD_DB_URL"          # todas en la columna Local, ninguna en Remote
-supabase db push --db-url "$PROD_DB_URL" --dry-run       # debe listar 00001 … 00061 (o las que haya en ese momento)
+supabase db push --db-url "$PROD_DB_URL" --dry-run       # debe listar desde 00001 hasta la última de supabase/migrations/
 supabase db push --db-url "$PROD_DB_URL"
 ```
 
@@ -462,7 +462,7 @@ Verificación: la lista de API keys de Resend muestra las dos nuevas; su «Last 
 El plan gratis de Resend son 3.000 correos/mes **por cuenta**, y dev y prod comparten cuenta y dominio: el QA
 de dev consume la cuota de prod. ⚠️ SUPUESTO: el tope diario del plan gratis (se cree que 100/día) **no está
 verificado**; importa porque el resumen diario y los recordatorios salen en la misma corrida del job.
-`NOTIFICACIONES.md` §10 estima ~155 correos/mes por inquilino del tamaño de LA GRAN LEGAL. Antes de encender
+La estimación de diseño de los avisos (NOTIFICACIONES §10, en la historia de git) es de ~155 correos/mes por inquilino del tamaño de LA GRAN LEGAL. Antes de encender
 avisos al cliente en prod: confirmar el tope diario y decidir plan pago o cuenta aparte.
 
 ### 2.4 · DMARC y buzón de contacto
@@ -648,11 +648,11 @@ Si el log muestra un error de conexión a la base: la Machine no tiene los secre
 `fly secrets import`) → `fly machine update "$JOB" --image "$IMG" -a prendo-api-prod --yes`.
 
 **La hora (D9).** `--schedule daily` no fija la hora: la decide Fly. Hay además una hipótesis abierta
-(`NOTIFICACIONES.md` §13) de que cada `machine update` reinicia ese reloj. En prod eso define a qué hora les
+(`OPERACION.md` §3) de que cada `machine update` reinicia ese reloj. En prod eso define a qué hora les
 llega el resumen a las empresas. Primera semana: anotar la hora de cada corrida
 (`fly logs … | grep job_nocturno_completado`). Si hace falta hora fija: un workflow de GitHub con `cron` que
 haga `flyctl machine start <JOB> -a prendo-api-prod` (necesita un token que pueda arrancar Machines, no uno de
-solo lectura). El job es idempotente (llaves construidas, `NOTIFICACIONES.md` §6), así que una corrida extra
+solo lectura). El job es idempotente (llaves construidas, `DOMINIO.md` §9), así que una corrida extra
 no duplica correos.
 
 ### 3.7 · Escalado (D10)
@@ -943,7 +943,7 @@ curl -s -X POST https://api.prendo.com.co/api/v1/platform/companies \
 
 Qué debe verse: `201`, `status: "active"`, `plan_code: "full"`, `link: true`. El `admin_invite_link` es una
 credencial de un solo uso: se entrega por un canal directo (en persona o por WhatsApp; su canje es por POST,
-así que la vista previa de WhatsApp no lo quema — `RUNBOOK_USUARIOS.md` §1).
+así que la vista previa de WhatsApp no lo quema — `OPERACION.md` §6).
 
 Verificación del efecto:
 
@@ -981,7 +981,7 @@ falla, no se abre prod a clientes.
 | 6 | `www` y HSTS | `curl -sI https://www.prendo.com.co` y `curl -sI https://prendo.com.co` | 308 → apex; `strict-transport-security` presente |
 | 7 | Bundle correcto | los `grep` de §4.1.5 contra `https://prendo.com.co` | `api.prendo.com.co` > 0; `api-dev`/`driyubkodnsqxbtxcmaz` = 0 |
 | 8 | Login de empresa | el admin de §6.2 entra a `/inicio` | panel carga; en la pestaña Red, `GET /api/v1/me` → 200 |
-| 9 | Caja | abrir la caja del día | abre; sin caja abierta no se pueden crear contratos (`RUNBOOK_USUARIOS.md` §7) |
+| 9 | Caja | abrir la caja del día | abre; sin caja abierta no se pueden crear contratos (`OPERACION.md` §7) |
 | 10 | Storage | crear un cliente con foto de cédula y volver a abrirla | la foto sube a `company-files/{company_id}/customers/…` y la URL firmada la muestra |
 | 11 | Flujo de dinero | contrato → abono → venta → cierre de caja | montos, estado del contrato y acta de cierre correctos |
 | 12 | Correo de Auth | «¿Olvidaste tu contraseña?» con el admin de la empresa | llega desde `no-responder@prendo.com.co`; el enlace es `https://prendo.com.co/auth/callback?token_hash=…&type=recovery` y funciona |
@@ -1035,7 +1035,7 @@ curl -fsS https://api.prendo.com.co/openapi.json | jq -r '"\(.info.title) · \(.
 
 ⚠️ SUPUESTO: `fly machine update` sin `--skip-start` **arranca** la Machine, o sea que cada deploy corre el job
 una vez más (es lo que hace hoy `deploy_dev.sh`). El job es idempotente, así que no duplica nada; lo que no
-está medido es si eso mueve la hora de las corridas siguientes (hipótesis abierta en `NOTIFICACIONES.md` §13).
+está medido es si eso mueve la hora de las corridas siguientes (hipótesis abierta en `OPERACION.md` §3).
 
 Front: mergear el PR `dev` → `main` del repo del front. Verificar el bundle servido (§4.1.5 contra
 `https://prendo.com.co`), no el dashboard.
@@ -1117,7 +1117,7 @@ Y **nunca** `supabase link` a prod (§1.5).
 - ¿Corrió anoche? `fly logs -a prendo-api-prod --machine <JOB> --no-tail | grep job_nocturno_completado`, o
   en `fly machine status <JOB> -a prendo-api-prod` el último evento de salida con código 0.
 - Desde la base, de solo lectura: `select max(occurred_on) from public.notification_event;` avanza cada noche
-  cuando hay empresas con contratos vivos (`NOTIFICACIONES.md` §20.4).
+  cuando hay empresas con contratos vivos (`DOMINIO.md` §9).
 - ¿No corrió? `fly machine start <JOB> -a prendo-api-prod` (idempotente) y averiguar por qué: el guardián
   dice si perdió el `schedule` o la imagen.
 - **Nunca** `fly machine destroy` de `nightly-job` ni ponerle process group (el porqué completo está en el
