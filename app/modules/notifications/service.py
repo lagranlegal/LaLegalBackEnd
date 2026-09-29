@@ -331,6 +331,11 @@ def _validate_event_codes(events: dict[str, bool | None]) -> None:
         )
 
 
+class ContactLimitsBelowLegalFloorError(AppError):
+    status_code = 422
+    code = "CONTACT_LIMITS_BELOW_LEGAL_FLOOR"
+
+
 async def update_settings_for_company(
     db: AsyncSession, *, company_id: UUID, body: NotificationSettingsUpdateIn, actor_id: UUID
 ) -> NotificationSettingsOut:
@@ -355,8 +360,22 @@ async def update_settings_for_company(
             thresholds[key] = str(value)
         data["thresholds"] = thresholds
     if body.customer_contact_limits is not None:
+        patch = body.customer_contact_limits.model_dump(exclude_none=True)
+        # F8-05: la empresa puede endurecer los límites de la Ley 2300, no
+        # aflojarlos. Se rechaza en vez de sujetar en silencio: quien guarda
+        # «domingos: sí» tiene que enterarse de que no va a pasar.
+        malos = preferences.legal_floor_violations(patch)
+        if malos:
+            raise ContactLimitsBelowLegalFloorError(
+                "Estos límites quedan por debajo de lo que permite la Ley 2300 de 2023. "
+                "La empresa puede ser más estricta, no menos.",
+                details={
+                    "fields": malos,
+                    "floor": preferences.LEGAL_FLOOR.as_dict(),
+                },
+            )
         limits = dict(data["customer_contact_limits"])
-        for key, value in body.customer_contact_limits.model_dump(exclude_none=True).items():
+        for key, value in patch.items():
             limits[key] = list(value) if isinstance(value, tuple) else value
         data["customer_contact_limits"] = limits
     if body.stale_after_days is not None:

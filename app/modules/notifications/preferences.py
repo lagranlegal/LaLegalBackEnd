@@ -166,6 +166,76 @@ class NotificationPrefs:
         return catalog.get(code).default_enabled
 
 
+#: El PISO de la Ley 2300 de 2023 (§12.3-1, criterio del dueño del 25/09/2026):
+#: lunes a viernes de 7:00 a 19:00, sábados de 8:00 a 15:00, sin domingos ni
+#: festivos, un contacto de cobranza por semana por canal, y el control siempre
+#: encendido. Son los mismos valores de fábrica de `ContactLimits`.
+#:
+#: Hasta la auditoría de QA (F8-05) eran solo el DEFAULT: el `PATCH` aceptaba
+#: `enabled=false`, 00:00–23:59, domingos y 50 por semana, y la cláusula del
+#: contrato promete «los horarios y la frecuencia que permite la Ley 2300». Una
+#: empresa puede ser MÁS estricta; menos, no.
+#:
+#: Es configuración de la PLATAFORMA, no del inquilino — la ley es la misma
+#: para todas (el mismo criterio de §9.2-d). Si una revisión legal dice otra
+#: cosa, se cambia acá. Se lee en cada llamada (no se copia al importar), así
+#: que un test puede reemplazarlo.
+LEGAL_FLOOR = ContactLimits()
+
+
+def clamp_to_legal_floor(limits: ContactLimits) -> ContactLimits:
+    """`limits` sujeto al piso: lo que ya era más estricto queda igual.
+
+    Se aplica al LEER (`parse_limits`), no con una migración: una empresa que
+    guardó valores fuera del piso antes de F8-05 no pierde su configuración
+    —la ve sujetada, y al guardar de nuevo queda guardada así—, pero desde el
+    próximo envío el despachador ya no la usa más laxa de lo que permite la
+    ley. Una ventana que queda vacía (p. ej. un sábado configurado de 16:00 a
+    18:00) significa «ese día no se contacta», que es más estricto y legal.
+    """
+    floor = LEGAL_FLOOR
+    return ContactLimits(
+        enabled=limits.enabled or floor.enabled,
+        max_per_week=min(limits.max_per_week, floor.max_per_week),
+        # El diario es de producto (§3), no de la ley: no tiene piso.
+        max_per_day=limits.max_per_day,
+        weekday_start=max(limits.weekday_start, floor.weekday_start),
+        weekday_end=min(limits.weekday_end, floor.weekday_end),
+        saturday_start=max(limits.saturday_start, floor.saturday_start),
+        saturday_end=min(limits.saturday_end, floor.saturday_end),
+        sundays_and_holidays=limits.sundays_and_holidays and floor.sundays_and_holidays,
+        transactional_in_weekly_cap=(
+            limits.transactional_in_weekly_cap or floor.transactional_in_weekly_cap
+        ),
+    )
+
+
+def legal_floor_violations(patch: dict[str, Any]) -> list[str]:
+    """Qué campos de un PATCH de `customer_contact_limits` aflojan el piso.
+
+    Al ESCRIBIR se rechaza (422) en vez de sujetar en silencio: quien guarda
+    «domingos: sí» tiene que enterarse de que no va a pasar.
+    """
+    floor = LEGAL_FLOOR
+    malos: list[str] = []
+    if patch.get("enabled") is False and floor.enabled:
+        malos.append("enabled")
+    if patch.get("sundays_and_holidays") is True and not floor.sundays_and_holidays:
+        malos.append("sundays_and_holidays")
+    if "max_per_week" in patch and patch["max_per_week"] > floor.max_per_week:
+        malos.append("max_per_week")
+    for campo, (inicio, fin) in (
+        ("weekday_hours", (floor.weekday_start, floor.weekday_end)),
+        ("saturday_hours", (floor.saturday_start, floor.saturday_end)),
+    ):
+        if campo in patch:
+            desde = _parse_time(patch[campo][0], inicio)
+            hasta = _parse_time(patch[campo][1], fin)
+            if desde < inicio or hasta > fin:
+                malos.append(campo)
+    return malos
+
+
 def _fmt(t: time) -> str:
     return t.strftime("%H:%M")
 
@@ -196,7 +266,7 @@ def parse_limits(raw: Any) -> ContactLimits:
     base = ContactLimits()
     weekday = _parse_hours(d.get("weekday_hours"), (base.weekday_start, base.weekday_end))
     saturday = _parse_hours(d.get("saturday_hours"), (base.saturday_start, base.saturday_end))
-    return ContactLimits(
+    configured = ContactLimits(
         enabled=bool(d.get("enabled", base.enabled)),
         max_per_week=int(d.get("max_per_week", base.max_per_week)),
         max_per_day=int(d.get("max_per_day", base.max_per_day)),
@@ -209,6 +279,7 @@ def parse_limits(raw: Any) -> ContactLimits:
             d.get("transactional_in_weekly_cap", base.transactional_in_weekly_cap)
         ),
     )
+    return clamp_to_legal_floor(configured)
 
 
 def parse_days(raw: Any, default: tuple[int, ...]) -> tuple[int, ...]:

@@ -137,3 +137,16 @@ def test_a_cap_of_zero_never_frees_up_and_disabled_limits_never_wait() -> None:
     off = ContactLimits(enabled=False)
     busy = [_at(2030, 9, 6, 9)] * 5
     assert cap_release_moment(now=now, sent_last_day=busy, sent_last_week=busy, limits=off) == now
+
+
+# ------------------------------------------- el piso de la Ley 2300 (F8-05) ----
+
+
+def test_an_empty_window_means_that_day_is_not_contacted() -> None:
+    """Sujetar al piso una configuración vieja puede dejar una ventana vacía
+    (un sábado de 16:00 a 18:00 queda en 16:00–15:00). Es «ese día no», no
+    «a las 16:00»."""
+    no_saturday = ContactLimits(saturday_start=time(16, 0), saturday_end=time(15, 0))
+    assert not is_allowed_moment(_at(2030, 9, 7, 16, 30), no_saturday)
+    # Sábado 7 → domingo 8 no → lunes 9 a las 7:00.
+    assert next_allowed_moment(_at(2030, 9, 7, 9), no_saturday) == _at(2030, 9, 9, 7)

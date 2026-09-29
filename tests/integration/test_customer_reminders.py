@@ -15,6 +15,7 @@ Septiembre de 2030: lunes 2, martes 3, miércoles 4, jueves 5, viernes 6.
 Todos los contratos son de $1.000.000 al 5 %: la cuota es $50.000.
 """
 
+import dataclasses
 import json
 from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, timedelta
@@ -28,7 +29,7 @@ from sqlalchemy import text
 from app.core.db import AsyncSessionLocal, engine
 from app.core.settings import get_settings
 from app.jobs import nightly
-from app.modules.notifications import catalog, dispatcher, reminders
+from app.modules.notifications import catalog, dispatcher, preferences, reminders
 from app.modules.notifications.providers import RecordingProvider
 
 R1 = "installment_due_soon"
@@ -230,14 +231,27 @@ def _key(prefix: str, customer_id: UUID, day: str) -> str:
     return f"{prefix}:{customer_id}:{day}"
 
 
+def _relax_legal_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """El piso de la Ley 2300 (`preferences.LEGAL_FLOOR`) es de la plataforma y
+    se lee en cada llamada: un test lo puede aflojar para aislar otra regla."""
+    monkeypatch.setattr(
+        preferences, "LEGAL_FLOOR", dataclasses.replace(preferences.LEGAL_FLOOR, max_per_week=5)
+    )
+
+
 # ------------------------------------------------ cada uno, en su fecha objetivo ----
 
 
-async def test_R1_goes_out_only_three_days_before(rem: dict[str, Any]) -> None:
+async def test_R1_goes_out_only_three_days_before(
+    rem: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """De fábrica, solo 3 días antes (decisión del 25/09/2026, §20.2-1). La
     fecha de la cuota es `add_months(interest_paid_until, 1)`: 6/08 ⇒ vence el
     viernes 6/09. El tope semanal se relaja para que no sea él quien calle el
-    viernes: si el viernes no sale nada, es porque no se planificó."""
+    viernes: si el viernes no sale nada, es porque no se planificó. Desde F8-05
+    la empresa no puede relajarlo por debajo de la Ley 2300; el test relaja el
+    PISO de la plataforma, que es donde vive esa decisión."""
+    _relax_legal_floor(monkeypatch)
     cid, juana = rem["company_id"], rem["juana"]
     await _enable(cid, R1, customer_contact_limits={"max_per_week": 5})
     number = await _contract(cid, juana, status="active", interest_paid_until=date(2030, 8, 6))
@@ -261,10 +275,14 @@ async def test_R1_goes_out_only_three_days_before(rem: dict[str, Any]) -> None:
     assert len(provider.outbox) == 1
 
 
-async def test_R1_configured_three_days_before_and_on_the_due_day(rem: dict[str, Any]) -> None:
+async def test_R1_configured_three_days_before_and_on_the_due_day(
+    rem: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Una empresa que configure `[3, 0]` (§12.1-1, el default hasta el
     25/09/2026) recibe los dos. El tope semanal se relaja acá para ver salir
-    los dos (su efecto tiene su test)."""
+    los dos (su efecto tiene su test) — en el piso de la plataforma, porque
+    desde F8-05 la empresa ya no puede aflojarlo."""
+    _relax_legal_floor(monkeypatch)
     cid, juana = rem["company_id"], rem["juana"]
     await _enable(
         cid,

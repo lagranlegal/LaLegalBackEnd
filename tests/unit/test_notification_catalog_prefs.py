@@ -1,6 +1,7 @@
 """Catálogo y preferencias de avisos (docs/NOTIFICACIONES.md §2, §4.3, §9.2,
 §12.3). Puro: sin BD."""
 
+from datetime import time
 from decimal import Decimal
 
 from app.modules.notifications import catalog, preferences
@@ -63,13 +64,56 @@ def test_roundtrip_keeps_everything() -> None:
             "enabled": True,
             "events": {"company_daily_digest": False},
             "thresholds": {"discount_amount": "50000", "cash_difference_amount": "10000"},
-            "customer_contact_limits": {"max_per_week": 2, "weekday_hours": ["08:00", "18:00"]},
+            "customer_contact_limits": {"max_per_week": 0, "weekday_hours": ["08:00", "18:00"]},
             "stale_after_days": 3,
         }
     }
     prefs = preferences.parse(raw)
     assert preferences.parse({"notifications": preferences.to_settings(prefs)}) == prefs
-    assert prefs.customer_contact_limits.max_per_week == 2
+    assert prefs.customer_contact_limits.max_per_week == 0
+
+
+def test_a_stored_configuration_below_the_legal_floor_is_clamped_when_read() -> None:
+    """F8-05: lo guardado antes del piso no se migra ni se borra; se sujeta al
+    leerlo, así que el despachador nunca lo usa más laxo que la Ley 2300. Lo
+    que ya era más estricto queda igual."""
+    raw = {
+        "notifications": {
+            "customer_contact_limits": {
+                "enabled": False,
+                "max_per_week": 50,
+                "max_per_day": 20,
+                "weekday_hours": ["00:00", "23:59"],
+                "saturday_hours": ["09:00", "23:00"],
+                "sundays_and_holidays": True,
+            }
+        }
+    }
+    limits = preferences.parse(raw).customer_contact_limits
+    assert limits.enabled is True
+    assert limits.max_per_week == 1
+    assert limits.max_per_day == 20  # el diario es de producto, no tiene piso
+    assert (limits.weekday_start, limits.weekday_end) == (time(7, 0), time(19, 0))
+    assert (limits.saturday_start, limits.saturday_end) == (time(9, 0), time(15, 0))
+    assert limits.sundays_and_holidays is False
+
+
+def test_legal_floor_violations_name_each_loosened_field() -> None:
+    assert (
+        preferences.legal_floor_violations(
+            {"max_per_week": 0, "weekday_hours": ("08:00", "18:00"), "enabled": True}
+        )
+        == []
+    )
+    assert preferences.legal_floor_violations(
+        {
+            "enabled": False,
+            "max_per_week": 2,
+            "weekday_hours": ("06:59", "18:00"),
+            "saturday_hours": ("08:00", "15:01"),
+            "sundays_and_holidays": True,
+        }
+    ) == ["enabled", "sundays_and_holidays", "max_per_week", "weekday_hours", "saturday_hours"]
 
 
 def test_purpose_basis_matrix() -> None:

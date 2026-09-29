@@ -762,9 +762,19 @@ async def test_weekly_cap_per_customer_throttles(notif: dict[str, Any]) -> None:
     assert (await _status(third))[0] == "sent"
 
 
-async def test_limits_are_relaxed_by_configuration(notif: dict[str, Any]) -> None:
+async def test_a_stored_configuration_cannot_relax_the_legal_floor(
+    notif: dict[str, Any],
+) -> None:
+    """F8-05: antes esta misma configuración —control apagado, domingos sí—
+    mandaba un recordatorio de cobranza un domingo a las 3 a. m. Guardada
+    antes del piso (escrita directo en el jsonb, como quedó en dev), se sujeta
+    al leerse: la entrega espera al lunes a las 7:00."""
     cid = notif["company_id"]
-    await _enable(cid, events=_DUE_ON, customer_contact_limits={"enabled": False})
+    await _enable(
+        cid,
+        events=_DUE_ON,
+        customer_contact_limits={"enabled": False, "sundays_and_holidays": True},
+    )
     delivery = await _pending(
         cid,
         event_type="installment_due_soon",
@@ -773,7 +783,46 @@ async def test_limits_are_relaxed_by_configuration(notif: dict[str, Any]) -> Non
         customer_id=notif["customer_mail"],
     )
     await _dispatch(cid, _bog(2030, 9, 1, 3), RecordingProvider())  # domingo 3 a. m.
-    assert (await _status(delivery))[0] == "sent"
+    status, scheduled_at = (await _status(delivery))[:2]
+    assert status == "pending"
+    assert scheduled_at == _bog(2030, 9, 2, 7)  # lunes 7:00
+
+
+def test_patch_cannot_loosen_the_legal_floor(client: TestClient, notif: dict[str, Any]) -> None:
+    """F8-05: el PATCH aceptaba `enabled=false`, 00:00–23:59, domingos y 50
+    por semana. Ahora la empresa puede endurecer, no aflojar."""
+    headers = {"Authorization": f"Bearer {notif['admin_token']}"}
+    for loose, field in (
+        ({"enabled": False}, "enabled"),
+        ({"weekday_hours": ["00:00", "23:59"]}, "weekday_hours"),
+        ({"saturday_hours": ["08:00", "16:00"]}, "saturday_hours"),
+        ({"sundays_and_holidays": True}, "sundays_and_holidays"),
+        ({"max_per_week": 2}, "max_per_week"),
+    ):
+        r = client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"customer_contact_limits": loose},
+        )
+        assert r.status_code == 422, r.text
+        assert r.json()["code"] == "CONTACT_LIMITS_BELOW_LEGAL_FLOOR", r.text
+        assert r.json()["details"]["fields"] == [field], r.text
+
+    stricter = client.patch(
+        "/api/v1/notifications/settings",
+        headers=headers,
+        json={
+            "customer_contact_limits": {
+                "weekday_hours": ["09:00", "17:00"],
+                "saturday_hours": ["09:00", "12:00"],
+                "max_per_week": 0,
+            }
+        },
+    )
+    assert stricter.status_code == 200, stricter.text
+    limits = stricter.json()["customer_contact_limits"]
+    assert limits["weekday_hours"] == ["09:00", "17:00"]
+    assert limits["max_per_week"] == 0
 
 
 async def test_limits_do_not_apply_to_the_company(notif: dict[str, Any]) -> None:

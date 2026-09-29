@@ -30,10 +30,17 @@ def _window_for(local: datetime, limits: ContactLimits) -> tuple[time, time] | N
     if day.weekday() == 6 or is_colombian_holiday(day):
         if not limits.sundays_and_holidays:
             return None
-        return limits.weekday_start, limits.weekday_end
-    if day.weekday() == 5:
-        return limits.saturday_start, limits.saturday_end
-    return limits.weekday_start, limits.weekday_end
+        window = limits.weekday_start, limits.weekday_end
+    elif day.weekday() == 5:
+        window = limits.saturday_start, limits.saturday_end
+    else:
+        window = limits.weekday_start, limits.weekday_end
+    # Una ventana vacía es «ese día no se contacta»: sale de sujetar al piso
+    # legal una configuración vieja que caía fuera de él (F8-05). Sin esto,
+    # `next_allowed_moment` devolvería su hora de inicio como si fuera hábil.
+    if window[0] >= window[1]:
+        return None
+    return window
 
 
 def is_allowed_moment(local: datetime, limits: ContactLimits) -> bool:
