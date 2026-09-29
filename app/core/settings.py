@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # solo en cada máquina; fuera de Fly y sin esto, los correos salen igual
     # pero sin esas cabeceras (el enlace del cuerpo sigue siendo la salida).
     public_api_url: str = ""
+    # Tope de invitaciones y enlaces de activación/recuperación por EMPRESA
+    # (`POST /identity/invitations` y `POST /identity/users/{id}/recovery-link`
+    # cuentan juntos). Se cuenta en `audit_log`, así que vale para todas las
+    # máquinas y sobrevive a un reinicio. Pasado cualquiera de los dos: 429
+    # `INVITATIONS_RATE_LIMITED`.
+    invitations_per_hour: int = 20
+    invitations_per_day: int = 100
 
     @property
     def jwt_issuer(self) -> str:

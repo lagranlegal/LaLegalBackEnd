@@ -138,6 +138,49 @@ async def status_before_last_deactivation(
     return row[0] if row is not None else None
 
 
+async def invitation_activity(
+    db: AsyncSession, *, company_id: UUID
+) -> tuple[int, int, float | None, float | None]:
+    """Invitaciones y enlaces de acceso emitidos por la empresa en la última
+    hora y en el último día, leídos del `audit_log` (cada emisión queda
+    auditada en su misma transacción). Devuelve también, para cada ventana,
+    cuántos segundos faltan para que salga de ella la emisión más antigua.
+
+    Antes de contar toma un candado de transacción por empresa: dos pedidos
+    simultáneos no cuentan ambos el mismo cupo libre."""
+    await db.execute(
+        text("select pg_advisory_xact_lock(hashtextextended('identity.invitations:' || :c, 0))"),
+        {"c": str(company_id)},
+    )
+    row = (
+        await db.execute(
+            text(
+                """
+                select
+                    count(*) filter (where created_at > now() - interval '1 hour'),
+                    count(*),
+                    extract(epoch from min(created_at) filter (
+                        where created_at > now() - interval '1 hour'
+                    ) + interval '1 hour' - now()),
+                    extract(epoch from min(created_at) + interval '1 day' - now())
+                from public.audit_log
+                where company_id = :company_id
+                  and module = 'identity'
+                  and action in ('invite_user', 'generate_recovery_link')
+                  and created_at > now() - interval '1 day'
+                """
+            ),
+            {"company_id": str(company_id)},
+        )
+    ).one()
+    return (
+        int(row[0]),
+        int(row[1]),
+        float(row[2]) if row[2] is not None else None,
+        float(row[3]) if row[3] is not None else None,
+    )
+
+
 async def lock_admin_safeguard(db: AsyncSession, *, company_id: UUID) -> None:
     """Candado por EMPRESA para la salvaguarda del último administrador.
 

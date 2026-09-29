@@ -1,3 +1,4 @@
+import math
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -5,9 +6,11 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.pagination import CursorPage, make_page
+from app.common.rate_limit import RateLimitedError
 from app.core.errors import AppError, ConflictError, NotFoundError, PermissionDeniedError
 from app.core.security import CurrentUser
 from app.core.security import get_role_permissions as get_cached_role_permissions
+from app.core.settings import get_settings
 from app.modules.identity import auth_admin, integration, repository
 from app.modules.identity.schemas import (
     InvitedUserOut,
@@ -102,6 +105,33 @@ async def list_users(
     return CursorPage(items=[_row_to_user(r) for r in page.items], next_cursor=page.next_cursor)
 
 
+class InvitationsRateLimitedError(RateLimitedError):
+    code = "INVITATIONS_RATE_LIMITED"
+
+
+async def _ensure_invitation_quota(db: AsyncSession, *, company_id: UUID) -> None:
+    """Tope por empresa de invitaciones + enlaces de acceso (settings
+    `invitations_per_hour` / `invitations_per_day`). Se revisa antes de pedirle
+    nada a Supabase Auth: un pedido rechazado no genera ningún enlace."""
+    settings = get_settings()
+    last_hour, last_day, hour_wait, day_wait = await repository.invitation_activity(
+        db, company_id=company_id
+    )
+    if last_day >= settings.invitations_per_day:
+        wait = day_wait
+    elif last_hour >= settings.invitations_per_hour:
+        wait = hour_wait
+    else:
+        return
+    retry_after = max(1, math.ceil(wait or 0))
+    raise InvitationsRateLimitedError(
+        "Se alcanzó el límite de invitaciones y enlaces de acceso de la empresa "
+        f"({settings.invitations_per_hour} por hora, {settings.invitations_per_day} "
+        "por día). Intenta de nuevo más tarde.",
+        retry_after_seconds=retry_after,
+    )
+
+
 async def invite_user(
     db: AsyncSession,
     *,
@@ -157,6 +187,7 @@ async def invite_user(
             code="USER_ALREADY_EXISTS",
         )
 
+    await _ensure_invitation_quota(db, company_id=company_id)
     result = await integration.invite_user(
         db,
         company_id=company_id,
@@ -596,6 +627,7 @@ async def generate_recovery_link(
     )
 
     email = user._mapping["email"]
+    await _ensure_invitation_quota(db, company_id=company_id)
     link = await auth_admin.generate_recovery_link(email)
 
     # Se audita SIEMPRE: el enlace es una credencial, y el registro de quién lo

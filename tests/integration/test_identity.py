@@ -863,3 +863,111 @@ async def test_reactivar_a_un_usuario_que_ya_entraba_lo_deja_activo(
         == 204
     )
     assert await _estado(invitado) == "active"
+
+
+def _invitar(client: TestClient, tenant: dict, email: str) -> object:
+    return client.post(
+        "/api/v1/identity/invitations",
+        headers=_headers(tenant["admin_token"]),
+        json={"email": email, "full_name": "Cupo", "role_id": str(tenant["basic_role_id"])},
+    )
+
+
+async def test_invitaciones_y_enlaces_tienen_tope_por_hora_por_empresa(
+    client: TestClient,
+    tenant: dict,
+    mocked_invite: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "invitations_per_hour", 2)
+
+    async def _fake(email: str) -> str:
+        return "https://supabase.test/verify?token=recovery-fake"
+
+    monkeypatch.setattr(identity_auth_admin, "generate_recovery_link", _fake)
+
+    assert _invitar(client, tenant, "cupo1@example.com").status_code == 201
+    assert _invitar(client, tenant, "cupo2@example.com").status_code == 201
+
+    tercero = _invitar(client, tenant, "cupo3@example.com")
+    assert tercero.status_code == 429, tercero.text
+    assert tercero.json()["code"] == "INVITATIONS_RATE_LIMITED"
+    retry = tercero.json()["details"]["retry_after_seconds"]
+    assert 0 < retry <= 3600
+    assert tercero.headers["Retry-After"] == str(retry)
+    # Rechazado antes de pedirle nada a Supabase Auth.
+    assert mocked_invite == ["cupo1@example.com", "cupo2@example.com"]
+
+    # Los enlaces de acceso cuentan en el mismo cupo.
+    invitado = await _crear_invitado(tenant)
+    enlace = client.post(
+        f"/api/v1/identity/users/{invitado}/recovery-link",
+        headers=_headers(tenant["admin_token"]),
+    )
+    assert enlace.status_code == 429, enlace.text
+    assert enlace.json()["code"] == "INVITATIONS_RATE_LIMITED"
+
+
+async def test_invitaciones_tienen_tope_por_dia_por_empresa(
+    client: TestClient,
+    tenant: dict,
+    mocked_invite: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "invitations_per_day", 3)
+    # Tres invitaciones de hace unas horas: fuera de la ventana de una hora,
+    # dentro de la del día.
+    async with AsyncSessionLocal() as session, session.begin():
+        for horas in (2, 3, 4):
+            await session.execute(
+                text(
+                    "insert into public.audit_log "
+                    "(company_id, user_id, module, action, entity_type, created_at) "
+                    "values (:c, :u, 'identity', 'invite_user', 'app_user', "
+                    "now() - make_interval(hours => :h))"
+                ),
+                {"c": str(tenant["company_id"]), "u": str(tenant["admin_user_id"]), "h": horas},
+            )
+
+    response = _invitar(client, tenant, "cupo-dia@example.com")
+    assert response.status_code == 429, response.text
+    assert response.json()["code"] == "INVITATIONS_RATE_LIMITED"
+    assert response.json()["details"]["retry_after_seconds"] > 3600
+    assert mocked_invite == []
+
+
+async def test_el_tope_de_invitaciones_no_cuenta_otras_empresas(
+    client: TestClient,
+    tenant: dict,
+    mocked_invite: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "invitations_per_hour", 1)
+    otra = await _rows_company_other()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text(
+                "insert into public.audit_log "
+                "(company_id, module, action, entity_type) "
+                "values (:c, 'identity', 'invite_user', 'app_user')"
+            ),
+            {"c": str(otra)},
+        )
+
+    assert _invitar(client, tenant, "cupo-aislado@example.com").status_code == 201
+
+
+async def _rows_company_other() -> UUID:
+    other = uuid4()
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(
+            text("insert into public.company (id, name) values (:id, 'Otra empresa cupo')"),
+            {"id": str(other)},
+        )
+    return other
