@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.common.cors import build_cors_config
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
+from app.core.observability import init_sentry
 from app.core.security_headers import SecurityHeadersMiddleware, hsts_enabled
 from app.core.settings import Settings, get_settings
 from app.modules.accounts.router import router as accounts_router
@@ -35,6 +36,7 @@ def api_docs_enabled(environment: str) -> bool:
 def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging()
     settings = settings or get_settings()
+    init_sentry(settings)
     origins, origin_regex = build_cors_config(
         cors_allow_origins=settings.cors_allow_origins, environment=settings.environment
     )
