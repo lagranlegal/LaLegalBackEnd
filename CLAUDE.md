@@ -1,168 +1,140 @@
-# CLAUDE.md — Backend Plataforma SaaS para Compraventas
+# CLAUDE.md — Backend de Prendo
 
-Guía de implementación para Claude Code. Leer COMPLETO antes de escribir código.
-Contexto ampliado del negocio: `docs/CONTEXTO.md`. Las migraciones ya diseñadas están en `supabase/migrations/` — son la fuente de verdad del esquema.
+Reglas obligatorias para escribir código en este repo. Leer completo antes de tocar nada.
+**Documentación:** empieza en `docs/README.md` (mapa) y `docs/ESTADO.md` (estado del día). Las reglas de negocio
+con su porqué: `docs/DOMINIO.md`. Cómo está construido: `docs/ARQUITECTURA.md`. Contrato de API y catálogo de
+errores: `docs/API_GUIDE.md`. Deploy y trampas: `docs/OPERACION.md`. **La fuente de verdad es el código**: si un
+documento lo contradice, gana el código y se corrige el documento en el mismo commit.
 
-## Qué es este proyecto
+## Qué es
 
-Backend (FastAPI) de una plataforma SaaS **multi-tenant** para compraventas (casas de empeño + tienda). Cada compraventa es una empresa (tenant) con datos aislados por **RLS** en una única base PostgreSQL (Supabase). Dos dominios independientes con contabilidad separada: **Contratos de empeño** e **Inventario/Tienda**, unidos por una caja diaria única con desglose contable por módulo.
+Backend (FastAPI) de **Prendo**, SaaS **multi-tenant** para compraventas colombianas (empeño + tienda). Cada
+compraventa es una empresa con datos aislados por **RLS** en una sola base Postgres (Supabase). Dos dominios con
+contabilidad separada —**contratos de empeño** e **inventario/tienda**— unidos por una caja diaria con desglose por
+módulo.
 
-- Stack: Python 3.12+, FastAPI, SQLAlchemy 2.0 async, Pydantic v2, Supabase (Postgres + Auth + Storage), pytest.
-- Deploy: Fly.io (backend), Vercel (front React — repo aparte), Supabase (3 proyectos: dev/staging/prod).
-- Migraciones: Supabase CLI (`supabase/migrations/*.sql`), aplicadas solo por CI o `supabase db push`. NUNCA modificar una migración ya aplicada: crear una nueva.
+- Stack: Python 3.12+, FastAPI, SQLAlchemy 2.0 async (Core), Pydantic v2, Supabase (Postgres + Auth + Storage), pytest.
+- Deploy: Fly.io (API + Machine programada del job nocturno), Vercel (front, repo aparte). **Hoy existe un solo
+  ambiente (dev)**; producción: `docs/PRODUCCION.md`.
+- Migraciones: `supabase/migrations/*.sql`, aplicadas con `supabase db push`. **Nunca se edita una migración
+  aplicada**: se crea una nueva. Permisos base y planes viven en `supabase/seed.sql` (no lo aplica `db push`).
 
 ## Reglas de arquitectura (obligatorias)
 
-1. **Multi-tenancy:** toda tabla de negocio tiene `company_id`. RLS activo y forzado. El backend fija los claims del tenant POR TRANSACCIÓN (`set_config('request.jwt.claims', :claims, true)`) porque la conexión va por Supavisor en modo transacción — jamás por sesión.
-2. **Capas por módulo:** `router.py` (HTTP) → `service.py` (reglas de negocio, puro y testeable) → `repository.py` (SQL). `schemas.py` para Pydantic in/out. Un módulo NO importa el service de otro; expone funciones de integración (ej. `cashbox.record_movement(tx, ...)`).
-3. **Permisos:** todo endpoint lleva `Depends(require_permission("modulo.accion"))`. Deny-by-default: endpoint sin permiso explícito = error de revisión. El catálogo de permisos vive en BD (seed).
-4. **Dinero:** `Decimal`/`NUMERIC(14,2)`. Prohibido float. Una operación de negocio = UNA transacción (documento + movimientos de caja + contadores + auditoría). Header `Idempotency-Key` obligatorio en operaciones de dinero (persistido con UNIQUE(company_id, idempotency_key)).
-5. **Estados y stock:** nunca editables a mano. El stock solo cambia por ingreso/egreso/venta. El estado del contrato solo lo calcula el servicio (+ job nocturno); las únicas acciones manuales son **Rematar** y **Ampliar el préstamo** (ambas con permiso, ambas auditadas). **El efectivo también sigue esta regla desde `00048`:** el saldo de una cuenta `cash` se deriva de sus movimientos como cualquier otra, y el saldo de apertura de un turno ya no se digita — se hereda, y contar distinto emite un `adjustment` con motivo y responsable. Era el único número de la aplicación que aparecía sin documento.
-6. **Auditoría:** toda acción sensible (descuentos, remates, anulaciones, egresos, cierres/reaperturas, cambios de roles) inserta en `audit_log` en la misma transacción. `audit_log` es inmutable.
-7. **Errores:** respuesta uniforme `{code, message, details}` con códigos de negocio: `PAYMENT_PARTIAL_INTEREST_REJECTED`, `CASH_SESSION_NOT_OPEN`, `PERMISSION_DENIED`, `SUBSCRIPTION_EXPIRED`, etc.
-8. **API:** REST `/api/v1`, recursos en plural, paginación por cursor, OpenAPI actualizado (el front genera tipos TS de ahí).
+1. **Multi-tenancy:** toda tabla de negocio tiene `company_id`, RLS activo y forzado, y al menos una policy de
+   SELECT. Los claims se fijan **por transacción** (`SET LOCAL ROLE authenticated` +
+   `set_config('request.jwt.claims', …, true)`), jamás por sesión: Supavisor en modo transacción reusa conexiones.
+2. **Capas:** `router.py` (HTTP) → `service.py` (reglas; un método = una transacción) → `repository.py` (SQL, sin
+   decisiones). `schemas.py` para Pydantic. Reglas puras en `rules.py`. **Un módulo no importa el service de
+   otro**: usa su `integration.py`.
+3. **Permisos:** todo endpoint lleva `Depends(require_permission("modulo.accion"))`. Deny-by-default; las
+   excepciones a propósito se escriben en `tests/unit/test_endpoint_guards.py` con su porqué. **Un módulo nuevo
+   trae sus propios permisos** (`view`/`manage` + uno especial por acción que mueva plata o sea irreversible), y
+   la migración que los agrega los otorga a los roles que tenían los equivalentes.
+4. **Dinero:** `Decimal`/`NUMERIC(14,2)` (`Money`, `PositiveMoney`); cantidades `NUMERIC(14,3)` (`Quantity`).
+   Prohibido `float`. Una operación de negocio = **una** transacción (documento + movimientos + contadores +
+   auditoría). `Idempotency-Key` persistida con `UNIQUE(company_id, idempotency_key)` y buscada **después** del
+   bloqueo.
+5. **Concurrencia:** toda operación que modifica un documento o valida un saldo toma la fila con `FOR UPDATE`
+   (contrato, cuentas, registradora, venta, nota crédito, compra) y revalida después; sin fila propia, advisory
+   lock de transacción. Detalle: `docs/ARQUITECTURA.md` §6.
+6. **Nada se edita a mano:** estados, stock y saldos salen de documentos. El estado del contrato lo calcula el
+   servicio (+ job nocturno); las únicas acciones manuales son Rematar y Ampliar el préstamo. El saldo de toda
+   cuenta, incluido el cajón, se **deriva** de sus movimientos. Se corrige con contra-documentos.
+7. **Auditoría:** toda acción sensible **y** la operación diaria (venta, abono, apertura de caja, ingreso) escriben
+   en `audit_log` (inmutable) en la misma transacción; el catálogo de acciones está fijado en
+   `tests/unit/test_audit_actions.py`, que el front usa para sus etiquetas.
+8. **Errores:** `{code, message, details}` con código de negocio estable. **Todo código nuevo va a la tabla de
+   `docs/API_GUIDE.md` §15 en el mismo commit** (`tests/unit/test_error_catalog.py` lo exige en las dos
+   direcciones). Lo que rechaza la base (UNIQUE, CHECK, NOT NULL) sale como 409/422 con envelope, nunca 500. Un
+   error nombra la acción que falta, no solo niega.
+9. **"Hoy" es la fecha de la EMPRESA:** `platform.integration.get_company_today` / `get_company_timezone`; nunca
+   `date.today()` ni `current_date`, tampoco en fixtures de tests.
+10. **API:** REST `/api/v1`, recursos en plural, paginación por cursor (por fecha donde el orden importa),
+    OpenAPI al día (el front genera sus tipos de ahí). Endpoints públicos solo bajo `/api/v1/public/` con token
+    firmado que dice a quién, GET que nunca escribe y límite de tasa.
+11. **Trabajo post-commit** (correos): el servicio registra la entrega como último paso de su transacción y el
+    router llama `notifications.dispatcher.send_after_commit` como última acción. Un aviso nunca tumba la operación.
 
-## Reglas de negocio críticas (implementar EXACTO)
+## Reglas de negocio críticas (resumen normativo; porqué y detalle en `docs/DOMINIO.md`)
 
-### Intereses y abonos
-- Interés mensual = `tasa_contrato × saldo_capital_actual`. Ej.: 1.000.000 al 5% → 50.000/mes; tras abonar 200.000 a capital → 40.000/mes.
-- **Solo se aceptan meses COMPLETOS de interés.** Un pago parcial de interés se RECHAZA (422). El capital solo recibe abono cuando los intereses quedan al día en ese mismo pago o ya lo estaban. El endpoint debe devolver los montos exactos aceptables para que la UI los muestre (1 mes, 2 meses, ..., todo + capital libre).
-- Al pagar N meses: `interest_paid_until += N meses`, recalcular estado.
-
-### Máquina de estados del contrato
-`months_owed` = meses completos entre `interest_paid_until` y hoy (usando la ventana del SNAPSHOT del contrato, no la config actual).
-- `active` (Vigente): 0 meses adeudados. Indefinido mientras pague el interés mensual.
-- `in_arrears` (En mora): 1 a N-1 meses adeudados (N = `arrears_window_months` del contrato; metales 4, tecnología 1).
-- `in_extension` (Prórroga): al llegar a N meses se dispara automáticamente; `extension_ends_at = fecha_disparo + extension_months` (default 1).
-- Prórroga vencida sin pago → candidato a remate (aparece en `GET /contracts/ready-for-auction`). El estado `auctioned` SOLO lo pone la acción manual Rematar.
-- `paid`: salda capital + intereses; los artículos se devuelven TODOS juntos; cierra.
-- `superseded` (00051): el contrato fue **ampliado**. No se modifica el capital de un contrato firmado — se cierra y nace un sucesor con `parent_contract_id`/`root_contract_id`; las prendas pasan a `transferred` (no `returned`: nunca salieron de la bóveda). Terminal, como los otros dos.
-- **SNAPSHOT legal:** al crear el contrato se copian tasa, plazo, `arrears_window_months` y `extension_months` desde la categoría/config. Cambios de configuración NO afectan contratos existentes.
-- Job nocturno (pg_cron o worker): persistir estados, marcar suscripciones vencidas.
-
-### Ampliar el préstamo ("recargo")
-`POST /contracts/{id}/extend-loan` (permiso `contracts.extend_loan`). El cliente vuelve dentro de una ventana —`extension_window_days`, SNAPSHOT precargado de `company.settings.extension_window_days`, default 28— y retira parte del cupo que su prenda todavía tiene sin usar (`avalúo × max_ltv_pct − saldo`).
-
-**No es un `UPDATE` del capital, y no es una preferencia:** el interés se cobra en meses completos anclados a `interest_paid_until` y toda la máquina de estados cuelga de esa ancla; y el papel que el cliente firmó dice un capital, así que si cambia ya no describe la deuda.
-
-Cuatro invariantes, cada una con su test:
-- **La ventana se mide desde `root_contract_id.start_date`**, la raíz de la cadena. Si se midiera desde el contrato actual, un recargo de $1 el último día reiniciaría el reloj para siempre.
-- **A la caja sale SOLO el delta.** El capital viejo ya salió el día del contrato original.
-- **El interés vencido nunca se suma al capital** (anatocismo): con meses adeudados se rechaza y hay que abonar primero.
-- **El sucesor hereda el ancla, no la reinicia** (`00053`): `start_date` sale de la **raíz** de la cadena y `interest_paid_until`/`due_date` del **padre**. Así la fecha de cobro del cliente no se mueve — presta el 1, recarga el 25, y el 1 del mes siguiente se le cobra sobre el capital nuevo completo. Disuelve la pregunta del "mes en curso" en vez de contestarla. **Y por eso mismo el sucesor puede quedar antedatado:** cuándo se entregó la plata vive en `extended_on`/`extension_amount`, y la pantalla **y el impreso** muestran las dos fechas. Un papel firmado hoy que solo diga la fecha vieja es un documento antedatado.
-
-Pasarse del cupo exige **`contracts.override_ltv`** — que rige igual en `POST /contracts`, para que la misma regla no se comporte distinto en dos pantallas. Diseño completo y decisiones: `docs/RECARGOS.md`.
-
-### Remate asistido
-`POST /contracts/{id}/auction` (permiso `contracts.auction`): en una transacción — contrato→`auctioned`, items→`auctioned`, crear `inventory_item` en `draft` (cost = saldo capital + intereses pendientes, `origin='auction'`, `source_contract_id`, vínculo en `contract_item.inventory_item_id`), crear `inventory_entry`, auditar. Luego `POST /inventory/items/{id}/publish` emite el código. Exige precio siempre y **foto solo en piezas únicas** — que es el caso del remate: la foto es la evidencia de qué prenda dejó el cliente. Para mercancía fungible la foto es opcional y vive en el producto, no en el lote (00034).
-
-### Códigos de inventario
-`[letra cat1][cat2][cat3][consecutivo 4 dígitos del PRODUCTO]-[lote 2 dígitos][letra de origen]` → `JOC0002-01U` / `JOC0001-01R`. Consecutivo por (company_id, prefijo) vía `next_counter()` (ya en migraciones, atómico); el segmento de lote lo numera cada producto desde 00021 (producto + lote), así que dos compras del mismo producto dan `-01` y `-02` con su costo real cada una. El código se emite AL PUBLICAR y es inmutable. Costos por identificación específica: cada pieza/lote conserva su costo real; nunca promediar.
-
-La **letra de origen** dice de dónde salió la pieza, y se deriva de sus punteros —nunca se digita:
-
-| Letra | Cuándo | Puntero |
-|---|---|---|
-| la del proveedor | se la compramos a alguien | `supplier_id` |
-| `R` | salió de un remate | `source_contract_id` |
-| `T` | la produjimos fundiendo, despiezando o armando (00039) | `source_transformation_id` |
-| `P` | propio: inventario inicial o sobrante de conteo (00033) | ninguno |
-| `D` | volvió en una devolución de cliente y su lote original ya no se podía reabrir (00044) | `source_return_id` |
-
-Los punteros son **excluyentes** entre sí. `R`, `P`, `T` y `D` están reservadas: un proveedor no puede tomarlas (se valida al escribir, no hacia atrás — hay códigos impresos).
-
-### Caja (acto único diario)
-- Una sesión por día por caja (fase 1: **una sola cuenta `cash` operativa por empresa**, garantizada por el servicio desde `00049` — el índice parcial de `00024` NO lo aseguraba pese a lo que dice su comentario). Sin sesión `open` → toda operación de dinero **contra una cuenta `cash`** se rechaza; quién la exige es el TIPO DE CUENTA, no la operación.
-- **El saldo del cajón es de la CUENTA, no del turno (`00048`).** Se deriva de sus movimientos, existe con la caja cerrada, y cada cuenta tiene el suyo. Abrir un turno no declara un saldo: lo hereda. Contar al abrir o al cerrar emite un `adjustment` (`session_id = NULL` a propósito — dentro de la sesión, `expected_cash` lo contaría dos veces al abrir y produciría un acta que siempre cuadra al cerrar).
-- **`vault`** (`00049`) es efectivo físico que NO es un punto de cobro: caja fuerte, fondo de menudos. Ninguna operación de negocio la elige; entra y sale solo por **traslado**, y no participa del arqueo diario del cajón. Nada se configura: "¿esta empresa tiene caja fuerte?" se responde con "¿existe esa cuenta?". Modelo completo: `docs/CAJA_TRAZABILIDAD.md`.
-- Movimientos SOLO generados por servicios desde documentos (abono, venta, compra, gasto), etiquetados `module` (pawn/store/general) + medio de pago + referencia. Manual: solo gastos/ajustes.
-- Cierre: backend calcula `expected_cash` (base + efectivo in − efectivo out) y desglose module×concept×medio; usuario registra `counted_cash`; diferencia SIEMPRE con justificación (sin tolerancia); sesión cerrada = inmutable; acta PDF (secciones EMPEÑO / TIENDA / GASTOS / conciliación de otros medios). Reapertura: permiso `cashbox.reopen`, motivo, auditada.
-
-### Ventas
-Cliente opcional. Confirmar venta = transacción: validar stock/estado, emitir número, descontar stock, `cash_movement(module=store)`, comprobante interno (sin DIAN). Anular: permiso, motivo, repone stock, contra-movimiento, auditada. Descuentos (venta y abono): permiso especial + motivo + auditoría.
-
-### Capital del dueño (aportes y retiros)
-`POST /capital/contributions` y `/capital/withdrawals` (`00054`). **Ni un aporte es un ingreso, ni un retiro es un gasto:** los dos mueven el PATRIMONIO, no el resultado del período. Un retiro registrado como gasto falsearía la utilidad por todo el monto retirado — el mismo error que el capital de los contratos ya costó tres veces.
-
-**No hace falta partida doble para cumplirlo:** el estado de resultados lee DOCUMENTOS (`sale`, `contract_payment`, `expense`) y un `capital_movement` no es ninguno de los tres, así que queda fuera por construcción. Un documento (no un `cash_movement` suelto) con conceptos propios `owner_contribution` / `owner_withdrawal`, aporte y retiro en la MISMA tabla con `direction` — son el mismo concepto en dos sentidos, como un traslado.
-
-Lo que sí se rechaza: retirar más de lo que hay en la cuenta, una cuenta `settlement`, efectivo con la caja cerrada, y un retiro sin motivo. Lo que solo se **advierte**: retirar por encima de la utilidad — `GET /capital/position` dice dónde está realmente la plata (caja + prestado + inventario **al costo**), porque en una compraventa retirar "lo que hay en caja" es descapitalizar. Diseño completo: `docs/CAPITAL_DEL_DUENO.md`.
-
-### Suscripciones (gestión manual)
-Super-admin crea empresa (con roles semilla + caja principal + invitación del primer admin) y habilita módulos; renovación = ampliar `expires_at`. Job diario marca `expired` → bloqueo de acceso (login y API). Precios fuera del sistema. Suspender/expirar NUNCA borra datos.
-
-### Roles y permisos
-RBAC dinámico por empresa. Roles semilla (Admin, Moderador, Asesor, Bodega) clonables, no eliminables. Permisos solo vía rol. Salvaguardas: siempre ≥1 admin activo; un admin no puede quitarse `identity.manage_roles` ni auto-inactivarse siendo el último. Cache de permisos TTL 60s con invalidación al editar roles.
+- **Interés mensual = tasa del contrato × saldo de capital.** Solo **meses completos**: el parcial se rechaza
+  (`PAYMENT_PARTIAL_INTEREST_REJECTED`); el capital solo se abona con los intereses al día; `payment-options`
+  devuelve los montos exactos. **Saldar causa mínimo un mes** (`rules.minimum_payoff_months`).
+- **Estados:** `active` (0 meses adeudados) → `in_arrears` (1…N−1) → `in_extension` (al llegar a N =
+  `arrears_window_months` del snapshot; fin = ancla + N + `extension_months`). Terminales: `paid`, `auctioned`
+  (solo Rematar), `superseded` (ampliado), todos en `rules.TERMINAL_STATUSES`. "Listo para remate" = `in_extension`
+  vencida, no es un estado.
+- **SNAPSHOT legal:** tasa, plazo, ventana, prórroga y ventana de ampliación se copian al contrato; cambiar la
+  configuración no toca contratos firmados.
+- **LTV:** con LTV en la categoría el avalúo es obligatorio; prestar sin avalúo o sobre el techo exige
+  `contracts.override_ltv`.
+- **Ampliar el préstamo:** no es un UPDATE del capital; el contrato se sucede (`superseded` → sucesor con
+  `parent_contract_id`/`root_contract_id`). Ventana medida desde la raíz; a la caja sale solo el delta; el interés
+  vencido nunca se capitaliza; el sucesor hereda inicio de la raíz y ancla del padre, y guarda `extended_on`.
+- **Remate:** contrato y prendas `auctioned`, artículo en `draft` con costo = capital + interés pendiente y
+  `capitalized_interest` aparte (la base de costo en el resultado es el capital).
+- **Inventario:** producto + lote; costo por identificación específica, nunca promedio. Código
+  `JOC0007` / `JOC0007-01I`, emitido al publicar e inmutable; letra de origen derivada de punteros excluyentes;
+  `R`, `P`, `T`, `D` reservadas (`inventory/rules.py`).
+- **Caja:** una cuenta `cash` activa por empresa; quien exige turno abierto es el **tipo de cuenta**, no la
+  operación; abrir hereda el saldo, contar emite un `adjustment` (`session_id = NULL`); cierre sin tolerancia con
+  justificación; reabrir revierte el ajuste del cierre. `vault` solo por traslado; `settlement` no financia
+  salidas; la comisión de un convenio se deriva.
+- **Ventas:** vender bajo el precio publicado **es un descuento** (`sales.apply_discount`, motivo, auditoría);
+  bajo el costo también exige ese permiso. Anular devuelve por la misma cuenta. Devolver devuelve lo pagado, en la
+  misma proporción de nota crédito y plata.
+- **Capital del dueño:** ni aporte es ingreso ni retiro es gasto; el estado de resultados lee documentos, no
+  movimientos. Retirar sobre la utilidad solo se advierte.
+- **Avisos:** los del cliente nacen apagados; Ley 2300 es un piso que la empresa no afloja; los comprobantes no
+  son cobranza.
+- **Suscripciones:** manuales; el job marca `expired` y eso bloquea (`402`). Suspender o vencer nunca borra datos.
+- **Roles:** RBAC dinámico por empresa, roles semilla clonables; siempre ≥1 admin activo; nadie asigna más
+  permisos de los que tiene; caché de permisos 60 s.
 
 ## Autenticación
 
-Supabase Auth (email+password y Google), **signups públicos desactivados** — alta solo por invitación. JWT verificado por **JWKS** (validar firma, exp, aud, iss). Claims `company_id` y `role_id` vienen del Custom Access Token Hook (en migraciones). `get_current_user` verifica además usuario activo + empresa activa + suscripción vigente (cache corto). `service_role` key SOLO en secretos del backend, solo para operaciones de plataforma.
+Supabase Auth, **signups cerrados**: alta solo por invitación. JWT verificado por JWKS (firma, exp, aud, iss).
+Claims `company_id`/`role_id` del Custom Access Token Hook (para `active` e `invited`). `active` = entró con su
+propia contraseña (claim `amr`). Los enlaces de invitación/recuperación apuntan a la app con `token_hash` y se
+canjean por POST; **nunca** se escriben en logs ni en `audit_log`. La `service_role` solo en secretos del backend.
 
-## Estructura del proyecto (crear así)
+## Estructura
 
 ```
 app/
-  core/            # settings (pydantic-settings), db (async engine + claims por TX), security (JWKS, deps), errors, logging
-  common/          # paginación cursor, idempotencia, tipos Money
-  modules/
-    platform/      # empresas, planes, suscripciones (solo super-admin)
-    identity/      # usuarios, invitaciones, roles, permisos
-    customers/
-    catalogs/      # categorías (árbol 3 niveles), proveedores
-    contracts/     # contratos, abonos, estados, remate
-    inventory/     # artículos, ingresos, egresos, códigos
-    sales/
-    cashbox/       # sesiones, movimientos, gastos, cierre
-    capital/       # aportes y retiros del dueño (patrimonio, NO resultado)
-    audit/
-    reports/
-  jobs/            # job nocturno (estados, suscripciones)
-  main.py
-tests/
-  unit/            # reglas: intereses, estados, códigos, cierre  (coverage ≥90% en contracts y cashbox)
-  integration/     # API con BD local
-  rls/             # aislamiento: tenant A nunca ve datos de tenant B (por CADA tabla)
-supabase/
-  migrations/      # YA DISEÑADAS — aplicar, no reinventar
-  seed.sql
+  core/      settings, db (claims por TX, NullPool), security (JWKS, permisos), errors, logging, security_headers, observability
+  common/    money, idempotency, pagination, tenant_time, search, rate_limit, cors, co_holidays
+  modules/   platform identity company customers catalogs contracts cashbox accounts capital
+             inventory sales audit reports notifications      (15; cada uno router/service/repository/schemas)
+  jobs/      nightly.py — estados, suscripciones, resúmenes, recordatorios, despacho de correos
+tests/       unit/ (reglas puras y contratos) · integration/ (HTTP contra Postgres local) · rls/ (aislamiento)
+supabase/    migrations/ (fuente de verdad del esquema) · seed.sql (permisos y planes)
+scripts/     deploy_dev.sh · export_openapi.py · qa/ (laboratorio, matrices, guardianes)
 ```
 
-## Orden de implementación (no saltarse pasos)
+## Definición de Hecho por commit
 
-1. **Infra local:** `supabase init` + copiar migraciones + `supabase start` + `supabase db reset` (aplica migraciones + seed). Esqueleto FastAPI con core/ (settings, db, errors, logging) y CI (ruff, mypy, pytest).
-2. **Seguridad base:** verificación JWKS, `get_current_user`, `require_permission`, claims por transacción, tests RLS del esqueleto.
-3. **platform + identity:** crear empresa (con seeds por empresa), suspender, suscripción manual; invitaciones, roles, matriz de permisos, salvaguardas.
-4. **customers + catalogs:** CRUD con validaciones de árbol y letras.
-5. **contracts:** crear contrato (snapshot, consecutivo, PDF con firma), abonos (validación de meses completos), máquina de estados + job, migrados (legacy_code — implementado como `POST /contracts/import`, ver `docs/MIGRACION_CONTRATOS.md`).
-6. **cashbox:** sesiones, movimientos automáticos, gastos, cierre con desglose + acta PDF, reapertura.
-7. **inventory + sales:** códigos, ingresos, egresos, ventas, anulación, remate asistido (integra contracts+inventory+cashbox).
-8. **audit + reports:** consulta de auditoría, KPIs, histórico de cierres.
+- Migración nueva: RLS + policy de SELECT + test de aislamiento; aplicada también en la base local de tests.
+- Endpoint: permiso + test de integración; regla de negocio: test unitario **visto fallar sin el fix**.
+- Aserciones de error contra el `code`, no solo el status. Fixtures copiados de respuestas reales.
+- Acción sensible: auditoría verificada en test.
+- OpenAPI al día; código de error en `API_GUIDE.md` §15; `ruff check`, `ruff format --check` y `mypy app` limpios;
+  sin `float` en dinero; sin secretos (el repo es **público**: ni llaves, ni contraseñas, ni datos de clientes).
+- Documentación en el mismo commit: la regla en `docs/DOMINIO.md`, el endpoint en `docs/API_GUIDE.md`, lo
+  operativo en `docs/OPERACION.md`, el bug en `docs/QA.md` §4, y `docs/ESTADO.md` al cerrar la sesión.
 
-## Definición de Hecho por PR
+## Variables de entorno
 
-- Migración nueva incluye RLS + test de aislamiento de la tabla.
-- Endpoint con permiso + test de integración + regla de negocio con test unitario.
-- Acción sensible → auditoría verificada en test.
-- OpenAPI actualizado; `ruff` + `mypy` limpios; sin `float` en dinero; sin secretos en código.
-
-## Variables de entorno (.env.example — crearlo)
-
-```
-DATABASE_URL=postgresql+asyncpg://...   # Supavisor transaction mode (puerto 6543)
-SUPABASE_URL=
-SUPABASE_JWKS_URL=${SUPABASE_URL}/auth/v1/.well-known/jwks.json
-SUPABASE_SERVICE_ROLE_KEY=              # solo backend, nunca en front
-JWT_AUDIENCE=authenticated
-ENVIRONMENT=dev
-SENTRY_DSN=
-```
+Ver `.env.example` (comentado variable por variable): base por Supavisor (6543), Supabase, CORS, `FRONTEND_URL`,
+Resend, firma de los enlaces de baja, `PUBLIC_API_URL`, Sentry.
 
 ## Comandos
 
 ```bash
-supabase start                 # entorno local
-supabase db reset              # aplica migraciones + seed
-uvicorn app.main:app --reload
-pytest -q                      # todo; pytest tests/rls para aislamiento
-ruff check . && ruff format . && mypy app
+supabase start && supabase db reset             # local, con Docker (sin él casi todo se salta y "pasa")
+.venv/bin/python -m pytest -q tests/unit tests/rls
+.venv/bin/python -m pytest -q tests/integration # por tramos si la herramienta tiene tope de tiempo
+ruff check . && ruff format --check . && mypy app
+./scripts/deploy_dev.sh                         # deploy de dev: lo corre Mateo (docs/OPERACION.md §2)
 ```
