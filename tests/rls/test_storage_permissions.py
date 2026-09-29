@@ -180,6 +180,43 @@ async def test_una_seccion_desconocida_o_sin_seccion_se_niega(empresas: dict) ->
     assert await _permitido(u["gestiona_clientes"], a, f"{a}/x.webp", escribir=False) is False
 
 
+async def test_en_perfil_cada_usuario_escribe_solo_su_carpeta(empresas: dict) -> None:
+    """F8-14 (auditoría de QA, Fase 8): el Gestor, sin permisos de clientes,
+    subió un archivo a `perfil/` de la empresa con 200 — cualquier empleado
+    podía reemplazar o borrar la foto de perfil de otro, incluido el Admin.
+    Desde 00065 la ruta de escritura es `perfil/{user_id}/…` con el `sub` del
+    token. Leer sigue abierto a todo usuario activo."""
+    a, u = empresas["a"], empresas["usuarios"]
+    yo, otro = u["sin_permisos"], u["configura"]
+    mia = f"{a}/perfil/{yo}/{uuid.uuid4()}.webp"
+    ajena = f"{a}/perfil/{otro}/{uuid.uuid4()}.webp"
+    vieja = f"{a}/perfil/{uuid.uuid4()}.webp"  # la forma de antes, sin usuario
+
+    assert await _permitido(yo, a, mia, escribir=True) is True
+    assert await _permitido(yo, a, ajena, escribir=True) is False
+    assert await _permitido(yo, a, vieja, escribir=True) is False
+    # Leer: cualquiera activo, la de otro y la vieja también.
+    assert await _permitido(yo, a, ajena, escribir=False) is True
+    assert await _permitido(yo, a, vieja, escribir=False) is True
+    # Un inactivo no escribe ni en su propia carpeta.
+    inactivo = u["inactivo"]
+    assert await _permitido(inactivo, a, f"{a}/perfil/{inactivo}/f.webp", escribir=True) is False
+
+
+async def test_solo_se_escriben_nombres_de_imagen(empresas: dict) -> None:
+    """F8-13: un SVG con `<script>` declarado `image/png` se aceptó con nombre
+    `.svg`. La política no ve los bytes; lo que sí puede exigir es una
+    extensión de imagen al escribir. Leer no lo exige."""
+    a, u = empresas["a"], empresas["usuarios"]
+    quien = u["gestiona_clientes"]
+    base = f"{a}/customers/{uuid.uuid4()}"
+    for nombre in ("f.webp", "f.JPG", "f.jpeg", "f.png"):
+        assert await _permitido(quien, a, f"{base}/{nombre}", escribir=True) is True, nombre
+    for nombre in ("f.svg", "f.html", "f.png.svg", "f"):
+        assert await _permitido(quien, a, f"{base}/{nombre}", escribir=True) is False, nombre
+    assert await _permitido(quien, a, f"{base}/f.svg", escribir=False) is True
+
+
 async def test_las_politicas_del_bucket_usan_la_funcion() -> None:
     async with AsyncSessionLocal() as session:
         existe = (
