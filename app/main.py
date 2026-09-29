@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.common.cors import build_cors_config
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
+from app.core.security_headers import SecurityHeadersMiddleware, hsts_enabled
 from app.core.settings import Settings, get_settings
 from app.modules.accounts.router import router as accounts_router
 from app.modules.audit.router import router as audit_router
@@ -53,6 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(SecurityHeadersMiddleware, hsts=hsts_enabled(settings.environment))
     register_exception_handlers(app)
     app.include_router(platform_router)
     app.include_router(identity_router)
