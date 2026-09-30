@@ -13,6 +13,7 @@ from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from app.common.pagination import encode_cursor
 from app.core import security
 from app.core.db import AsyncSessionLocal, engine
 from app.modules.identity import auth_admin as identity_auth_admin
@@ -302,22 +303,21 @@ def test_get_and_list_companies_include_plan_and_subscription(
     assert detail.status_code == 200
     assert detail.json()["plan_code"] == "full"
 
-    # Se pagina hasta encontrarla en vez de asumir que cae en la primera
-    # página: `GET /platform/companies` ordena por `id` (UUID aleatorio) y
-    # devuelve 50 por defecto, así que en una BD con varias empresas la recién
-    # creada aparece en cualquier página. Asumirlo hacía fallar este test con
-    # `StopIteration` en cuanto la BD de pruebas acumulaba empresas.
-    row = None
-    cursor = None
-    for _ in range(50):  # tope defensivo, no debería hacer falta
-        params = {"limit": 200, **({"cursor": cursor} if cursor else {})}
-        listing = client.get("/api/v1/platform/companies", headers=headers, params=params)
-        assert listing.status_code == 200
-        page = listing.json()
-        row = next((c for c in page["items"] if c["id"] == company_id), None)
-        if row is not None or not page.get("next_cursor"):
-            break
-        cursor = page["next_cursor"]
+    # Se entra directo a su página en vez de recorrer el listado: el cursor
+    # es keyset por `id` (`where c.id > :cursor order by c.id`), así que un
+    # cursor con el UUID inmediatamente anterior deja la empresa creada como
+    # primera fila. Antes se paginaba desde el principio con un tope de 50
+    # páginas × 200, y el test fallaba en cuanto la BD de pruebas local
+    # acumulaba más de 10.000 empresas de corridas anteriores.
+    just_before = uuid.UUID(int=uuid.UUID(company_id).int - 1)
+    listing = client.get(
+        "/api/v1/platform/companies",
+        headers=headers,
+        params={"limit": 1, "cursor": encode_cursor(just_before)},
+    )
+    assert listing.status_code == 200
+    items = listing.json()["items"]
+    row = items[0] if items and items[0]["id"] == company_id else None
 
     assert row is not None, "la empresa creada no apareció en ninguna página del listado"
     assert row["plan_code"] == "full"
