@@ -73,6 +73,11 @@ class BreakdownLineOut(BaseModel):
     account_name: str
     account_type: str
     total: Decimal
+    #: Solo en traslados (`transfer_out` / `transfer_in`): la otra cuenta —a
+    #: dónde fue la plata o de dónde vino—. `null` en toda otra línea.
+    counterpart_account_id: UUID | None = None
+    counterpart_account_name: str | None = None
+    counterpart_account_type: str | None = None
 
 
 class SessionReportOut(BaseModel):

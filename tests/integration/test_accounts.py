@@ -751,6 +751,30 @@ def test_transfer_out_of_cash_lowers_expected_cash_of_the_close(
     assert "transfer_out" in conceptos
     assert "transfer_in" in conceptos
 
+    # Cada línea de traslado dice la otra cuenta: a dónde fue, de dónde vino.
+    def _linea(account_id: str, concept: str) -> dict:
+        [linea] = [
+            line
+            for line in despues["lines"]
+            if line["account_id"] == account_id and line["concept"] == concept
+        ]
+        return linea
+
+    salida_caja = _linea(caja["id"], "transfer_out")
+    assert salida_caja["counterpart_account_id"] == origen["id"]
+    assert salida_caja["counterpart_account_name"] == "Banco origen arqueo"
+    assert salida_caja["counterpart_account_type"] == "bank"
+    entrada_caja = _linea(caja["id"], "transfer_in")
+    assert entrada_caja["counterpart_account_id"] == origen["id"]
+    entrada_banco = _linea(origen["id"], "transfer_in")
+    assert entrada_banco["counterpart_account_id"] == caja["id"]
+    # Lo que no es traslado no tiene contraparte.
+    assert all(
+        line["counterpart_account_id"] is None
+        for line in despues["lines"]
+        if not line["concept"].startswith("transfer_")
+    )
+
 
 def test_bank_statement_carries_a_running_balance(
     client: TestClient, accounts_tenant: dict

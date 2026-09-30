@@ -345,6 +345,9 @@ async def get_report(db: AsyncSession, *, company_id: UUID, session_id: UUID) ->
                 account_name=line_row._mapping["account_name"],
                 account_type=line_row._mapping["account_type"],
                 total=line_row._mapping["total"],
+                counterpart_account_id=line_row._mapping["counterpart_account_id"],
+                counterpart_account_name=line_row._mapping["counterpart_account_name"],
+                counterpart_account_type=line_row._mapping["counterpart_account_type"],
             )
             for line_row in lines
         ],

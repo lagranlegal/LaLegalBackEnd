@@ -178,18 +178,33 @@ async def movement_breakdown(
     todos en `payment_method = 'other'` y el acta los mostraba como una sola
     línea indistinguible; agrupando también por cuenta se ve cuánto quedó en
     cada lado y cuánto es plata que todavía te deben.
+
+    Un traslado (`transfer_out` / `transfer_in`) agrupa además por la CUENTA
+    CONTRAPARTE —a dónde fue o de dónde vino—, leída del `account_transfer`
+    del movimiento: «salieron 150.000 de la caja» no se concilia si no dice
+    que fueron al banco y no a la bóveda. Dos traslados a destinos distintos
+    son dos líneas; en todo lo demás la contraparte es nula y no parte nada.
     """
     result = await db.execute(
         text(
             """
             select m.module, m.direction, m.concept, m.payment_method,
                    a.id as account_id, a.name as account_name, a.type as account_type,
+                   c.id as counterpart_account_id, c.name as counterpart_account_name,
+                   c.type as counterpart_account_type,
                    sum(m.amount) as total
             from public.cash_movement m
             join public.account a on a.id = m.account_id
+            left join public.account_transfer t
+              on m.reference_type = 'account_transfer' and t.id = m.reference_id
+             and t.company_id = m.company_id
+            left join public.account c
+              on c.id = case m.direction when 'out' then t.to_account_id
+                                         else t.from_account_id end
             where m.company_id = :company_id and m.session_id = :session_id
-            group by m.module, m.direction, m.concept, m.payment_method, a.id, a.name, a.type
-            order by a.type, a.name, m.module, m.direction, m.concept
+            group by m.module, m.direction, m.concept, m.payment_method, a.id, a.name, a.type,
+                     c.id, c.name, c.type
+            order by a.type, a.name, m.module, m.direction, m.concept, c.name
             """
         ),
         {"company_id": str(company_id), "session_id": str(session_id)},
