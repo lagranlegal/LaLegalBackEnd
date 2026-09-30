@@ -69,6 +69,7 @@ Detalle y porqué: [`ARQUITECTURA.md`](ARQUITECTURA.md), `../CLAUDE.md` y `front
 | [`PRODUCCION.md`](PRODUCCION.md) | el paso a paso para montar y operar producción |
 | [`QA.md`](QA.md) | método de QA, la suite, el arsenal de scripts y la **lista única de bugs abiertos** |
 | [`diseno/SUCURSALES.md`](diseno/SUCURSALES.md) | diseño de multi-caja y multi-sucursal, aplazado hasta el primer cliente con dos locales |
+| [`RECOMENDACIONES.md`](RECOMENDACIONES.md) | qué construir después y por qué: flujos, UI/UX, ingeniería y negocio del SaaS, con esfuerzo y prioridad |
 | [`PLAN_AUDITORIA_INTEGRAL.md`](PLAN_AUDITORIA_INTEGRAL.md) | plan de la auditoría en curso; se borra al cerrarla |
 | `../CLAUDE.md` | reglas obligatorias para escribir código del backend (se carga solo en cada sesión del agente) |
 | `../scripts/qa/README.md` | qué hace cada script de QA y cómo correrlo |
