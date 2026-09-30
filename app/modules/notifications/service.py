@@ -60,7 +60,13 @@ class CustomerGate:
     reason: str | None = None
 
 
-def customer_gate(contact: Row[Any] | None, purpose: str) -> CustomerGate:
+#: F8-07: el cliente contestó que no en el mostrador.
+DECLINED_AT_COUNTER_REASON = "El cliente no quiso el comprobante por correo (mostrador)."
+
+
+def customer_gate(
+    contact: Row[Any] | None, purpose: str, *, requested: bool = False
+) -> CustomerGate:
     """El ÚNICO lugar donde se cruza la base legal del cliente con la
     finalidad del evento. Lo usan el que planifica (`record_event`) y el que
     manda (`dispatcher._prepare`): lo que cambió en el medio —una baja, un
@@ -68,7 +74,12 @@ def customer_gate(contact: Row[Any] | None, purpose: str) -> CustomerGate:
     próximo aviso.
 
     Tres cortes que ganan siempre y en este orden (§9.2-c): no hay dirección,
-    pidió la baja, rebotó. Después, la matriz."""
+    pidió la baja, rebotó. Después, la matriz.
+
+    `requested` (F8-07): el titular pidió ESTE comprobante en el mostrador.
+    Los tres cortes siguen ganando —quien se dio de baja no vuelve a recibir
+    correo porque el cajero marcó la casilla—, pero la matriz no se consulta:
+    la base de este único envío es el pedido (`request`), no la del cliente."""
     m = contact._mapping if contact is not None else {}
     email = (m.get("email") or "").strip()
     if not email:
@@ -81,6 +92,8 @@ def customer_gate(contact: Row[Any] | None, purpose: str) -> CustomerGate:
         return CustomerGate(
             "suppressed", email, reason="El correo del cliente rebotó: no se vuelve a intentar."
         )
+    if requested:
+        return CustomerGate("ok", email, basis=catalog.REQUEST_BASIS)
     basis = m.get("email_basis")
     if not catalog.basis_allows(purpose, basis):
         return CustomerGate(
@@ -115,6 +128,8 @@ async def record_event(
     recipient_email: str | None = None,
     recipient_user_id: UUID | None = None,
     actor_user_id: UUID | None = None,
+    requested_by: UUID | None = None,
+    declined: bool = False,
 ) -> RecordOutcome:
     """Registra el hecho y planifica sus entregas en la MISMA transacción.
 
@@ -131,6 +146,18 @@ async def record_event(
     que acaba de hacer clic no es un correo»). Si era el único con el permiso,
     el hecho queda registrado sin entregas — y sigue en `audit_log` y en el
     resumen, que es lo que existía antes de la alerta.
+
+    `requested_by` / `declined` solo para un comprobante al cliente (F8-07):
+    lo que el titular contestó en el mostrador a «¿se lo mando al correo?».
+    - `requested_by` = dijo que sí, y quién lo registró. Sale aunque el
+      cliente no tenga base general (la base de esta entrega es `request`) y
+      aunque la empresa tenga el aviso apagado: los interruptores gobiernan
+      lo que la empresa manda POR SU CUENTA, y esto no es eso — es un recibo
+      que alguien pidió en la cara del cajero. Baja, rebote y la falta de
+      dirección siguen ganando (`customer_gate`).
+    - `declined` = dijo que no. No sale aunque tenga base: queda la entrega
+      `suppressed` con el motivo, para que se vea que hubo a quién y no se
+      mandó.
     """
     et = catalog.get(event_type)
     event_id = await repository.insert_event(
@@ -150,7 +177,7 @@ async def record_event(
         return RecordOutcome(created=False, event_id=None, deliveries={})
 
     # §4.3: apagado = el evento existe, la entrega no se crea.
-    if not deliver or not prefs.event_enabled(event_type):
+    if not deliver or (requested_by is None and not prefs.event_enabled(event_type)):
         return RecordOutcome(created=True, event_id=event_id, deliveries={})
 
     counts: dict[str, int] = {}
@@ -172,6 +199,7 @@ async def record_event(
             status=status,
             last_error=error,
             legal_basis=legal_basis,
+            requested_by=requested_by if legal_basis == catalog.REQUEST_BASIS else None,
         )
         counts[status] = counts.get(status, 0) + 1
         if delivery_id is not None and status == "pending":
@@ -205,7 +233,7 @@ async def record_event(
             if customer_id
             else None
         )
-        gate = customer_gate(contact, et.purpose)
+        gate = customer_gate(contact, et.purpose, requested=requested_by is not None)
         if gate.status == "unroutable":
             # §1: el caso NORMAL. Se registra, no se omite.
             await _add(None, "unroutable", None, None)
@@ -213,6 +241,8 @@ async def record_event(
             # §9.2-c: baja, rebote o sin base para esta finalidad. Con la
             # dirección y el motivo: es lo que cuenta el agregado (§4.2).
             await _add(gate.email, "suppressed", None, gate.reason)
+        elif declined:
+            await _add(gate.email, "suppressed", None, DECLINED_AT_COUNTER_REASON)
         elif stale:
             await _add(gate.email, "skipped_stale", None, None)
         else:
@@ -430,6 +460,7 @@ def _row_to_delivery(row: Row[Any]) -> DeliveryOut:
         created_at=m["created_at"],
         updated_at=m["updated_at"],
         legal_basis=m["legal_basis"],
+        requested_by=m["requested_by"],
         deferred_at=m["deferred_at"],
     )
 

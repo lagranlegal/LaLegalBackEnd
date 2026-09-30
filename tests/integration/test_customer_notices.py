@@ -960,3 +960,139 @@ async def test_a_mixed_return_with_credit_note_off_still_names_both_amounts(
     assert "Le devolvimos $300.000" in message.text
     assert f"nota crédito #{body['credit_note_number']} por $500.000" in message.text
     assert "$800.000" not in message.text
+
+
+# ------------------------------------- F8-07: el comprobante pedido en el mostrador ----
+
+
+async def _without_basis(customer_id: UUID) -> None:
+    """Juana con correo pero SIN base legal general: ni contrato ni
+    autorización. Sin pedirlo en el mostrador, ningún aviso le sale."""
+    await _exec(
+        "update public.customer set email_basis = null, email_basis_at = null, "
+        " email_consent_at = null, email_consent_source = null where id = :id",
+        {"id": str(customer_id)},
+    )
+
+
+async def _cashier(company_id: UUID) -> UUID:
+    [row] = await _rows(
+        "select id from public.app_user where company_id = :cid", {"cid": str(company_id)}
+    )
+    return UUID(str(row.id))
+
+
+async def _sale_delivery(company_id: UUID, sale_id: str) -> Any:
+    [row] = await _rows(
+        "select d.status, d.legal_basis, d.requested_by, d.last_error "
+        "from public.notification_delivery d join public.notification_event e "
+        "  on e.id = d.event_id where d.company_id = :cid and e.dedupe_key = :k",
+        {"cid": str(company_id), "k": f"sale:{sale_id}"},
+    )
+    return row
+
+
+async def test_asked_at_the_counter_the_receipt_goes_out_without_general_basis(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """F8-07: sin base legal general y con los avisos de la empresa APAGADOS
+    (como nacen), el cliente pide el comprobante en el mostrador y le sale.
+    La base de ESA entrega es su pedido (`request`) y queda quién lo registró;
+    la del cliente no cambia (sigue nula para los recordatorios)."""
+    await _without_basis(shop["with_mail"])
+    response = _sale(client, shop, shop["with_mail"], send_receipt_email=True)
+    assert response.status_code == 201, response.text
+
+    delivery = await _sale_delivery(shop["company_id"], response.json()["id"])
+    assert delivery.status == "sent"
+    assert delivery.legal_basis == "request"
+    assert delivery.requested_by == await _cashier(shop["company_id"])
+    [message] = outbox.outbox
+    assert message.to == "juana@example.com"
+    [basis] = await _rows(
+        "select email_basis from public.customer where id = :id",
+        {"id": str(shop["with_mail"])},
+    )
+    assert basis.email_basis is None
+    [audit] = await _rows(
+        "select after from public.audit_log where company_id = :cid and action = 'create_sale'",
+        {"cid": str(shop["company_id"])},
+    )
+    assert audit.after["send_receipt_email"] is True
+
+
+async def test_without_basis_and_without_asking_the_receipt_is_suppressed(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """El comportamiento de siempre (el front viejo no manda el campo): sin
+    base, el comprobante queda `suppressed` aunque el evento esté encendido."""
+    await _without_basis(shop["with_mail"])
+    await _enable(shop["company_id"], "sale_receipt")
+    response = _sale(client, shop, shop["with_mail"])
+    assert response.status_code == 201, response.text
+
+    delivery = await _sale_delivery(shop["company_id"], response.json()["id"])
+    assert delivery.status == "suppressed"
+    assert delivery.legal_basis is None
+    assert delivery.requested_by is None
+    assert outbox.outbox == []
+
+
+async def test_with_basis_the_customer_can_say_no_at_the_counter(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """Con base y el evento encendido, el cliente dice «no, gracias»: no sale,
+    y la entrega `suppressed` dice por qué."""
+    await _enable(shop["company_id"], "sale_receipt")
+    response = _sale(client, shop, shop["with_mail"], send_receipt_email=False)
+    assert response.status_code == 201, response.text
+
+    delivery = await _sale_delivery(shop["company_id"], response.json()["id"])
+    assert delivery.status == "suppressed"
+    assert delivery.last_error == notifications_service.DECLINED_AT_COUNTER_REASON
+    assert outbox.outbox == []
+
+
+async def test_asking_at_the_counter_does_not_beat_an_opt_out(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """Quien se dio de baja no vuelve a recibir correo porque el cajero marcó
+    la casilla: la baja gana sobre cualquier base, también sobre el pedido."""
+    await _exec(
+        "update public.customer set email_opt_out_at = now() where id = :id",
+        {"id": str(shop["with_mail"])},
+    )
+    response = _sale(client, shop, shop["with_mail"], send_receipt_email=True)
+    assert response.status_code == 201, response.text
+
+    delivery = await _sale_delivery(shop["company_id"], response.json()["id"])
+    assert delivery.status == "suppressed"
+    assert delivery.legal_basis is None
+    assert outbox.outbox == []
+
+
+async def test_a_payment_receipt_can_also_be_declined_at_the_counter(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """El abono (C2/C3) acepta el mismo campo: `false` no lo manda aunque el
+    cliente tenga base y el evento esté encendido."""
+    ctx = _with_contract(client, shop, shop["with_mail"])
+    await _enable(shop["company_id"], "payment_registered")
+    response = client.post(
+        f"/api/v1/contracts/{ctx['contract']['id']}/payments",
+        headers=_headers(shop["token"], str(uuid4())),
+        json={
+            "months_covered": 0,
+            "capital_amount": "100000.00",
+            "payment_method": "cash",
+            "send_receipt_email": False,
+        },
+    )
+    assert response.status_code == 201, response.text
+    [delivery] = [
+        d
+        for d in await _deliveries(shop["company_id"])
+        if d.dedupe_key == f"payment:{response.json()['id']}"
+    ]
+    assert delivery.status == "suppressed"
+    assert outbox.outbox == []

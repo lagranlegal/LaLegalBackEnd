@@ -120,6 +120,8 @@ async def record_customer_notice(
     entity_id: UUID,
     payload: dict[str, Any],
     instead_of: str | None = None,
+    send_email: bool | None = None,
+    actor_id: UUID | None = None,
 ) -> UUID | None:
     """Registra un aviso transaccional al cliente EN LA TRANSACCIÓN de quien
     llama, y devuelve la entrega que nació `pending` —para mandarla ya, después
@@ -139,6 +141,11 @@ async def record_customer_notice(
       los artículos** (§9.1). Los montos van como texto, tal como los guardó
       el documento: la plantilla formatea, no calcula.
     - `instead_of`: ver `choose_event`.
+    - `send_email` (F8-07): lo que el titular contestó en el mostrador a
+      «¿se lo mando al correo?». `True` lo manda aunque no tenga base general
+      (base `request`, autor `actor_id`); `False` no lo manda aunque la
+      tenga; `None` (el front que no pregunta) es el comportamiento de
+      siempre. Ver `service.record_event`.
     """
     if customer_id is None:
         return None
@@ -158,6 +165,8 @@ async def record_customer_notice(
         customer_id=customer_id,
         entity_type=entity_type,
         entity_id=entity_id,
+        requested_by=actor_id if send_email else None,
+        declined=send_email is False,
     )
     return outcome.pending_ids[0] if outcome.pending_ids else None
 

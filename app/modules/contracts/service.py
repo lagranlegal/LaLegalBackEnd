@@ -1028,6 +1028,12 @@ async def create_payment(
             "contract_id": str(contract_id),
             "total": str(total),
             "payment_method": body.payment_method,
+            # F8-07: lo que el cliente contestó en el mostrador.
+            **(
+                {"send_receipt_email": body.send_receipt_email}
+                if body.send_receipt_email is not None
+                else {}
+            ),
         },
     )
     if discount_amount > 0:
@@ -1067,6 +1073,8 @@ async def create_payment(
             "capital_balance": str(new_capital_balance),
             **({"paid_on": today.isoformat()} if is_full_payoff else {}),
         },
+        send_email=body.send_receipt_email,
+        actor_id=user.id,
     )
 
     # A2 (NOTIFICACIONES §2.5, §19): el descuento, a la empresa, si pasa el

@@ -233,6 +233,12 @@ class PaymentCreateIn(BaseModel):
     payment_method: PaymentMethod
     discount_amount: Money | None = None
     discount_reason: Reason | None = None
+    #: F8-07: lo que el cliente contestó en el mostrador a «¿le mando el
+    #: comprobante al correo?». `true` lo manda aunque no tenga base legal
+    #: general (la base de ese envío es su pedido); `false` no lo manda aunque
+    #: la tenga; omitido = lo que decidan la base del cliente y la
+    #: configuración de la empresa (el comportamiento de siempre).
+    send_receipt_email: bool | None = None
 
 
 class PaymentOut(BaseModel):

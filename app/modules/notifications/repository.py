@@ -186,6 +186,7 @@ async def insert_delivery(
     status: str,
     last_error: str | None = None,
     legal_basis: str | None = None,
+    requested_by: UUID | None = None,
 ) -> UUID | None:
     """Devuelve el id de la entrega, o None si ya existía (mismo evento, canal
     y dirección)."""
@@ -194,9 +195,9 @@ async def insert_delivery(
             """
             insert into public.notification_delivery
                 (company_id, event_id, channel, to_address, recipient_user_id, status, last_error,
-                 legal_basis)
+                 legal_basis, requested_by)
             values (:company_id, :event_id, 'email', :to_address, :recipient_user_id, :status,
-                    :last_error, :legal_basis)
+                    :last_error, :legal_basis, :requested_by)
             on conflict do nothing
             returning id
             """
@@ -209,6 +210,7 @@ async def insert_delivery(
             "status": status,
             "last_error": last_error,
             "legal_basis": legal_basis,
+            "requested_by": str(requested_by) if requested_by else None,
         },
     )
     return result.scalar_one_or_none()
@@ -402,7 +404,7 @@ async def claim_due_deliveries(
             from due
             where d.id = due.id
             returning d.id, d.company_id, d.event_id, d.to_address, d.recipient_user_id,
-                      d.attempts, d.deferred_at
+                      d.attempts, d.deferred_at, d.requested_by
             """
         ),
         {
@@ -432,7 +434,7 @@ async def claim_delivery(db: AsyncSession, *, delivery_id: UUID) -> Row[Any] | N
             from one
             where d.id = one.id
             returning d.id, d.company_id, d.event_id, d.to_address, d.recipient_user_id,
-                      d.attempts, d.deferred_at
+                      d.attempts, d.deferred_at, d.requested_by
             """
         ),
         {"id": str(delivery_id)},
@@ -587,7 +589,7 @@ async def list_deliveries(
         select d.id, d.event_id, e.event_type, e.audience, e.occurred_on, d.channel,
                d.to_address, d.recipient_user_id, d.status, d.attempts, d.last_error,
                d.provider_id, d.scheduled_at, d.sent_at, d.created_at, d.updated_at,
-               d.legal_basis, d.deferred_at
+               d.legal_basis, d.deferred_at, d.requested_by
         from public.notification_delivery d
         join public.notification_event e on e.id = d.event_id
         where d.company_id = :company_id

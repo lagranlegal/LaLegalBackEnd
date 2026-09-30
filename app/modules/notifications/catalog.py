@@ -203,3 +203,9 @@ def basis_allows(purpose: str, basis: str | None) -> bool:
     if basis is None:
         return False
     return basis in PURPOSE_ACCEPTED_BASES.get(purpose, frozenset())
+
+
+#: F8-07: la base de UN comprobante que el titular pidió en el mostrador. No
+#: es una base del cliente (`customer.email_basis` nunca la toma) y por eso no
+#: está en `PURPOSE_ACCEPTED_BASES`: vale para esa entrega y para ninguna otra.
+REQUEST_BASIS = "request"

@@ -418,6 +418,15 @@ cliente con su deuda o su compra, o lo que el dueño necesita saber ya.
   el primer momento permitido, salvo que para entonces ya no diga la verdad; al enviarlo se re-verifica el hecho
   (si el cliente pagó, `suppressed`).
 - Baja de un clic por enlace firmado ([`ARQUITECTURA.md`](ARQUITECTURA.md) §5.2).
+- **El comprobante que se pide en el mostrador sale** (F8-07, decisión del dueño, como Shopify POS o Square):
+  al cobrar una venta o un abono el mostrador pregunta «¿se lo mando al correo?» (`send_receipt_email`). Si
+  dice que sí, ESE comprobante sale aunque el cliente no tenga base general y aunque la empresa tenga el aviso
+  apagado: la base de esa única entrega es su pedido (`legal_basis = request`, con `requested_by` = quien
+  cobró), y los interruptores gobiernan lo que la empresa manda por su cuenta, no un recibo pedido en la cara
+  del cajero. No toca `customer.email_basis`: recordatorios y cobranza siguen exigiendo contrato o
+  consentimiento. Baja, rebote y la falta de correo siguen ganando. Si dice que no, no sale aunque tenga
+  base (`suppressed`, con el motivo). Sin el campo, lo de siempre. Vive en `service.customer_gate`
+  (`requested`), y el despachador lo vuelve a mirar al enviar como todo lo demás.
 
 ## 10. Usuarios, empresas y suscripciones
 

@@ -163,9 +163,14 @@ async def _prepare(
         ):
             return _Prepared(None, "skipped_stale")
 
+        # F8-07: un comprobante que el titular pidió en el mostrador. Los
+        # interruptores de la empresa no lo frenan (no es un aviso que ella
+        # manda por su cuenta); baja y rebote sí, abajo.
+        requested = d.get("requested_by") is not None
+
         # Si la empresa apagó el aviso (o todos) después de planificarlo, lo
         # pendiente no sale: apagar tiene que surtir efecto ya, no mañana.
-        if not prefs.event_enabled(e["event_type"]):
+        if not requested and not prefs.event_enabled(e["event_type"]):
             return _Prepared(None, "suppressed", "El aviso está apagado para la empresa.")
 
         payload: dict[str, Any] = dict(e["payload"] or {})
@@ -211,7 +216,9 @@ async def _prepare(
             # §9.2-c, OTRA VEZ al enviar: la base, la baja y el rebote se
             # vuelven a mirar. Lo que cambió desde que se planificó (una baja
             # por el enlace, una casilla desmarcada) surte efecto YA.
-            gate = service.customer_gate(customer, catalog.get(e["event_type"]).purpose)
+            gate = service.customer_gate(
+                customer, catalog.get(e["event_type"]).purpose, requested=requested
+            )
             if gate.status != "ok":
                 return _Prepared(
                     None,

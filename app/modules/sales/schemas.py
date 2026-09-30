@@ -39,6 +39,12 @@ class SaleCreateIn(BaseModel):
     #: Monto a redimir. Si se omite y hay `credit_note_id`, se toma
     #: min(saldo_de_la_nota, total) — cubre lo máximo posible sin exceder.
     credit_note_amount: Money | None = None
+    #: F8-07: lo que el cliente contestó en el mostrador a «¿le mando el
+    #: comprobante al correo?». `true` lo manda aunque no tenga base legal
+    #: general (la base de ese envío es su pedido); `false` no lo manda aunque
+    #: la tenga; omitido = lo que decidan la base del cliente y la
+    #: configuración de la empresa (el comportamiento de siempre).
+    send_receipt_email: bool | None = None
 
 
 class SaleLineOut(BaseModel):

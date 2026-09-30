@@ -417,6 +417,13 @@ async def create_sale(
             "payment_method": body.payment_method,
             # Solo si alguna línea se vendió bajo el costo de su lote.
             **({"below_cost_lines": below_cost_lines} if below_cost_lines else {}),
+            # F8-07: lo que el cliente contestó en el mostrador, y quién lo
+            # registró es el autor de esta fila.
+            **(
+                {"send_receipt_email": body.send_receipt_email}
+                if body.send_receipt_email is not None
+                else {}
+            ),
         },
     )
     # El descuento efectivo es el explícito MÁS lo que se vendió por debajo
@@ -454,6 +461,8 @@ async def create_sale(
         entity_type="sale",
         entity_id=sale_id,
         payload={"sale_number": number, "total": str(total)},
+        send_email=body.send_receipt_email,
+        actor_id=user.id,
     )
 
     # A2 (NOTIFICACIONES §2.5, §19): el descuento, a la empresa, si pasa el
