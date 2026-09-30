@@ -103,22 +103,4 @@ Decisiones de negocio pendientes (no son bugs): [`ESTADO.md`](ESTADO.md) §4.
 
 ## 5. Mejoras propuestas (no son bugs)
 
-Ideas de producto que salieron construyendo y auditando el front, **no construidas** (verificado contra el código el
-30/09/2026). Se priorizan con Mateo; al construir una, sale de esta lista.
-
-- **Búsqueda global en el topbar** (cliente por nombre o cédula, contrato por número o código anterior, artículo por
-  código). El backend ya tiene `?q=` en cada listado; falta la pantalla. El buscador decorativo que había se quitó.
-- **Auditoría legible**: el detalle de un evento muestra `before`/`after` como JSON crudo; la idea es una frase
-  («María aplicó un descuento de $20.000 al contrato #128»).
-- **Captura de errores del navegador** (Sentry u otro) en el front: hoy un error de JavaScript en producción solo
-  queda en la consola del usuario.
-- **Reportes**: alertas en la propia pantalla (contratos que entran en mora esta semana, un gasto que sube sobre un
-  umbral: `computeDelta` ya da el dato), proyección de vencimientos de los próximos N días, comparación año contra
-  año, rotación de inventario (disponibles hace más de N días), ranking por operador (antes, confirmar que la API
-  expone quién registró cada venta y abono).
-- Una fila corta de KPIs arriba de Contratos y de Ventas (cartera activa, ventas del día).
-- Tope de usuarios por plan (`max_users` en el plan): hoy no existe la columna.
-- App instalable (PWA): sin manifest ni service worker. Nunca modo offline para dinero: caja, idempotencia y
-  estados viven en el servidor.
-- El detalle de un contrato pide el cliente después del contrato (una cascada de un salto, inherente a la forma del
-  dato; impacto bajo).
+Las mejoras propuestas viven en un solo lugar: [`RECOMENDACIONES.md`](RECOMENDACIONES.md) (fase 14, 30/09/2026), con prioridad, esfuerzo y porqué. Esta sección ya no las repite.
