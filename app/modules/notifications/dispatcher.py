@@ -163,14 +163,15 @@ async def _prepare(
         ):
             return _Prepared(None, "skipped_stale")
 
-        # F8-07: un comprobante que el titular pidió en el mostrador. Los
-        # interruptores de la empresa no lo frenan (no es un aviso que ella
-        # manda por su cuenta); baja y rebote sí, abajo.
+        # F8-07: un comprobante que el titular pidió en el mostrador salta el
+        # interruptor de ese aviso, pero NO el general: con los correos
+        # apagados la empresa no envía nada. Baja y rebote siguen, abajo.
         requested = d.get("requested_by") is not None
 
         # Si la empresa apagó el aviso (o todos) después de planificarlo, lo
         # pendiente no sale: apagar tiene que surtir efecto ya, no mañana.
-        if not requested and not prefs.event_enabled(e["event_type"]):
+        gate_open = prefs.enabled if requested else prefs.event_enabled(e["event_type"])
+        if not gate_open:
             return _Prepared(None, "suppressed", "El aviso está apagado para la empresa.")
 
         payload: dict[str, Any] = dict(e["payload"] or {})

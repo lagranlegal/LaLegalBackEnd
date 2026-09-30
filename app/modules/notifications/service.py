@@ -176,8 +176,11 @@ async def record_event(
     if event_id is None:
         return RecordOutcome(created=False, event_id=None, deliveries={})
 
-    # §4.3: apagado = el evento existe, la entrega no se crea.
-    if not deliver or (requested_by is None and not prefs.event_enabled(event_type)):
+    # §4.3: apagado = el evento existe, la entrega no se crea. Un comprobante
+    # pedido en el mostrador (F8-07) salta el interruptor de ESE aviso —el
+    # cliente lo pidió—, pero no el general: apagado, la empresa no envía correos.
+    gate_open = prefs.event_enabled(event_type) if requested_by is None else prefs.enabled
+    if not deliver or not gate_open:
         return RecordOutcome(created=True, event_id=event_id, deliveries={})
 
     counts: dict[str, int] = {}

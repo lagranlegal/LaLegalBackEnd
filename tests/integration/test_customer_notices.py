@@ -995,11 +995,12 @@ async def _sale_delivery(company_id: UUID, sale_id: str) -> Any:
 async def test_asked_at_the_counter_the_receipt_goes_out_without_general_basis(
     client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
 ) -> None:
-    """F8-07: sin base legal general y con los avisos de la empresa APAGADOS
-    (como nacen), el cliente pide el comprobante en el mostrador y le sale.
-    La base de ESA entrega es su pedido (`request`) y queda quién lo registró;
-    la del cliente no cambia (sigue nula para los recordatorios)."""
+    """F8-07: sin base legal general y con el aviso de comprobante APAGADO (como
+    nace), pero con los correos de la empresa encendidos, el cliente pide el
+    comprobante en el mostrador y le sale. La base de ESA entrega es su pedido
+    (`request`) y queda quién lo registró; la del cliente no cambia."""
     await _without_basis(shop["with_mail"])
+    await _enable(shop["company_id"])
     response = _sale(client, shop, shop["with_mail"], send_receipt_email=True)
     assert response.status_code == 201, response.text
 
@@ -1058,6 +1059,7 @@ async def test_asking_at_the_counter_does_not_beat_an_opt_out(
 ) -> None:
     """Quien se dio de baja no vuelve a recibir correo porque el cajero marcó
     la casilla: la baja gana sobre cualquier base, también sobre el pedido."""
+    await _enable(shop["company_id"])
     await _exec(
         "update public.customer set email_opt_out_at = now() where id = :id",
         {"id": str(shop["with_mail"])},
@@ -1095,4 +1097,16 @@ async def test_a_payment_receipt_can_also_be_declined_at_the_counter(
         if d.dedupe_key == f"payment:{response.json()['id']}"
     ]
     assert delivery.status == "suppressed"
+    assert outbox.outbox == []
+
+
+async def test_asking_at_the_counter_does_not_beat_the_company_master_switch(
+    client: TestClient, shop: dict[str, Any], outbox: RecordingProvider
+) -> None:
+    """Con los correos de la empresa apagados (el interruptor general), un
+    comprobante pedido en el mostrador no sale: el interruptor dice que la
+    empresa no envía correos, y un pedido no lo cambia."""
+    await _without_basis(shop["with_mail"])
+    response = _sale(client, shop, shop["with_mail"], send_receipt_email=True)
+    assert response.status_code == 201, response.text
     assert outbox.outbox == []
