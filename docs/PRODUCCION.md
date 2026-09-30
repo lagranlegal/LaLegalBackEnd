@@ -14,7 +14,7 @@
 > `app/core/{settings,db,security}.py`, `app/common/cors.py`, `app/jobs/nightly.py`,
 > `app/modules/platform/{router,schemas}.py`, `supabase/{config.toml,seed.sql,migrations/}` (todas las migraciones
 > de la carpeta), `.github/workflows/guardianes.yml`, `docs/DOMINIO.md` §9, y del front `vercel.json`,
-> `package.json`, `vite.config.ts`, `.env.example`, `docs/DEPLOY.md`; `docs/OPERACION.md` §6.
+> `package.json`, `vite.config.ts`, `.env.example`, `docs/OPERACION.md` §4 y §6.
 > En vivo: `fly apps list`, `fly machines list`, `fly secrets list` (solo nombres), `fly certs list`, y
 > lecturas `GET` de la API de Vercel (dominios, rama de producción, plan del team).
 
@@ -179,7 +179,7 @@ Dashboard de Supabase, **logueado en la cuenta dueña de la org de D2** → New 
   (va dentro de URLs; si los tiene, hay que codificarla en porcentaje, ver 1.4).
 - Anotar `PROD_REF`: es el segmento de la URL del dashboard (`/project/<ref>`) y el subdominio de
   `https://<ref>.supabase.co`. **No** sacarlo de `supabase projects list`: el CLI está logueado en otra cuenta
-  y muestra otros proyectos (ver `frontend-starter/docs/DEPLOY.md` §«dos cuentas»).
+  y muestra otros proyectos (ver `docs/OPERACION.md` §4 §«dos cuentas»).
 
 Qué debe verse: el proyecto en estado *Healthy* en el dashboard.
 
@@ -695,7 +695,7 @@ El proyecto `la-legal-front-end` tiene la Production Branch en **`dev`**, y sus 
 (`dev.prendo.com.co`, `prendo.com.co`, `www.prendo.com.co`, `la-legal-front-end.vercel.app`) tienen
 **`gitBranch: null`**: son dominios de *Production*, sirven lo que sea que construya la Production Branch.
 
-Consecuencia: el plan escrito en `frontend-starter/docs/DEPLOY.md` («mover la Production Branch a `main`»)
+Consecuencia: el plan escrito en `docs/OPERACION.md` §4 («mover la Production Branch a `main`»)
 haría que **`dev.prendo.com.co` pase a servir el build de `main`, con la base de prod**, sin ningún aviso.
 La afirmación «dev, intacto — no se mueve» de ese documento hoy **no es cierta**. Además, las variables del
 scope *Preview* de ese proyecto son viejas (de hace ~38 días): los builds de `dev` como Preview saldrían con
@@ -834,7 +834,7 @@ el dashboard. Un rollback de Vercel trae las variables del build viejo.
 ### 4.4 · HSTS y CSP
 
 - HSTS: `vercel.json` ya manda `max-age=63072000; includeSubDomains` en los dos proyectos. **No** agregar
-  `preload` hasta que prod lleve tiempo estable (salir de esa lista tarda meses; `DEPLOY.md` §HSTS).
+  `preload` hasta que prod lleve tiempo estable (salir de esa lista tarda meses; `docs/OPERACION.md` §4.3).
   Consecuencia de `includeSubDomains`: todo subdominio nuevo de `prendo.com.co` tiene que servir HTTPS.
 - CSP: nada que tocar; se arma en el build desde `VITE_API_URL` y `VITE_SUPABASE_URL`.
 
@@ -1407,8 +1407,6 @@ Lo que este documento afirma sin haberlo podido comprobar el 27/09/2026. Cada un
 
 Hechos medidos que contradicen documentos existentes (para corregirlos en su lugar):
 
-- `frontend-starter/docs/DEPLOY.md`: «`dev.prendo.com.co` — dev, intacto — no se mueve» es falso mientras sus
-  dominios tengan `gitBranch: null` (§4.0); y su paso 3 dice `fly apps create compraventa-backend-prod`.
 - `fly.prod.toml`: nombre, región y memoria (§0.7).
 - Docstring de `scripts/qa/verificar_job_nocturno.py`: el ejemplo usa `FLY_APP=compraventa-backend-prod`.
 - DMARC: los pendientes dicen que falta; medido el 27/09/2026, `_dmarc.prendo.com.co` ya existe con `p=none`.

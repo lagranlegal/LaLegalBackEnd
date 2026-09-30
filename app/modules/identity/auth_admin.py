@@ -65,7 +65,7 @@ class InviteRateLimitedError(AppError):
 
     El servicio de correo incluido de Supabase tiene un límite bajo a
     propósito: está pensado para pruebas, no para producción. La solución de
-    fondo es configurar un SMTP propio (ver docs/DEPLOY.md).
+    fondo es configurar un SMTP propio (ver docs/OPERACION.md §4.4).
     """
 
     status_code = 429
@@ -254,7 +254,7 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
     # OJO: la URL debe estar además en la lista de "Redirect URLs" permitidas
     # del proyecto Supabase (Authentication → URL Configuration). Si no está,
     # Supabase la IGNORA —también en silencio— y vuelve a caer en la Site
-    # URL, con el mismo síntoma. Ver `frontend-starter/docs/DEPLOY.md`.
+    # URL, con el mismo síntoma. Ver `docs/OPERACION.md` §4.3.
     params: dict[str, str] = {}
     if settings.frontend_url:
         callback = f"{settings.frontend_url.rstrip('/')}/auth/callback"
@@ -287,7 +287,7 @@ async def invite_user(email: str, full_name: str, *, send_email: bool = True) ->
     # justo el camino donde nosotros entregamos el enlace. Con `invite` el
     # enlace lo arma Supabase dentro del correo y no pasa por acá — ese sigue
     # expuesto al prefetch de los escáneres de correo hasta que la plantilla
-    # use `{{ .TokenHash }}` (ver frontend-starter/docs/DEPLOY.md).
+    # use `{{ .TokenHash }}` (ver docs/OPERACION.md §6).
     hashed_token = body.get("hashed_token")
     # El `or` importa: sin `FRONTEND_URL` no hay a dónde apuntar, y un enlace
     # frágil sigue siendo mejor que ninguno — la alternativa es dejar al admin

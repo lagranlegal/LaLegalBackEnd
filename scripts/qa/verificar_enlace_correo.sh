@@ -17,7 +17,7 @@
 # **POST**. Un crawler que haga GET solo se baja el cascarón de la SPA.
 #
 # Este script comprueba esa propiedad. Es el paso 7.1 del runbook de la Fase 5a
-# (`frontend-starter/docs/PLAN_MARCA.md`).
+# (`docs/OPERACION.md` §4.4).
 #
 # USO
 #   scripts/qa/verificar_enlace_correo.sh '<el enlace COMPLETO, entre comillas>'
