@@ -165,7 +165,29 @@ Y un arreglo desplegado no prueba que arregle lo que se midió: se vuelve a medi
   (`tests/unit tests/rls`, y `tests/integration` en grupos de archivos), cada uno con un tope de tiempo, p. ej.
   `perl -e 'alarm 280; exec @ARGV' .venv/bin/python -m pytest -q tests/integration/test_contracts.py`.
 - `ruff check . && ruff format --check . && mypy app`. La CI (`ci.yml`) corre lo mismo en cada push a `dev`/`main`
-  y en cada PR, con Postgres efímero. **Una CI que siempre falla no dice nada**: se mantiene verde.
+  y en cada PR. **Una CI que siempre falla no dice nada**: se mantiene verde.
+
+### CI (`.github/workflows/ci.yml`)
+
+Dos jobs en paralelo:
+
+- **`lint-and-unit`**: `ruff check`, `ruff format --check`, `mypy app`, `pytest -q tests/unit`. No necesita base.
+- **`integration`**: `pytest -q tests/integration tests/rls` contra una base levantada con **`supabase db start`**
+  (CLI fijado a la versión local, 2.30.4). Arranca solo el contenedor de Postgres de Supabase — sin Auth, REST ni
+  Studio, ~15 s —, aplica `supabase/migrations/` y `supabase/seed.sql` igual que `supabase start`, y la deja en
+  `127.0.0.1:54322`, el default de `tests/conftest.py`. La imagen se fija a la de la dev remota escribiendo
+  `supabase/.temp/postgres-version` (en local sale del `supabase link`; ese directorio está en `.gitignore`).
+  Al subir de versión de Postgres en Supabase, cambiar ese número en el workflow.
+
+Por qué así y no un `postgres:NN` de servicio: las migraciones dan permisos a roles que solo trae la imagen de
+Supabase (`supabase_auth_admin` en 00003, `authenticated`/`anon`/`service_role` en 00062/00064) y tocan `auth` y
+`storage`. Hasta el 30/09/2026 la CI usaba `postgres:15` y moría en cada push con
+`psql:supabase/migrations/00003_identity.sql:85: ERROR: role "supabase_auth_admin" does not exist`. Un script que
+creara esos roles a mano sería una imitación que se desincroniza sola; el CLI da la misma base que local.
+Los tests no necesitan el servicio de Auth: los JWT los firma la suite con un JWKS falso.
+`tests/rls/test_storage_permissions.py` se salta si no existe `storage.objects` (igual que en local sin Storage).
+
+Nada se despliega desde la CI: Fly va a mano (sección 2).
 - Método de QA y bugs abiertos: [`QA.md`](QA.md).
 
 ## 6. Runbook: alta de usuarios y "no pude poner la contraseña"

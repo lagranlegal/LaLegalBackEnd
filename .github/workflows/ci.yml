@@ -20,21 +20,19 @@ jobs:
       - run: pytest -q tests/unit
 
   integration:
+    # La base de la integración la levanta el CLI de Supabase (`supabase db
+    # start`), no un `postgres:NN` pelado: las migraciones dan permisos a
+    # roles que solo existen en la imagen de Supabase (`supabase_auth_admin`
+    # en 00003, `authenticated`/`anon`/`service_role` desde 00062/00064) y
+    # tocan los esquemas `auth`/`storage`. Con Postgres pelado el paso de
+    # migraciones moría en 00003 ("role supabase_auth_admin does not exist")
+    # en cada push. `db start` arranca SOLO el contenedor de Postgres (sin
+    # Auth, REST ni Studio: ~15 s), aplica `supabase/migrations/` y
+    # `supabase/seed.sql` igual que `supabase start` en local, y deja la base
+    # en 127.0.0.1:54322 — el default de tests/conftest.py. Ver
+    # docs/OPERACION.md, sección "CI".
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/postgres
       SUPABASE_URL: http://127.0.0.1:54321
       SUPABASE_JWKS_URL: http://127.0.0.1:54321/auth/v1/.well-known/jwks.json
       JWT_AUDIENCE: authenticated
@@ -43,24 +41,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: supabase/setup-cli@v1
+        with:
+          # La misma versión que corre en local; subirla es una decisión, no
+          # un efecto colateral de que salga una nueva.
+          version: 2.30.4
       - run: pip install -e ".[dev]"
-      - name: Apply migrations + seed
+      - name: Levantar Postgres de Supabase con migraciones + seed
         run: |
-          for f in supabase/migrations/*.sql; do
-            PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$f"
-          done
-          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/seed.sql
-      - name: Create authenticated/anon roles (stand-in for Supabase's local bootstrap)
-        run: |
-          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
-          do $$
-          begin
-            if not exists (select from pg_roles where rolname = 'authenticated') then
-              create role authenticated nologin noinherit;
-            end if;
-          end
-          $$;
-          grant usage on schema public to authenticated;
-          grant select, insert, update, delete on all tables in schema public to authenticated;
-          SQL
+          # Sin proyecto enlazado, el CLI usaría su imagen por defecto. La
+          # fijamos a la que usa la dev remota (y la local, que la toma del
+          # enlace en supabase/.temp/, ignorado por git): así CI prueba contra
+          # la misma versión de Postgres que producción.
+          mkdir -p supabase/.temp
+          echo "17.6.1.155" > supabase/.temp/postgres-version
+          supabase db start
       - run: pytest -q tests/integration tests/rls
