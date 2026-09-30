@@ -163,6 +163,28 @@ def test_get_current_session_404_when_none_open(client: TestClient, cashbox_tena
     assert response.json()["code"] == "CASH_SESSION_NOT_OPEN"
 
 
+def test_current_session_with_allow_empty_answers_null_not_404(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """Sin caja abierta y con `?allow_empty=true`, `200` con `null`: el estado
+    consultado sin un 404 en la consola del navegador. Sin el parámetro, el
+    404 de siempre (el test de arriba), que es lo que entiende el front
+    desplegado. Con caja abierta, la sesión en los dos casos."""
+    headers = _headers(cashbox_tenant["token"])
+    url = "/api/v1/cashbox/sessions/current?allow_empty=true"
+    response = client.get(url, headers=headers)
+    assert response.status_code == 200
+    assert response.json() is None
+
+    opened = client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "0.00"}
+    )
+    assert opened.status_code == 201, opened.text
+    response = client.get(url, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["id"] == opened.json()["id"]
+
+
 def test_close_session_with_no_movements_matches_opening_balance(
     client: TestClient, cashbox_tenant: dict
 ) -> None:

@@ -254,7 +254,7 @@ Acto único diario de apertura/cierre, base única de efectivo (fase 1: una sola
 | Método | Path | Permiso | Descripción |
 |---|---|---|---|
 | `POST` | `/api/v1/cashbox/sessions/open` | `cashbox.open_close` | Body `{counted_cash?, difference_reason?}`. **El saldo de apertura ya no se digita** (00048): sale del efectivo derivado de las cuentas `cash`. `counted_cash` es el conteo de apertura, opcional; si difiere del registrado se emite un `adjustment` y el motivo es obligatorio (`400 CASH_OPENING_DIFFERENCE_UNJUSTIFIED`). `opening_balance` sigue aceptándose **deprecado** y se interpreta como ese conteo. `409 CASH_SESSION_ALREADY_OPEN` si ya hay una abierta; `409 CASH_SESSION_ALREADY_CLOSED_TODAY` si la de hoy ya se cerró (un solo ciclo apertura/cierre por día calendario). |
-| `GET` | `/api/v1/cashbox/sessions/current` | `cashbox.view` | La sesión abierta ahora mismo, o `404` si no hay ninguna. |
+| `GET` | `/api/v1/cashbox/sessions/current` | `cashbox.view` | La sesión abierta ahora mismo, o `404 CASH_SESSION_NOT_OPEN` si no hay ninguna. **`?allow_empty=true`** (aditivo, 30/09/2026): sin caja abierta responde `200` con `null` —el estado consultado, sin un 404 en la consola del navegador en cada navegación—. Es opt-in para que convivan los bundles: el front desplegado espera el 404; el backend viejo ignora el parámetro y sigue mandando el 404, así que el front nuevo debe conservar el manejo de `CASH_SESSION_NOT_OPEN` hasta que el backend con el parámetro esté en todos los entornos. Cualquier orden de deploy es seguro. |
 | `GET` | `/api/v1/cashbox/sessions` | `cashbox.view` | Historial paginado. |
 | `GET` | `/api/v1/cashbox/sessions/{id}` | `cashbox.view` | Detalle. |
 | `GET` | `/api/v1/cashbox/sessions/{id}/report` | `cashbox.view` | Desglose módulo×dirección×concepto×medio de pago + `expected_cash` calculado. Funciona tanto para una sesión abierta (vista previa antes de cerrar) como cerrada (el acta ya definitiva). |
@@ -273,7 +273,7 @@ Acto único diario de apertura/cierre, base única de efectivo (fase 1: una sola
 
 | Método | Path | Permiso |
 |---|---|---|
-| `GET` | `/api/v1/cashbox/sessions/current` | `cashbox.view` (404 si no hay ninguna abierta) |
+| `GET` | `/api/v1/cashbox/sessions/current` | `cashbox.view` (404 si no hay ninguna abierta; `200 null` con `?allow_empty=true`) |
 | `GET` | `/api/v1/cashbox/sessions/today` | `cashbox.view` — la de hoy, abierta o cerrada (404 si no se ha abierto) |
 | `GET` | `/api/v1/cashbox/sessions` | `cashbox.view_history` |
 | `GET` | `/api/v1/cashbox/sessions/{id}` y `/report` | `cashbox.view` si es la de hoy; `cashbox.view_history` si no |
@@ -554,7 +554,7 @@ Esta tabla de este documento describe **intención y reglas de negocio** (qué h
 | `TEMPLATE_IS_ACTIVE` | 409 | Se intentó borrar la plantilla de documento activa. Hay que activar otra o desactivarla primero: quitar el documento en uso debe ser un paso explícito. |
 | `INVITE_RATE_LIMITED` | 429 | Se agotó la cuota de correos del SMTP incluido de Supabase. No es una falla: se espera, o se usa «Generar enlace», que no consume cuota. **Desde el 24/09/2026 solo aparece en el respaldo** (`invite_delivery: "email_supabase"`, la plataforma sin `RESEND_API_KEY`): con proveedor propio la invitación ya no pasa por el SMTP de Supabase (`DOMINIO.md` §9). |
 | `AUTH_ADMIN_ERROR` | 502 | Fallo genérico de la API Admin de Supabase Auth al invitar o generar un enlace. Los casos conocidos ya tienen su propio 409 arriba; este es lo que queda. |
-| `CASH_SESSION_NOT_OPEN` | 409 · **404** | Se intentó desembolsar/cobrar/registrar un gasto sin una sesión de caja abierta. **Excepción deliberada:** en `GET /cashbox/sessions/current` viaja con **404**, porque ahí "no hay caja abierta" no es un rechazo sino el estado consultado. El front distingue por el `code`, nunca por el status — cuando ese endpoint devolvía `NOT_FOUND` a secas, la franja global decía "No se pudo consultar el estado de la caja" y toda la rama de "Caja cerrada" era código muerto (03/09/2026). |
+| `CASH_SESSION_NOT_OPEN` | 409 · **404** | Se intentó desembolsar/cobrar/registrar un gasto sin una sesión de caja abierta. **Excepción deliberada:** en `GET /cashbox/sessions/current` viaja con **404** (salvo con `?allow_empty=true`, que responde `200 null`), porque ahí "no hay caja abierta" no es un rechazo sino el estado consultado. El front distingue por el `code`, nunca por el status — cuando ese endpoint devolvía `NOT_FOUND` a secas, la franja global decía "No se pudo consultar el estado de la caja" y toda la rama de "Caja cerrada" era código muerto (03/09/2026). |
 | `CASH_SESSION_ALREADY_OPEN` | 409 | Se intentó abrir una sesión (o reabrir una) habiendo ya otra abierta para esa caja. |
 | `CASH_SESSION_NOT_CLOSED` | 409 | Se intentó **reabrir** una sesión que ya está abierta — casi siempre un doble clic o una pestaña sin refrescar. `details: {session_id, status}`. Antes viajaba como `CONFLICT` genérico y el front no tenía cómo decir «ya está abierta» en vez de «algo falló» (F21-34). No confundir con `CASH_SESSION_ALREADY_OPEN`, que es **otra** sesión abierta. |
 | `CASH_SESSION_ALREADY_CLOSED_TODAY` | 409 | Se intentó abrir una sesión el mismo día en que ya se cerró una (un solo ciclo diario). |

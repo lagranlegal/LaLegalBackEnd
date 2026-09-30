@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.idempotency import optional_idempotency_key
 from app.common.pagination import CursorPage, decode_cursor
+from app.core.errors import NoOpenCashSessionError
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.cashbox import service
 from app.modules.cashbox.schemas import (
@@ -63,12 +64,31 @@ async def open_session(
     )
 
 
-@router.get("/sessions/current", response_model=SessionOut)
+@router.get("/sessions/current", response_model=SessionOut | None)
 async def get_current_session(
     user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
-) -> SessionOut:
-    return await service.get_current_session(db, company_id=user.company_id)
+    allow_empty: Annotated[
+        bool,
+        Query(
+            description="`true`: sin caja abierta responde `200` con `null` en vez del "
+            "`404 CASH_SESSION_NOT_OPEN`."
+        ),
+    ] = False,
+) -> SessionOut | None:
+    # «No hay caja abierta» es el estado consultado, no una falla; pero como
+    # 404 ensucia la consola del navegador en cada navegación. El `null` es
+    # OPT-IN a propósito: el front desplegado espera el 404 (lo normaliza a
+    # `null` por el código) y cambiarlo de golpe rompería la franja de caja
+    # mientras conviven los dos bundles. Con el parámetro, cualquier orden de
+    # deploy es seguro: el backend viejo ignora el parámetro y sigue mandando
+    # el 404, que el front nuevo todavía entiende.
+    try:
+        return await service.get_current_session(db, company_id=user.company_id)
+    except NoOpenCashSessionError:
+        if allow_empty:
+            return None
+        raise
 
 
 @router.get("/sessions/today", response_model=SessionOut)
