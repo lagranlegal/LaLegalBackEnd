@@ -3,7 +3,7 @@
 > **Qué es.** Cómo se prueba este proyecto, con qué herramientas, y la **lista única** de defectos abiertos.
 > La historia de las auditorías (fases 0–10 del 08–09/09/2026, la serie F20/F21 y la auditoría integral del
 > 27/09/2026) no vive aquí: está en la historia de git de `docs/QA_AUDITORIA.md` y en los informes de la
-> auditoría. Esta tabla es un **resumen**; el detalle de cada bug pasa a GitHub Issues.
+> auditoría. Los bugs abiertos viven en GitHub Issues (§4).
 
 ## 1. Principios de método
 
@@ -71,33 +71,21 @@ Manual completo: [`../scripts/qa/README.md`](../scripts/qa/README.md). Lo princi
 | `verificar_saldos.py`, `verificar_regresion_caja.py` | saldos derivados y arqueo |
 | `ui_*.js` | recorridos de UI con Playwright: formularios, responsive a 360 px, accesibilidad y contraste, impresión, caja cerrada, recargo, alta |
 
-## 4. Bugs abiertos (29/09/2026)
+## 4. Bugs abiertos
 
-Lo cerrado en las tandas de la auditoría integral (concurrencia e idempotencia, cuentas en abonos y anulaciones,
-LTV y avalúo, precio bajo el publicado, mínimo un mes, reportes de la fase 7, plantillas vaciables, piso de la Ley
-2300, comprobantes y tope diario, Storage, errores 500) **no aparece aquí**. Cuando un bug se cierra, sale de la
-tabla en el mismo commit que lo arregla.
+Los bugs abiertos viven en **GitHub Issues**, no en este documento: los de la auditoría integral llevan la etiqueta
+`auditoría-2026-09` ([backend](https://github.com/lagranlegal/LaLegalBackEnd/issues?q=is%3Aissue+label%3Aaudito%C3%ADa-2026-09)
+· [front](https://github.com/lagranlegal/LaLegalFrontEnd/issues?q=is%3Aissue+label%3Aaudito%C3%ADa-2026-09)).
 
-| ID | Sev | Repo | Resumen | Estado |
-|---|---|---|---|---|
-| P0-1 | 🔴 | infra | Hallazgo de seguridad; el detalle vive fuera del repo, que es público | espera a Mateo |
-| LAB-01 | 🟡 | lab | Los usuarios y clientes del laboratorio usan un dominio de correo real de un tercero: si una empresa de laboratorio enciende avisos, salen correos a ese dominio y los rebotes dañan la reputación de `prendo.com.co`. Mover el laboratorio a un subdominio propio sin MX | abierto; avisos del laboratorio apagados |
-| VOID-sess | 🟡 | back | Anular una venta exige caja abierta aunque la venta entró por banco o convenio | abierto (cambia comportamiento) |
-| SETTLE-code | 🟡 | back | Liquidar un convenio hacia efectivo con la caja cerrada responde un error genérico, no `CASH_SESSION_NOT_OPEN` (el front no abre el recuadro «Caja cerrada») | abierto |
-| DOC-acct | 🟡 | back | `contract_payment`, `expense` e `inventory_entry` tienen `account_id` (00024) que nunca se escribe; la cuenta solo queda en el movimiento | abierto |
-| F4-07…17 | 🟡/⚪ | back | Resto de la fase de contratos (validaciones y bordes menores) | abierto |
-| F5-07…11 | 🟡 | back | Caja: la exige la operación y no siempre la cuenta, cuenta «Transferencias» automática, cuenta inactiva que opera, saldo inicial sin auditoría, liquidar a la caja fuerte | abierto |
-| F6-07…22 | 🟡/⚪ | back/front | Inventario y tienda: egresos fraccionarios, saldos negativos, `payment_method` incoherente, clave de idempotencia reusada con otro cuerpo, motivos | abierto |
-| F7-12/14/17 | 🟡/⚪ | back/front | Reportes: Excel Resumen con signos, compras a proveedor inconsistentes entre vistas, detalles del egreso | abierto |
-| F1-pend | 🟡 | back | Una transformación de piezas rematadas no hereda el interés capitalizado; una devolución a proveedor no toca cuentas por pagar; `/reports/series` sin las líneas nuevas del estado de resultados; ventas viejas con `list_price` nulo | abierto |
-| INV-round | ⚪ | back | El ingreso de inventario no redondea por línea, a diferencia de venta y transformación | abierto |
-| F3-09/10/11 | ⚪ | back | Prórroga con fecha pasada, `limit` sin tope, 409 `CONFLICT` genérico, `open` acepta `{}` | abierto |
-| TEST-flaky | ⚪ | back | `test_platform::test_get_and_list_companies_include_plan_and_subscription` falla en la suite completa y pasa sola | abierto |
-| JOB-sched | 🟡 | infra | Hipótesis: cada `machine update` reinicia el reloj del `--schedule daily` ([`OPERACION.md`](OPERACION.md) §3) | medir |
-| MAIL-dmarc | ⚪ | infra | DMARC sin publicar, prueba de spam pendiente, webhook de Resend (`delivered`/`bounced` → `email_invalid_at`) sin construir | abierto |
-| F9-* | 🟠/🟡/⚪ | front | 64 hallazgos de UI/UX pantalla por pantalla (2 altos ya enviados); entre los medios: bloqueo previo con caja cerrada, confirmación del abono sin resumen, foco de inputs con contraste bajo, filas no abribles con teclado, Inicio vacío para roles sin reportes, bundle único de 1,9 MB sin code-splitting | abierto; van a la fase de rediseño |
-| FE-misc | 🟡/⚪ | front | Coma decimal en los diálogos de egreso y devolución; firmas que saltan solas a la última hoja en plantillas largas; un rango sin cierres pero con banco muestra «No hay cierres»; `fetchAllPages` corta a 10.000 filas en silencio; Inter en pantallas internas a 360 px sin revisar | abierto |
-| DB-contract | ⚪ | back | Contraer `customer.doc_photo_url` (00050 dejó las dos columnas sincronizadas) | abierto |
+Un bug nuevo se registra como issue en el repo donde empieza el arreglo (si toca los dos, se enlaza el otro), con
+**Qué pasa**, **Cómo reproducirlo** (sin credenciales ni datos de clientes), **Qué se esperaba**, **Dónde está**
+(archivo y función) y **Arreglo sugerido** marcado como hipótesis (principios 6 y 7), y con una etiqueta de
+severidad (`sev:alta`, `sev:media`, `sev:baja`, según la tabla de §1) y una de área (`área:contratos`, `área:caja`,
+`área:inventario`, `área:ventas`, `área:reportes`, `área:notificaciones`, `área:plantillas`, `área:identidad`,
+`área:ui`, `área:infra`). El issue se cierra en el commit que lo arregla (`Closes #N`).
+
+**Los hallazgos de seguridad nunca van a Issues**: los repos son públicos. Se registran fuera del repo y se tratan
+directamente con Mateo.
 
 Decisiones de negocio pendientes (no son bugs): [`ESTADO.md`](ESTADO.md) §4.
 
