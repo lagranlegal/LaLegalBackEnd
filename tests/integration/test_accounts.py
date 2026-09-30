@@ -7,13 +7,13 @@ invisible. Requiere Postgres real (se salta si no hay).
 """
 
 from collections.abc import AsyncGenerator
-from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from _concurrency import Peticion, en_paralelo
+from _dates import hoy_empresa
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -801,7 +801,7 @@ def test_bank_statement_carries_a_running_balance(
         json={"from_account_id": caja["id"], "to_account_id": banco["id"], "amount": "50000.00"},
     )
 
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     r = client.get(
         f"/api/v1/accounts/{banco['id']}/statement",
         headers={"Authorization": f"Bearer {token}"},
@@ -846,7 +846,7 @@ def test_cash_statement_now_has_a_running_balance(
     token = accounts_tenant["token"]
     caja = next(a for a in _accounts(client, token) if a["type"] == "cash")
 
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     body = client.get(
         f"/api/v1/accounts/{caja['id']}/statement",
         headers={"Authorization": f"Bearer {token}"},

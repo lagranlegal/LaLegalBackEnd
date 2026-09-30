@@ -8,12 +8,13 @@ Un test por endpoint y por campo. Cada caso arma un body válido en todo lo
 demás, para que el 404 venga del id y no de otra regla.
 """
 
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from _dates import hoy_empresa
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -351,7 +352,7 @@ def test_contrato_con_cuenta_de_otra_empresa(client: TestClient, empresas: tuple
 
 
 def _importado(a: dict[str, Any], **over: Any) -> dict[str, Any]:
-    start = date.today() - timedelta(days=60)
+    start = hoy_empresa() - timedelta(days=60)
     body: dict[str, Any] = {
         "legacy_code": f"L-{uuid4().hex[:8]}",
         "customer_id": _s(a["customer"]),

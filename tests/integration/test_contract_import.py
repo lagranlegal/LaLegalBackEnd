@@ -5,11 +5,12 @@ importado se comporte igual que uno nativo desde el segundo después del
 import (abono, remate). Requiere Postgres real (se salta si no hay)."""
 
 from collections.abc import AsyncGenerator
-from datetime import date, timedelta
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from _dates import hoy_empresa
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -222,7 +223,7 @@ async def _open_cash_session(*, company_id, register_id) -> None:
 
 
 def _import_payload(tenant: dict, **overrides: object) -> dict:
-    today = date.today()
+    today = hoy_empresa()
     base = {
         "legacy_code": f"LEGACY-{uuid4()}",
         "customer_id": str(tenant["customer_id"]),
@@ -348,7 +349,7 @@ def test_import_zero_capital_balance_is_422(client: TestClient, import_tenant: d
 
 
 def test_import_misaligned_dates_is_422(client: TestClient, import_tenant: dict) -> None:
-    today = date.today()
+    today = hoy_empresa()
     response = client.post(
         "/api/v1/contracts/import",
         headers=_headers(import_tenant["full_token"], idempotency_key=str(uuid4())),
@@ -364,7 +365,7 @@ def test_import_misaligned_dates_is_422(client: TestClient, import_tenant: dict)
 
 
 def test_import_start_date_in_future_is_400(client: TestClient, import_tenant: dict) -> None:
-    today = date.today()
+    today = hoy_empresa()
     future = add_months(today, 1)
     response = client.post(
         "/api/v1/contracts/import",
@@ -377,7 +378,7 @@ def test_import_start_date_in_future_is_400(client: TestClient, import_tenant: d
 
 
 def test_import_derives_in_arrears_status(client: TestClient, import_tenant: dict) -> None:
-    today = date.today()
+    today = hoy_empresa()
     start_date = add_months(today, -5)
     interest_paid_until = add_months(start_date, 3)  # today - 2 meses -> 2 meses adeudados
 
@@ -398,7 +399,7 @@ def test_import_derives_in_arrears_status(client: TestClient, import_tenant: dic
 def test_import_payment_options_quotes_against_expected_owed_months(
     client: TestClient, import_tenant: dict
 ) -> None:
-    today = date.today()
+    today = hoy_empresa()
     start_date = add_months(today, -5)
     interest_paid_until = add_months(start_date, 3)  # 2 meses adeudados
 
@@ -428,7 +429,7 @@ async def test_normal_payment_on_imported_contract_updates_balance(
     await _open_cash_session(
         company_id=import_tenant["company_id"], register_id=import_tenant["register_id"]
     )
-    today = date.today()
+    today = hoy_empresa()
     start_date = add_months(today, -5)
     interest_paid_until = add_months(start_date, 3)  # 2 meses adeudados
 
@@ -475,7 +476,7 @@ async def test_normal_payment_on_imported_contract_updates_balance(
 def test_import_ready_for_auction_and_auction_of_expired_extension(
     client: TestClient, import_tenant: dict
 ) -> None:
-    today = date.today()
+    today = hoy_empresa()
     # interest_paid_until + 4 (ventana) + 1 (prórroga) = 5 meses antes de
     # hoy ya deja la prórroga vencida; nos vamos 6 meses atrás de margen.
     interest_paid_until = add_months(today, -6)
@@ -582,7 +583,7 @@ async def test_abono_parcial_en_prorroga_recalcula_su_fin(
     await _open_cash_session(
         company_id=import_tenant["company_id"], register_id=import_tenant["register_id"]
     )
-    today = date.today()
+    today = hoy_empresa()
     start_date = add_months(today, -7)  # 7 meses adeudados, ventana 4 + 1 de prórroga
     headers = _headers(import_tenant["full_token"])
     imported = client.post(

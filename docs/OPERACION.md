@@ -187,6 +187,12 @@ creara esos roles a mano sería una imitación que se desincroniza sola; el CLI 
 Los tests no necesitan el servicio de Auth: los JWT los firma la suite con un JWKS falso.
 `tests/rls/test_storage_permissions.py` se salta si no existe `storage.objects` (igual que en local sin Storage).
 
+**La CI corre en UTC, como Fly; el Mac de desarrollo, en Bogotá.** Un test que usa `date.today()` o pasa una
+`date` a una columna `timestamptz` (asyncpg la vuelve medianoche de la zona del proceso) pasa en local y falla en
+la CI — de noche, o siempre. Así cayó `test_devolucion_de_otro_mes_no_reescribe_el_mes_de_la_venta` en la primera
+corrida con la base nueva. Para "hoy" y para antedatar: `hoy_empresa()` y `mediodia_empresa(d)` de
+`tests/integration/_dates.py`. Para reproducir en local: `TZ=UTC pytest …`.
+
 Nada se despliega desde la CI: Fly va a mano (sección 2).
 - Método de QA y bugs abiertos: [`QA.md`](QA.md).
 

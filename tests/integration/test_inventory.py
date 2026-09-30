@@ -5,13 +5,14 @@ Requiere Postgres real (se salta si no hay)."""
 
 import asyncio
 from collections.abc import AsyncGenerator
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from _concurrency import Peticion, en_paralelo
+from _dates import hoy_empresa
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -864,7 +865,7 @@ def test_purchase_accepts_a_past_entry_date(client: TestClient, inventory_tenant
     """La mercancía entró ayer aunque se digite hoy. `entry_date` es lo que
     importa para inventario y costo; el pago es otro hecho."""
     token = inventory_tenant["token"]
-    ayer = (date.today() - timedelta(days=3)).isoformat()
+    ayer = (hoy_empresa() - timedelta(days=3)).isoformat()
 
     payload = _entry_payload(inventory_tenant, entry_date=ayer)
     del payload["payment_method"]
@@ -876,7 +877,7 @@ def test_purchase_accepts_a_past_entry_date(client: TestClient, inventory_tenant
 
 def test_purchase_rejects_a_future_entry_date(client: TestClient, inventory_tenant: dict) -> None:
     payload = _entry_payload(
-        inventory_tenant, entry_date=(date.today() + timedelta(days=1)).isoformat()
+        inventory_tenant, entry_date=(hoy_empresa() + timedelta(days=1)).isoformat()
     )
     del payload["payment_method"]
     response = client.post(
@@ -894,7 +895,7 @@ async def test_paying_a_pending_purchase_moves_cash_today(
     que no hay forma —ni debería haberla— de afectar la caja de aquel día."""
     token = inventory_tenant["token"]
     payload = _entry_payload(
-        inventory_tenant, entry_date=(date.today() - timedelta(days=5)).isoformat()
+        inventory_tenant, entry_date=(hoy_empresa() - timedelta(days=5)).isoformat()
     )
     del payload["payment_method"]
     entry = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).json()
@@ -1585,7 +1586,7 @@ def test_payables_report_groups_by_supplier_with_aging(
     pediría un contador, y que no existía aunque cada compra ya supiera si
     estaba pagada."""
     token = inventory_tenant["token"]
-    hoy = date.today()
+    hoy = hoy_empresa()
 
     reciente = _entry_payload(inventory_tenant)
     del reciente["payment_method"]
@@ -1674,7 +1675,7 @@ def test_item_inherits_the_entry_date_of_its_purchase(
     digitación en vez del día en que la mercancía llegó.
     """
     token = inventory_tenant["token"]
-    hace_un_mes = str(date.today() - timedelta(days=30))
+    hace_un_mes = str(hoy_empresa() - timedelta(days=30))
     payload = _entry_payload(inventory_tenant)
     del payload["payment_method"]
     payload["entry_date"] = hace_un_mes
@@ -1693,7 +1694,7 @@ def test_stale_inventory_uses_the_oldest_lot(client: TestClient, inventory_tenan
     """
     token = inventory_tenant["token"]
     viejo = _entry_with(inventory_tenant, "Cadena dormida", photos=["d.jpg"], sale_price="90000.00")
-    viejo["entry_date"] = str(date.today() - timedelta(days=200))
+    viejo["entry_date"] = str(hoy_empresa() - timedelta(days=200))
     del viejo["payment_method"]
     client.post("/api/v1/inventory/entries", headers=_headers(token), json=viejo)
 
@@ -1734,7 +1735,7 @@ def test_stale_inventory_totals_cover_everything_not_just_the_page(
     dormidos += [("Dormido nuevo", 100, "400000.00")]
     for nombre, dias, costo in dormidos:
         payload = _entry_with(inventory_tenant, nombre, unit_cost=costo, sale_price="900000.00")
-        payload["entry_date"] = str(date.today() - timedelta(days=dias))
+        payload["entry_date"] = str(hoy_empresa() - timedelta(days=dias))
         del payload["payment_method"]
         r = client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload)
         assert r.status_code == 201, r.text
@@ -1768,7 +1769,7 @@ def test_stale_inventory_includes_the_product_that_just_crossed_the_threshold(
     payload = _entry_with(
         inventory_tenant, "Dormido justo en la raya", unit_cost="300000.00", sale_price="900000.00"
     )
-    payload["entry_date"] = str(date.today() - timedelta(days=90))
+    payload["entry_date"] = str(hoy_empresa() - timedelta(days=90))
     del payload["payment_method"]
     assert (
         client.post("/api/v1/inventory/entries", headers=_headers(token), json=payload).status_code

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from _dates import hoy_empresa, mediodia_empresa
 from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
@@ -540,7 +541,7 @@ def test_profit_summary_crosses_cost_against_price(
         # El costo queda CONGELADO en la línea, no se lee del artículo después.
         assert sale.json()["lines"][0]["unit_cost"] == cost
 
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
     body = _profit(client, reports_tenant["token"], today, today)
 
     assert body["sale_count"] == 2
@@ -674,7 +675,7 @@ async def test_pawn_performance_reports_interest_over_portfolio(
     )
     assert payment.status_code == 201, payment.text
 
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
     body = _pawn(client, reports_tenant["token"], today, today)
 
     assert float(body["interest_collected"]) == 50000.0
@@ -718,7 +719,7 @@ async def test_pawn_interest_comes_from_documents_not_closed_cash_sessions(
     )
     assert paid.status_code == 201, paid.text
 
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
     body = _pawn(client, reports_tenant["token"], today, today)
     assert float(body["interest_collected"]) == 50000.0
 
@@ -762,7 +763,7 @@ async def test_lo_prestado_es_lo_que_salio_de_caja_en_el_periodo(
     assert recargo.status_code == 201, recargo.text
     assert recargo.json()["principal"] == "1300000.00"
 
-    today = date.today()
+    today = hoy_empresa()
     importado = client.post(
         "/api/v1/contracts/import",
         headers=_headers(reports_tenant["token"], idempotency_key=str(uuid4())),
@@ -871,7 +872,7 @@ def test_income_statement_subtracts_the_cost_of_goods_sold(
         },
     )
 
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     r = client.get(
         "/api/v1/reports/income-statement",
         headers={"Authorization": f"Bearer {reports_tenant['token']}"},
@@ -924,7 +925,7 @@ def test_income_statement_keeps_capital_and_purchases_out_of_the_result(
         },
     )
 
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     body = client.get(
         "/api/v1/reports/income-statement",
         headers={"Authorization": f"Bearer {reports_tenant['token']}"},
@@ -1077,7 +1078,7 @@ async def test_interest_discount_lowers_revenue_like_a_sale_discount(
     assert payment.status_code == 201, payment.text
     assert Decimal(payment.json()["total"]) == Decimal("40000.00")
 
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
     estado = client.get(
         "/api/v1/reports/income-statement",
         headers={"Authorization": f"Bearer {token}"},
@@ -1212,7 +1213,7 @@ def test_devolucion_total_saca_el_ingreso_y_su_costo_sin_tocar_el_inventario(
     client.post(
         "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
     )
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
 
     item_id = _ingresar_uno(client, reports_tenant, unit_cost="300000.00", unit_price="500000.00")
     # Foto del activo CON el artículo adentro y todavía sin vender: es contra
@@ -1274,7 +1275,7 @@ def test_devolucion_parcial_prorratea_el_descuento_de_la_cabecera(
     client.post(
         "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
     )
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
 
     entry = client.post(
         "/api/v1/inventory/entries",
@@ -1368,7 +1369,7 @@ async def test_devolucion_de_otro_mes_no_reescribe_el_mes_de_la_venta(
     client.post(
         "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
     )
-    hoy = date.today()
+    hoy = hoy_empresa()
     entonces = hoy - timedelta(days=45)
 
     sale = _sell_one(client, reports_tenant, unit_cost="300000.00", unit_price="500000.00")
@@ -1380,7 +1381,7 @@ async def test_devolucion_de_otro_mes_no_reescribe_el_mes_de_la_venta(
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
             text("update public.sale set sold_at = :cuando where id = :sid"),
-            {"cuando": entonces, "sid": sale["id"]},
+            {"cuando": mediodia_empresa(entonces), "sid": sale["id"]},
         )
 
     _return_sale(
@@ -1430,7 +1431,7 @@ def test_estado_de_resultados_muestra_las_devoluciones_en_linea_propia(
     client.post(
         "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
     )
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
 
     sale = _sell_one(client, reports_tenant, unit_cost="300000.00", unit_price="500000.00")
     _return_sale(
@@ -1507,7 +1508,7 @@ def test_reportes_con_cantidades_fraccionarias(client: TestClient, reports_tenan
     )
     assert venta.status_code == 201, venta.text
 
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
     utilidad = _profit(client, reports_tenant["token"], today, today)
     assert Decimal(utilidad["units_sold"]) == Decimal("1.1")
     assert utilidad["gross_revenue"] == "330000.00"
@@ -1529,7 +1530,7 @@ def test_devolucion_sin_reingreso_deja_su_costo_en_el_costo_de_ventas(
     client.post(
         "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "2000000.00"}
     )
-    today = date.today().isoformat()
+    today = hoy_empresa().isoformat()
     venta = _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="900000.00")
     _return_sale(
         client,
@@ -1566,7 +1567,7 @@ def test_el_dinero_de_los_reportes_sale_con_dos_decimales(
 ) -> None:
     token = reports_tenant["token"]
     read = {"Authorization": f"Bearer {token}"}
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
 
     # Empresa vacía: los ceros son "0.00", no "0".
     dash = client.get("/api/v1/reports/dashboard", headers=read).json()
@@ -1633,7 +1634,7 @@ def test_el_dinero_de_los_reportes_sale_con_dos_decimales(
 # capitalizado en el remate. Cada uno, con su línea.
 # --------------------------------------------------------------------------
 def _estado(client: TestClient, token: str) -> dict:
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     r = client.get(
         "/api/v1/reports/income-statement",
         headers={"Authorization": f"Bearer {token}"},
@@ -1878,7 +1879,7 @@ async def test_F7_04_el_interes_capitalizado_en_el_remate_no_es_costo_de_ventas(
     assert publicado.status_code == 200, publicado.text
     venta = _vender_uno(client, reports_tenant, item_id, unit_price="1300000.00")
 
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     utilidad = _profit(client, token, hoy, hoy)
     assert utilidad["cost_of_goods_sold"] == "800000.00"
     assert utilidad["auction_interest_realized"] == f"{interes:.2f}"
@@ -1919,7 +1920,7 @@ def test_F7_08_vender_bajo_el_precio_publicado_figura_como_descuento(
     celular = _ingresar_uno(client, reports_tenant, unit_cost="600000.00", unit_price="800000.00")
     _vender_uno(client, reports_tenant, celular, unit_price="800000.00", discount="55000.00")
 
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     utilidad = _profit(client, token, hoy, hoy)
     assert utilidad["discounts"] == "55000.00", "la cabecera no cambia de significado"
     assert utilidad["price_discounts"] == "50000.00"
@@ -1972,7 +1973,7 @@ def test_F7_05_07_ventas_netas_en_el_dashboard_y_flujo_de_caja_sin_anuladas(
         json={"counted_cash": esperado},
     )
     assert cerrada.status_code == 200, cerrada.text
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     flujo = client.get(
         "/api/v1/reports/closings-breakdown",
         headers=_headers(token),
@@ -1992,7 +1993,7 @@ async def test_F7_06_rendimiento_del_empeno_sobre_el_interes_neto(
     (neto del descuento de 10.000). La respuesta ahora trae el neto —la misma
     cifra que `income-statement.interest_revenue`— y el rendimiento sobre él."""
     token = reports_tenant["token"]
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     empeno = _pawn(client, token, hoy, hoy)
     estado = _estado(client, token)
     assert empeno["interest_revenue"] == estado["interest_revenue"]
@@ -2078,7 +2079,7 @@ def test_F7_13_la_posicion_resta_pasivos_y_da_el_patrimonio_neto(
     )
     assert devolucion.status_code == 201, devolucion.text
 
-    hoy = date.today().isoformat()
+    hoy = hoy_empresa().isoformat()
     p = client.get(
         "/api/v1/capital/position",
         headers=_headers(token),
