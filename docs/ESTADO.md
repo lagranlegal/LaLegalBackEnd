@@ -10,9 +10,10 @@
   reales. **Producción es el único bloqueante para vender**; el paso a paso está en [`PRODUCCION.md`](PRODUCCION.md)
   y Mateo lo dejó a propósito para cuando haya un segundo cliente.
 - **Auditoría integral en curso** (plan: [`PLAN_AUDITORIA_INTEGRAL.md`](PLAN_AUDITORIA_INTEGRAL.md)). Hechas las
-  fases 1–8, 10, 12 y 13, y las tandas de arreglos A, B, D, E, F1, F2 y G. En curso la 11 (esta consolidación de
-  documentación). Faltan: 9 (UI/UX, informe entregado, arreglos pendientes), 14 recomendaciones, 15 bugs a GitHub
-  Issues + E2E versionada, 16 rediseño visual.
+  fases 1–8, 10, 11 (documentación consolidada en los dos repos; en el front quedan `CLAUDE.md`,
+  `docs/ARQUITECTURA.md` y `docs/DESIGN_SYSTEM.md`), 12 y 13, y las tandas de arreglos A, B, D, E, F1, F2 y G.
+  Faltan: 9 (UI/UX, informe entregado, arreglos pendientes), 14 recomendaciones, 15 bugs a GitHub Issues + E2E
+  versionada, 16 rediseño visual.
 - **Último deploy verificado en navegador:** 29/09 08:15 — backend `af8affe` (migraciones hasta 00064), front
   `16a37d5`; 9/9 comprobaciones, 0 errores de JS, 0 respuestas 5xx. **Después hay commits de la fase 8 en los dos
   repos** (plantilla activa no vaciable, piso de la Ley 2300, comprobantes fuera del tope diario, Storage de perfil
