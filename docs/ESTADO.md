@@ -36,7 +36,8 @@
 
 Issues abiertas con la etiqueta `auditoría-2026-09` (24 del backend; en el front, las que no cerró la tanda I).
 Lo siguiente: el rediseño P2 (pantallas de mostrador, idénticas a la §5 de la propuesta) y P3 — para el Inicio
-el backend ya trae `GET /contracts/attention` («Para hoy», con `contracts.view`), falta la pantalla; la
+el backend ya trae `GET /contracts/attention` («Para hoy», con `contracts.view`), y el dashboard del Admin trae el mes
+anterior para comparar; falta la pantalla; la
 casilla «Enviar comprobante» del POS y del abono (necesita que el backend exponga el interruptor general de
 correos a quien vende); `pip-audit`.
 

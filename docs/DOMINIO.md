@@ -363,6 +363,9 @@ transformación pagados.
 - **Dashboard** (`/reports/dashboard`): ventas de hoy y del mes **netas de devoluciones** (= ventas − devoluciones
   del estado de resultados para ese período; una anulada nunca cuenta), con el bruto y las devoluciones aparte;
   conteo de contratos por estado y cartera; inventario disponible al costo; estado de la caja.
+  Contra el **mes anterior completo** (no los mismos días): intereses cobrados netos (= `interest_revenue` del
+  estado de resultados, misma función), ventas netas con el criterio de `month_total`, y los remates del mes por
+  la fecha de su documento (el ingreso de inventario `auction`), porque `contract` no guarda cuándo se remató.
 - **Rentabilidad del empeño** (`/reports/pawn-performance`): «Intereses cobrados» es el **neto**
   (`interest_revenue`, la misma cifra del estado de resultados); capital prestado = contratos nuevos + delta de
   cada ampliación (un importado no suma); contratos abiertos = préstamos nuevos, ni sucesores ni importados;

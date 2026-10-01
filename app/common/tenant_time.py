@@ -13,7 +13,7 @@ Puro, sin BD — quien llama resuelve el `tz_name` de la empresa (ver
 consulta a BD) y se lo pasa a `today_in`.
 """
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TIMEZONE = "America/Bogota"
@@ -30,3 +30,16 @@ def today_in(tz_name: str | None, *, now: datetime | None = None) -> date:
         tz = ZoneInfo(DEFAULT_TIMEZONE)
     reference = now if now is not None else datetime.now(UTC)
     return reference.astimezone(tz).date()
+
+
+def month_start(d: date) -> date:
+    """El primer día del mes de `d` (el «mes en curso» de un reporte)."""
+    return d.replace(day=1)
+
+
+def previous_month_bounds(d: date) -> tuple[date, date]:
+    """El mes calendario ANTERIOR al de `d`, completo: `(primer día, último
+    día)`. Es el «vs. agosto» del dashboard: el mes cerrado entero, no los
+    mismos días del mes pasado."""
+    last = month_start(d) - timedelta(days=1)
+    return last.replace(day=1), last

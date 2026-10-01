@@ -56,6 +56,28 @@ async def contract_kpis(db: AsyncSession, *, company_id: UUID, today: date) -> R
     return result.one()
 
 
+async def auctions_in_range(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, from_date: date, to_date: date
+) -> int:
+    """Contratos REMATADOS en el rango (día de la empresa). Sale del documento
+    que crea el remate —su `inventory_entry` con origen `auction`, uno por
+    contrato— y no del estado: `contract` no guarda cuándo se remató. La
+    fecha es `created_at` en la zona de la empresa, no `entry_date` (que
+    nace con el `current_date` de la base, en UTC)."""
+    result = await db.execute(
+        text(
+            """
+            select count(distinct contract_id)
+            from public.inventory_entry
+            where company_id = :company_id and origin_type = 'auction'
+              and (created_at at time zone :tz)::date between :from_date and :to_date
+            """
+        ),
+        {"company_id": str(company_id), "tz": tz_name, "from_date": from_date, "to_date": to_date},
+    )
+    return int(result.scalar_one())
+
+
 async def sales_kpis(db: AsyncSession, *, company_id: UUID, tz_name: str, today: date) -> Row[Any]:
     """Ventas de hoy y del mes para el dashboard, NETAS de devoluciones (F7-07,
     auditoría fase 7): «Ventas de hoy» decía 5.120.250 con 1.383.333,33

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from app.common.tenant_time import today_in
@@ -34,3 +34,23 @@ def test_none_timezone_uses_default() -> None:
 def test_matches_real_clock_when_now_not_given() -> None:
     expected = datetime.now(ZoneInfo("America/Bogota")).date()
     assert today_in("America/Bogota") == expected
+
+
+# --- mes en curso y mes anterior (dashboard: «vs. agosto») -----------------
+def test_el_mes_anterior_es_completo_y_termina_la_vispera_del_primero() -> None:
+    from app.common.tenant_time import previous_month_bounds
+
+    assert previous_month_bounds(date(2026, 9, 30)) == (date(2026, 8, 1), date(2026, 8, 31))
+    assert previous_month_bounds(date(2026, 3, 1)) == (date(2026, 2, 1), date(2026, 2, 28))
+
+
+def test_en_enero_el_mes_anterior_es_diciembre_del_ano_pasado() -> None:
+    from app.common.tenant_time import previous_month_bounds
+
+    assert previous_month_bounds(date(2027, 1, 15)) == (date(2026, 12, 1), date(2026, 12, 31))
+
+
+def test_el_mes_en_curso_empieza_el_primero() -> None:
+    from app.common.tenant_time import month_start
+
+    assert month_start(date(2026, 2, 28)) == date(2026, 2, 1)

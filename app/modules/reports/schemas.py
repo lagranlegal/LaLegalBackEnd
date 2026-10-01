@@ -14,6 +14,15 @@ class ContractKpisOut(BaseModel):
     ready_for_auction_count: int
     auctioned_count: int
     capital_outstanding: MoneyOut
+    #: Intereses cobrados del mes en curso (del 1 a hoy), NETOS de descuentos
+    #: de interés: la misma cifra que `income-statement.interest_revenue` para
+    #: ese rango (sale de `contract_payment`, el documento).
+    interest_collected_month: MoneyOut = Decimal("0.00")
+    #: Ídem, el mes calendario ANTERIOR completo.
+    interest_collected_prev_month: MoneyOut = Decimal("0.00")
+    #: Contratos rematados este mes (por la fecha del remate, no por el estado
+    #: actual; `auctioned_count` es el total histórico).
+    auctioned_this_month: int = 0
 
 
 class SalesKpisOut(BaseModel):
@@ -35,6 +44,9 @@ class SalesKpisOut(BaseModel):
     today_returns: MoneyOut = Decimal("0.00")
     month_gross: MoneyOut = Decimal("0.00")
     month_returns: MoneyOut = Decimal("0.00")
+    #: Ventas netas del mes calendario ANTERIOR completo, con el mismo
+    #: criterio que `month_total` (bruto − devoluciones de ese mes).
+    month_total_prev: MoneyOut = Decimal("0.00")
 
 
 class InventoryKpisOut(BaseModel):

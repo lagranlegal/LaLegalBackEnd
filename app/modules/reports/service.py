@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
-from app.common.tenant_time import today_in
+from app.common.tenant_time import month_start, previous_month_bounds, today_in
 from app.core.errors import InvalidDateRangeError
 from app.modules.platform import integration as platform_integration
 from app.modules.reports import repository
@@ -58,6 +58,13 @@ def _row_to_closing(row: Row[Any]) -> ClosingHistoryOut:
     )
 
 
+def _interest_revenue(pawn_row: Row[Any]) -> Decimal:
+    """Interés cobrado NETO de descuentos: `interest_revenue` del estado de
+    resultados (`get_income_statement`), sobre la fila de `pawn_performance`."""
+    m = pawn_row._mapping
+    return quantize(_dec(m["interest_collected"])) - quantize(_dec(m["interest_discounts"]))
+
+
 async def get_dashboard(db: AsyncSession, *, company_id: UUID) -> DashboardOut:
     tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
     today = today_in(tz_name)
@@ -66,6 +73,25 @@ async def get_dashboard(db: AsyncSession, *, company_id: UUID) -> DashboardOut:
     sales_row = await repository.sales_kpis(db, company_id=company_id, tz_name=tz_name, today=today)
     inventory_row = await repository.inventory_kpis(db, company_id=company_id)
     session_row = await repository.current_open_session(db, company_id=company_id)
+
+    # Mes en curso y mes anterior completo, con las MISMAS consultas que el
+    # estado de resultados (intereses) y que `month_total` (ventas): el
+    # dashboard no estrena una definición. `sales_kpis` con la víspera del
+    # primero como «hoy» da el mes anterior entero.
+    first_day = month_start(today)
+    prev_from, prev_to = previous_month_bounds(today)
+    pawn_month = await repository.pawn_performance(
+        db, company_id=company_id, tz_name=tz_name, from_date=first_day, to_date=today
+    )
+    pawn_prev = await repository.pawn_performance(
+        db, company_id=company_id, tz_name=tz_name, from_date=prev_from, to_date=prev_to
+    )
+    sales_prev = await repository.sales_kpis(
+        db, company_id=company_id, tz_name=tz_name, today=prev_to
+    )
+    auctioned_month = await repository.auctions_in_range(
+        db, company_id=company_id, tz_name=tz_name, from_date=first_day, to_date=today
+    )
 
     cm, sm, im = contract_row._mapping, sales_row._mapping, inventory_row._mapping
     session_m = session_row._mapping if session_row is not None else None
@@ -79,6 +105,9 @@ async def get_dashboard(db: AsyncSession, *, company_id: UUID) -> DashboardOut:
             ready_for_auction_count=cm["ready_for_auction_count"],
             auctioned_count=cm["auctioned_count"],
             capital_outstanding=cm["capital_outstanding"],
+            interest_collected_month=_interest_revenue(pawn_month),
+            interest_collected_prev_month=_interest_revenue(pawn_prev),
+            auctioned_this_month=auctioned_month,
         ),
         sales=SalesKpisOut(
             today_total=sm["today_total"],
@@ -88,6 +117,7 @@ async def get_dashboard(db: AsyncSession, *, company_id: UUID) -> DashboardOut:
             today_returns=sm["today_returns"],
             month_gross=sm["month_gross"],
             month_returns=sm["month_returns"],
+            month_total_prev=sales_prev._mapping["month_total"],
         ),
         inventory=InventoryKpisOut(
             available_count=im["available_count"],
@@ -467,7 +497,7 @@ async def get_income_statement(
     # utilidad se sobreestimaba por todos los descuentos de interés otorgados, y
     # `/reports/series` arrastraba el mismo sesgo por usar esta definición.
     ventas = _q(t["gross_revenue"]) - _q(t["discounts"])
-    intereses = _q(e["interest_collected"]) - _q(e["interest_discounts"])
+    intereses = _interest_revenue(empeno)
     # F21-12: las devoluciones son CONTRA-INGRESO con LÍNEA PROPIA, no un
     # descuento silencioso de «Ventas». Restarlas adentro dejaría a «Ventas»
     # bajando sin explicación, que es exactamente lo que hace que nadie

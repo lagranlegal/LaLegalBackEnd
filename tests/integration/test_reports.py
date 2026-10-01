@@ -2089,3 +2089,149 @@ def test_F7_13_la_posicion_resta_pasivos_y_da_el_patrimonio_neto(
     assert p["credit_notes_outstanding"] == "300000.00"
     assert p["total_liabilities"] == "500000.00"
     assert Decimal(p["net_worth"]) == Decimal(p["total_capital"]) - Decimal("500000.00")
+
+
+# ---- Dashboard del Admin (rediseño P2, 30/09/2026): mes en curso contra el
+# mes anterior completo, con las mismas fuentes que el estado de resultados.
+
+
+def _estado_rango(client: TestClient, token: str, frm: date, to: date) -> dict:
+    r = client.get(
+        "/api/v1/reports/income-statement",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"from_date": frm.isoformat(), "to_date": to.isoformat()},
+    )
+    assert r.status_code == 200, r.text
+    return dict(r.json())
+
+
+def _contrato(client: TestClient, tenant: dict, principal: str) -> str:
+    r = client.post(
+        "/api/v1/contracts",
+        headers=_headers(tenant["token"], idempotency_key=str(uuid4())),
+        json={
+            "customer_id": str(tenant["customer_id"]),
+            "principal": principal,
+            "interest_rate_pct": "5",
+            "payment_method": "cash",
+            "items": [
+                {
+                    "category_id": str(tenant["category_id"]),
+                    "description": "Cadena",
+                    "photos": ["http://example.com/c.jpg"],
+                }
+            ],
+        },
+    )
+    assert r.status_code == 201, r.text
+    return str(r.json()["id"])
+
+
+async def _retroceder_ancla(tenant: dict, contract_id: str, meses: int) -> None:
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text(
+                "update public.contract set interest_paid_until = interest_paid_until "
+                "- make_interval(months => :m) where company_id = :cid and id = :id"
+            ),
+            {"m": meses, "cid": str(tenant["company_id"]), "id": contract_id},
+        )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_compara_el_mes_con_el_anterior_completo(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    token = reports_tenant["token"]
+    cid = str(reports_tenant["company_id"])
+    hoy = hoy_empresa()
+    primero = hoy.replace(day=1)
+    fin_anterior = primero - timedelta(days=1)
+    inicio_anterior = fin_anterior.replace(day=1)
+    client.post(
+        "/api/v1/cashbox/sessions/open",
+        headers=_headers(token),
+        json={"opening_balance": "5000000.00"},
+    )
+
+    # Este mes: un abono de 1 mes (50.000) con 10.000 de descuento → 40.000.
+    pagado = _contrato(client, reports_tenant, "1000000.00")
+    await _retroceder_ancla(reports_tenant, pagado, 1)
+    abono = client.post(
+        f"/api/v1/contracts/{pagado}/payments",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+        json={
+            "months_covered": 1,
+            "payment_method": "cash",
+            "discount_amount": "10000.00",
+            "discount_reason": "Cliente frecuente",
+        },
+    )
+    assert abono.status_code == 201, abono.text
+
+    # Este mes: un remate de verdad.
+    rematado = _contrato(client, reports_tenant, "300000.00")
+    await _retroceder_ancla(reports_tenant, rematado, 8)
+    client.get(f"/api/v1/contracts/{rematado}", headers=_headers(token))
+    remate = client.post(
+        f"/api/v1/contracts/{rematado}/auction",
+        headers=_headers(token, idempotency_key=str(uuid4())),
+    )
+    assert remate.status_code == 200, remate.text
+
+    # Mes anterior: un abono (30.000 − 5.000 de descuento), un remate y una
+    # venta. `contract_payment` es inmutable, así que el abono viejo se
+    # INSERTA con su fecha; el remate viejo es su documento, el ingreso de
+    # inventario con origen `auction`; la venta se antedata.
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into public.contract_payment (company_id, contract_id, receipt_number, "
+                "paid_at, months_covered, interest_amount, discount_amount, discount_reason, "
+                "payment_method, total, new_capital_balance, new_interest_paid_until, "
+                "idempotency_key) values (:cid, :ct, 900001, :cuando, 1, 30000, 5000, "
+                "'Prueba', 'cash', 25000, 1000000, :ipu, :key)"
+            ),
+            {
+                "cid": cid,
+                "ct": pagado,
+                "cuando": mediodia_empresa(fin_anterior),
+                "ipu": fin_anterior,
+                "key": str(uuid4()),
+            },
+        )
+        await s.execute(
+            text(
+                "insert into public.inventory_entry (company_id, number, origin_type, "
+                "contract_id, total_cost, created_at) "
+                "values (:cid, 900001, 'auction', :ct, 1, :cuando)"
+            ),
+            {"cid": cid, "ct": pagado, "cuando": mediodia_empresa(inicio_anterior)},
+        )
+    venta_vieja = _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="450000.00")
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text("update public.sale set sold_at = :cuando where id = :sid"),
+            {"cuando": mediodia_empresa(fin_anterior), "sid": venta_vieja["id"]},
+        )
+
+    r = client.get("/api/v1/reports/dashboard", headers=_headers(token))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    contratos, ventas = body["contracts"], body["sales"]
+
+    este_mes = _estado_rango(client, token, primero, hoy)
+    mes_anterior = _estado_rango(client, token, inicio_anterior, fin_anterior)
+    assert contratos["interest_collected_month"] == "40000.00"
+    assert contratos["interest_collected_month"] == este_mes["interest_revenue"]
+    assert contratos["interest_collected_prev_month"] == "25000.00"
+    assert contratos["interest_collected_prev_month"] == mes_anterior["interest_revenue"]
+    assert contratos["auctioned_this_month"] == 1
+    assert ventas["month_total_prev"] == "450000.00"
+    assert Decimal(ventas["month_total_prev"]) == Decimal(mes_anterior["sales_revenue"]) - Decimal(
+        mes_anterior["sales_returns"]
+    )
+    assert ventas["month_total"] == "0.00"
+    # Los campos de antes siguen ahí.
+    assert contratos["auctioned_count"] == 1
+    assert "ready_for_auction_count" in contratos and "today_total" in ventas
