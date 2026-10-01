@@ -1,6 +1,8 @@
 import base64
+import json
 from collections.abc import Callable
 from datetime import date, datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -106,3 +108,36 @@ def make_date_page[T](
     items = rows[:limit]
     next_cursor = encode_date_cursor(*key_getter(items[-1])) if has_more and items else None
     return CursorPage(items=items, next_cursor=next_cursor)
+
+
+# ---------------------------------------------------------------------------
+# Cursor de LLAVE COMPUESTA, para listados con orden elegible (`?sort=`).
+#
+# Los cursores de arriba fijan una sola llave. Cuando el cliente elige el
+# orden, la llave cambia con él: `(número, id)`, `(nombre del cliente,
+# número, id)`… El cursor guarda la llave completa de la última fila Y el
+# nombre del orden con que se emitió: un cursor de `customer_asc` pegado en
+# una request con `number_desc` apuntaría a un lugar sin sentido, así que se
+# rechaza como inválido en vez de devolver una página revuelta.
+#
+# Los valores viajan como JSON (texto, número, booleano); quien lo usa
+# convierte fechas y UUID a texto al emitirlo y de vuelta al leerlo, porque
+# sabe el tipo de cada posición de su llave.
+# ---------------------------------------------------------------------------
+
+
+def encode_key_cursor(sort: str, key: list[Any]) -> str:
+    return base64.urlsafe_b64encode(json.dumps({"s": sort, "k": key}).encode()).decode()
+
+
+def decode_key_cursor(cursor: str, *, sort: str, size: int) -> list[Any]:
+    """La llave del cursor, si fue emitido para `sort` y tiene `size`
+    posiciones; si no, `AppError` de cursor inválido."""
+    try:
+        data = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        key = data["k"]
+        if data["s"] != sort or not isinstance(key, list) or len(key) != size:
+            raise ValueError("cursor de otro orden")
+        return key
+    except (ValueError, UnicodeDecodeError, TypeError, KeyError) as exc:
+        raise AppError("Cursor de paginación inválido.", details={"cursor": cursor}) from exc

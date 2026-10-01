@@ -9,6 +9,7 @@ from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.contracts import service
 from app.modules.contracts.schemas import (
+    DEFAULT_CONTRACT_SORT,
     ContractAttentionOut,
     ContractChainLinkOut,
     ContractCreateIn,
@@ -16,6 +17,7 @@ from app.modules.contracts.schemas import (
     ContractImportIn,
     ContractListItemOut,
     ContractOut,
+    ContractSort,
     ContractUpdateIn,
     ExtensionQuoteOut,
     PaymentCreateIn,
@@ -109,15 +111,27 @@ async def list_contracts(
     q: Annotated[
         str | None, Query(description="Número, código anterior o nombre/documento del cliente")
     ] = None,
+    sort: Annotated[
+        ContractSort,
+        Query(
+            description=(
+                "Orden. `next_due_asc` (default): vivos primero, el que más meses debe "
+                "arriba; terminales al final, el más nuevo primero. `number_desc`/"
+                "`number_asc`: por número. `customer_asc`: por nombre del cliente. "
+                "El `cursor` solo vale con el mismo `sort` con que se emitió."
+            )
+        ),
+    ] = DEFAULT_CONTRACT_SORT,
 ) -> CursorPage[ContractListItemOut]:
     return await service.list_contracts(
         db,
         company_id=user.company_id,
-        cursor=decode_cursor(cursor) if cursor else None,
+        cursor=cursor,
         limit=limit,
         status_filter=status,
         customer_id=customer_id,
         q=q,
+        sort=sort,
     )
 
 

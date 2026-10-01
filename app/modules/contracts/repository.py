@@ -379,16 +379,67 @@ async def get_root_start_date(db: AsyncSession, *, company_id: UUID, contract_id
     return date.fromisoformat(str(result.scalar_one()))
 
 
+_IS_TERMINAL = "c.status::text = any(:terminal)"
+
+#: La LLAVE de cada orden de `GET /contracts`: dirección única y las
+#: expresiones en orden de prioridad. El cursor es la llave de la última fila
+#: y la página siguiente es la comparación de filas `(k0, k1, …) > (…)` (o
+#: `<` si es descendente) — por eso cada orden tiene UNA sola dirección, y lo
+#: que va al revés dentro de un orden ascendente va negado (`-c.number`).
+#: La última posición siempre es `c.id`: el número ya es único por empresa,
+#: pero el id hace la llave única por construcción, sin depender de eso.
+#: El tipo de cada posición (`bool|date|int|text|uuid`) es para leer el
+#: cursor de vuelta (`service.list_contracts`).
+#:
+#: - `next_due_asc` («lo más urgente primero», el default): los vivos antes
+#:   que los terminales; entre los vivos, el `interest_paid_until` más viejo
+#:   primero —la próxima cuota es ese ancla + 1 mes, así que es el mismo
+#:   orden que «próximo vencimiento primero» y pone arriba a quien más meses
+#:   debe—; entre los terminales, el número más alto primero (la fecha no
+#:   dice nada en un contrato cerrado: van todos con la misma constante).
+#: - `customer_asc`: nombre sin tildes ni mayúsculas (Álvaro junto a Alberto,
+#:   no después de la Z), y del mismo cliente el contrato más nuevo primero.
+CONTRACT_SORTS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
+    "next_due_asc": (
+        "asc",
+        (
+            (f"({_IS_TERMINAL})", "bool"),
+            (
+                f"(case when {_IS_TERMINAL} then date '1900-01-01' else c.interest_paid_until end)",
+                "date",
+            ),
+            (f"(case when {_IS_TERMINAL} then -c.number else c.number end)", "int"),
+            ("c.id", "uuid"),
+        ),
+    ),
+    "number_desc": ("desc", (("c.number", "int"), ("c.id", "uuid"))),
+    "number_asc": ("asc", (("c.number", "int"), ("c.id", "uuid"))),
+    "customer_asc": (
+        "asc",
+        (
+            ("lower(public.f_unaccent(cu.full_name))", "text"),
+            ("(-c.number)", "int"),
+            ("c.id", "uuid"),
+        ),
+    ),
+}
+
+
 async def list_contracts(
     db: AsyncSession,
     *,
     company_id: UUID,
-    cursor: UUID | None,
+    sort: str,
+    after: list[Any] | None,
     limit: int,
     status_filter: str | None,
     customer_id: UUID | None = None,
     q: str | None = None,
 ) -> list[Row[Any]]:
+    """Una página del listado en el orden `sort`, empezando DESPUÉS de la
+    llave `after` (la de la última fila de la página anterior, ya con sus
+    tipos). Cada fila trae su llave en `sort_k0…sort_kN`."""
+    direction, keys = CONTRACT_SORTS[sort]
     # El cliente viaja en la MISMA consulta (issue #10 del front): cada ítem
     # del listado trae `customer_name`/`customer_document`, y `q` busca por
     # ellos. JOIN interno: `customer_id` es NOT NULL con FK, y la policy de
@@ -397,14 +448,17 @@ async def list_contracts(
     # contrato visible. Hasta el 01/10/2026 era LEFT "por si acaso" y el
     # nombre no salía: la pantalla tenía que pedir cada cliente aparte.
     columns = ", ".join(f"c.{col.strip()}" for col in _CONTRACT_COLUMNS.split(","))
+    key_columns = "".join(f", {expr} as sort_k{i}" for i, (expr, _) in enumerate(keys))
     query = (
         f"select {columns}, cu.full_name as customer_name, "
-        "cu.doc_number as customer_document "
+        f"cu.doc_number as customer_document{key_columns} "
         "from public.contract c "
         "join public.customer cu on cu.id = c.customer_id and cu.company_id = c.company_id "
         "where c.company_id = :company_id"
     )
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
+    if _IS_TERMINAL in " ".join(expr for expr, _ in keys):
+        params["terminal"] = sorted(rules.TERMINAL_STATUSES)
     if status_filter:
         query += " and c.status = :status"
         params["status"] = status_filter
@@ -442,10 +496,13 @@ async def list_contracts(
             params.update(name_params)
         query += " and (" + " or ".join(clauses) + ")"
         params["q_prefix"] = f"{q}%"
-    if cursor is not None:
-        query += " and c.id > :cursor"
-        params["cursor"] = str(cursor)
-    query += " order by c.id limit :limit"
+    if after is not None:
+        exprs = ", ".join(expr for expr, _ in keys)
+        marks = ", ".join(f":after_{i}" for i in range(len(keys)))
+        query += f" and ({exprs}) {'>' if direction == 'asc' else '<'} ({marks})"
+        params.update({f"after_{i}": value for i, value in enumerate(after)})
+    order = ", ".join(f"{expr} {direction}" for expr, _ in keys)
+    query += f" order by {order} limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
 

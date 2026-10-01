@@ -7,7 +7,12 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize
-from app.common.pagination import CursorPage, make_page
+from app.common.pagination import (
+    CursorPage,
+    decode_key_cursor,
+    encode_key_cursor,
+    make_page,
+)
 from app.core.errors import (
     AppError,
     ConflictError,
@@ -24,6 +29,7 @@ from app.modules.cashbox import integration as cashbox_integration
 from app.modules.catalogs import repository as catalogs_repo
 from app.modules.contracts import repository, rules
 from app.modules.contracts.schemas import (
+    DEFAULT_CONTRACT_SORT,
     AttentionArrearsOut,
     AttentionDueTodayOut,
     AttentionItemOut,
@@ -36,6 +42,7 @@ from app.modules.contracts.schemas import (
     ContractItemOut,
     ContractListItemOut,
     ContractOut,
+    ContractSort,
     ContractUpdateIn,
     ExtensionQuoteOut,
     PaymentCreateIn,
@@ -694,28 +701,73 @@ async def get_settlement_info(
     )
 
 
+def _sort_key_to_json(kind: str, value: Any) -> Any:
+    if kind in ("date", "uuid"):
+        return str(value)
+    return value
+
+
+def _sort_key_from_json(kind: str, value: Any) -> Any:
+    """Un valor del cursor, de vuelta a su tipo. Un tipo que no corresponde
+    es un cursor manipulado o de otra versión: `ValueError`."""
+    ok = {
+        "bool": isinstance(value, bool),
+        "int": isinstance(value, int) and not isinstance(value, bool),
+        "text": isinstance(value, str),
+        "date": isinstance(value, str),
+        "uuid": isinstance(value, str),
+    }[kind]
+    if not ok:
+        raise ValueError(f"valor de cursor que no es {kind}")
+    if kind == "date":
+        return date.fromisoformat(value)
+    if kind == "uuid":
+        return str(UUID(value))
+    return value
+
+
 async def list_contracts(
     db: AsyncSession,
     *,
     company_id: UUID,
-    cursor: UUID | None,
+    cursor: str | None,
     limit: int,
     status_filter: str | None,
     customer_id: UUID | None = None,
     q: str | None = None,
+    sort: ContractSort = DEFAULT_CONTRACT_SORT,
 ) -> CursorPage[ContractListItemOut]:
+    """`cursor` es el de llave compuesta del orden `sort`
+    (`pagination.encode_key_cursor`): la llave de la última fila entregada."""
+    _, keys = repository.CONTRACT_SORTS[sort]
+    after: list[Any] | None = None
+    if cursor is not None:
+        raw = decode_key_cursor(cursor, sort=sort, size=len(keys))
+        try:
+            after = [_sort_key_from_json(kind, v) for (_, kind), v in zip(keys, raw, strict=True)]
+        except (ValueError, TypeError) as exc:
+            raise AppError("Cursor de paginación inválido.", details={"cursor": cursor}) from exc
     rows = await repository.list_contracts(
         db,
         company_id=company_id,
-        cursor=cursor,
+        sort=sort,
+        after=after,
         limit=limit,
         status_filter=status_filter,
         customer_id=customer_id,
         q=q,
     )
-    page = make_page(rows, limit, lambda r: r._mapping["id"])
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = None
+    if has_more and rows:
+        last = rows[-1]._mapping
+        next_cursor = encode_key_cursor(
+            sort,
+            [_sort_key_to_json(kind, last[f"sort_k{i}"]) for i, (_, kind) in enumerate(keys)],
+        )
     items_out = []
-    for row in page.items:
+    for row in rows:
         item_rows = await repository.list_contract_items(
             db, company_id=company_id, contract_id=row._mapping["id"]
         )
@@ -727,7 +779,7 @@ async def list_contracts(
                 customer_document=row._mapping["customer_document"],
             )
         )
-    return CursorPage(items=items_out, next_cursor=page.next_cursor)
+    return CursorPage(items=items_out, next_cursor=next_cursor)
 
 
 async def update_contract(

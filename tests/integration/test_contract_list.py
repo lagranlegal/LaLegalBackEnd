@@ -280,3 +280,125 @@ async def test_cada_empresa_ve_solo_sus_contratos_y_sus_clientes(
     )
     assert r.status_code == 200, r.text
     assert r.json()["items"] == []
+
+
+async def _marcar_pagado(contract_id: str) -> None:
+    async with AsyncSessionLocal() as s, s.begin():
+        await s.execute(
+            text("update public.contract set status = 'paid' where id = :id"),
+            {"id": contract_id},
+        )
+
+
+async def _libro(client: TestClient, e: Empresa) -> dict[str, dict]:
+    """Seis contratos de tres clientes, pensados para que cada orden tenga
+    un empate que resolver y un terminal que mandar al final."""
+    hoy = hoy_empresa()
+    alvaro = await _cliente(e, "álvaro Díaz")  # minúscula y tilde: va primero igual
+    beatriz = await _cliente(e, "Beatriz Mora")
+    carlos = await _cliente(e, "Carlos Núñez")
+    c = {
+        "c1": _sembrar(client, e, beatriz, ipu=hoy - timedelta(days=10)),
+        "c2": _sembrar(client, e, alvaro, ipu=hoy - timedelta(days=70)),
+        "c3": _sembrar(client, e, carlos, ipu=hoy - timedelta(days=40)),
+        "c4": _sembrar(client, e, beatriz, ipu=hoy - timedelta(days=40)),
+        "c5": _sembrar(client, e, alvaro, ipu=hoy - timedelta(days=100)),
+        "c6": _sembrar(client, e, carlos, ipu=hoy - timedelta(days=5)),
+    }
+    numeros = [c[k]["number"] for k in ("c1", "c2", "c3", "c4", "c5", "c6")]
+    assert numeros == sorted(numeros), "el import numera en orden de creación"
+    await _marcar_pagado(c["c5"]["id"])
+    await _marcar_pagado(c["c6"]["id"])
+    return c
+
+
+@pytest.mark.parametrize(
+    ("sort", "esperado"),
+    [
+        ("number_desc", ["c6", "c5", "c4", "c3", "c2", "c1"]),
+        ("number_asc", ["c1", "c2", "c3", "c4", "c5", "c6"]),
+        # Vivos por ancla más vieja (c3 y c4 empatan: número), luego los
+        # terminales del más nuevo al más viejo aunque el ancla de c5 sea la
+        # más vieja de todas.
+        ("next_due_asc", ["c2", "c3", "c4", "c1", "c6", "c5"]),
+        # Por nombre sin tildes ni mayúsculas; del mismo cliente, el más nuevo.
+        ("customer_asc", ["c5", "c2", "c4", "c1", "c6", "c3"]),
+    ],
+)
+async def test_cada_orden_atraviesa_las_paginas_sin_repetir_ni_perder(
+    client: TestClient,
+    empresas: Callable[[str], Awaitable[Empresa]],
+    sort: str,
+    esperado: list[str],
+) -> None:
+    a = await empresas(f"Empresa orden {sort}")
+    libro = await _libro(client, a)
+
+    items, paginas = _todas(client, a["tokens"]["Asesor"], sort=sort, limit=2)
+    assert paginas == 3
+    assert [i["id"] for i in items] == [libro[k]["id"] for k in esperado]
+
+    # Con un límite que no divide el total, el corte cae en otro lugar.
+    items, paginas = _todas(client, a["tokens"]["Asesor"], sort=sort, limit=4)
+    assert paginas == 2
+    assert [i["id"] for i in items] == [libro[k]["id"] for k in esperado]
+
+
+async def test_sin_sort_es_lo_mas_urgente_primero(
+    client: TestClient, empresas: Callable[[str], Awaitable[Empresa]]
+) -> None:
+    a = await empresas("Empresa orden default")
+    libro = await _libro(client, a)
+    items, _ = _todas(client, a["tokens"]["Asesor"], limit=5)
+    assert [i["id"] for i in items] == [
+        libro[k]["id"] for k in ["c2", "c3", "c4", "c1", "c6", "c5"]
+    ]
+
+
+async def test_el_orden_se_combina_con_los_filtros(
+    client: TestClient, empresas: Callable[[str], Awaitable[Empresa]]
+) -> None:
+    a = await empresas("Empresa orden filtros")
+    libro = await _libro(client, a)
+    items, _ = _todas(
+        client,
+        a["tokens"]["Asesor"],
+        sort="number_desc",
+        customer_id=libro["c1"]["customer_id"],
+        limit=1,
+    )
+    assert [i["id"] for i in items] == [libro["c4"]["id"], libro["c1"]["id"]]
+
+
+async def test_un_sort_invalido_es_422(
+    client: TestClient, empresas: Callable[[str], Awaitable[Empresa]]
+) -> None:
+    a = await empresas("Empresa sort invalido")
+    r = client.get(
+        "/api/v1/contracts", headers=_h(a["tokens"]["Asesor"]), params={"sort": "due_date"}
+    )
+    assert r.status_code == 422
+    body = r.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert any("sort" in e["loc"] for e in body["details"]["errors"])
+
+
+async def test_un_cursor_de_otro_orden_se_rechaza(
+    client: TestClient, empresas: Callable[[str], Awaitable[Empresa]]
+) -> None:
+    """Un cursor de `customer_asc` apunta a un nombre: con `number_desc`
+    devolvería una página sin sentido, así que se rechaza."""
+    a = await empresas("Empresa cursor cruzado")
+    await _libro(client, a)
+    asesor = _h(a["tokens"]["Asesor"])
+    primera = client.get(
+        "/api/v1/contracts", headers=asesor, params={"sort": "customer_asc", "limit": 2}
+    ).json()
+    assert primera["next_cursor"]
+    for params in (
+        {"sort": "number_desc", "cursor": primera["next_cursor"]},
+        {"sort": "number_desc", "cursor": "no-es-un-cursor"},
+    ):
+        r = client.get("/api/v1/contracts", headers=asesor, params=params)
+        assert r.status_code == 400, r.text
+        assert r.json()["code"] == "BAD_REQUEST"

@@ -10,6 +10,12 @@ from app.common.text import Reason
 
 PaymentMethod = Literal["cash", "transfer", "other"]
 
+#: Órdenes de `GET /contracts` (`?sort=`). Valores cerrados: uno fuera de la
+#: lista es `422 VALIDATION_ERROR`. La llave de cada uno vive en
+#: `repository.CONTRACT_SORTS`; el porqué del default, en `docs/API_GUIDE.md` §7.
+ContractSort = Literal["next_due_asc", "number_desc", "number_asc", "customer_asc"]
+DEFAULT_CONTRACT_SORT: ContractSort = "next_due_asc"
+
 
 class ContractItemIn(BaseModel):
     category_id: UUID
