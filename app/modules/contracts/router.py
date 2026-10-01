@@ -17,6 +17,8 @@ from app.modules.contracts.schemas import (
     ContractImportIn,
     ContractListItemOut,
     ContractOut,
+    ContractQuoteIn,
+    ContractQuoteOut,
     ContractSort,
     ContractUpdateIn,
     ExtensionQuoteOut,
@@ -82,6 +84,19 @@ async def create_contract(
     if notice is not None:
         await notifications_dispatcher.send_after_commit(db, background, notice)
     return out
+
+
+@router.post("/quote", response_model=ContractQuoteOut)
+async def quote_contract(
+    body: ContractQuoteIn,
+    user: Annotated[CurrentUser, Depends(_create)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+) -> ContractQuoteOut:
+    """Cotiza un contrato nuevo sin crearlo: el «Resumen del préstamo» del
+    formulario. Es una LECTURA —POST solo porque el cuerpo es estructurado—:
+    no escribe, no pide caja abierta ni `Idempotency-Key`. Los números salen
+    de las mismas funciones que `POST /contracts` (docs/API_GUIDE.md §7)."""
+    return await service.quote_contract(db, company_id=user.company_id, body=body)
 
 
 @router.post("/import", response_model=ContractOut, status_code=201)

@@ -362,3 +362,93 @@ class TestSupersededEsTerminal:
         )
         assert estado == "superseded"
         assert ends is None
+
+
+# ------------------------------------------------ cotización (01/10/2026) ----
+class TestSnapshotRate:
+    def test_dos_decimales_quedan_igual(self) -> None:
+        assert rules.snapshot_rate_pct(Decimal("5")) == Decimal("5.00")
+        assert rules.snapshot_rate_pct(Decimal("4.99")) == Decimal("4.99")
+
+    def test_el_tercer_decimal_redondea_como_numeric_5_2(self) -> None:
+        """La columna es `numeric(5,2)`: Postgres guarda 5,555 como 5,56 y
+        5,554 como 5,55. La cotización tiene que usar la tasa guardada."""
+        assert rules.snapshot_rate_pct(Decimal("5.555")) == Decimal("5.56")
+        assert rules.snapshot_rate_pct(Decimal("5.554")) == Decimal("5.55")
+
+
+class TestFechasDelContratoNuevo:
+    def test_primera_cuota_es_un_mes_despues(self) -> None:
+        assert rules.next_due_date(date(2026, 10, 1)) == date(2026, 11, 1)
+        assert rules.next_due_date(date(2026, 1, 31)) == date(2026, 2, 28)
+
+    def test_fin_del_plazo(self) -> None:
+        assert rules.term_end_date(date(2026, 10, 1), 4) == date(2027, 2, 1)
+
+
+class TestAssessLtv:
+    def test_sin_ltv_no_hay_techo_ni_permiso(self) -> None:
+        a = rules.assess_ltv(principal=Decimal("5000000"), appraisal_value=None, max_ltv_pct=None)
+        assert a == rules.LtvAssessment(
+            ltv_pct=None, max_loan=None, exceeded=False, override_reason=None
+        )
+
+    def test_sin_ltv_igual_informa_el_porcentaje(self) -> None:
+        a = rules.assess_ltv(
+            principal=Decimal("500000"), appraisal_value=Decimal("1000000"), max_ltv_pct=None
+        )
+        assert a.ltv_pct == Decimal("50.00")
+        assert a.override_reason is None
+
+    def test_con_ltv_sin_avaluo_pide_permiso_aunque_no_haya_capital(self) -> None:
+        """F4-05: con LTV el avalúo es obligatorio; 0 cuenta como faltante."""
+        for avaluo in (None, Decimal("0")):
+            for capital in (None, Decimal("1000")):
+                a = rules.assess_ltv(
+                    principal=capital, appraisal_value=avaluo, max_ltv_pct=Decimal("70")
+                )
+                assert a.override_reason == "appraisal_missing"
+                assert a.exceeded is False
+                assert a.max_loan is None
+
+    def test_justo_en_el_techo_no_se_pasa(self) -> None:
+        a = rules.assess_ltv(
+            principal=Decimal("700000"),
+            appraisal_value=Decimal("1000000"),
+            max_ltv_pct=Decimal("70"),
+        )
+        assert a.ltv_pct == Decimal("70.00")
+        assert a.max_loan == Decimal("700000.00")
+        assert a.exceeded is False
+        assert a.override_reason is None
+
+    def test_un_centavo_sobre_el_techo_se_pasa(self) -> None:
+        a = rules.assess_ltv(
+            principal=Decimal("700000.01"),
+            appraisal_value=Decimal("1000000"),
+            max_ltv_pct=Decimal("70"),
+        )
+        assert a.exceeded is True
+        assert a.override_reason == "ltv_exceeded"
+        # Redondeado para mostrar parece 70,00 %; lo que decide es `exceeded`.
+        assert a.ltv_pct == Decimal("70.00")
+
+    def test_max_loan_truncado_coincide_con_exceeded(self) -> None:
+        """333.333,33 × 33,33 % = 111.099,99889: el techo exacto no tiene
+        centavos enteros. Redondeado diría 111.100,00 y ese capital SÍ se
+        pasa; truncado, `principal <= max_loan` y `not exceeded` coinciden."""
+        avaluo, pct = Decimal("333333.33"), Decimal("33.33")
+        a = rules.assess_ltv(principal=None, appraisal_value=avaluo, max_ltv_pct=pct)
+        assert a.max_loan == Decimal("111099.99")
+        for capital in (Decimal("111099.99"), Decimal("111100.00")):
+            b = rules.assess_ltv(principal=capital, appraisal_value=avaluo, max_ltv_pct=pct)
+            assert b.exceeded is (capital > Decimal("111099.99"))
+
+    def test_sin_capital_hay_techo_pero_no_exceso(self) -> None:
+        a = rules.assess_ltv(
+            principal=None, appraisal_value=Decimal("2000000"), max_ltv_pct=Decimal("70")
+        )
+        assert a.max_loan == Decimal("1400000.00")
+        assert a.ltv_pct is None
+        assert a.exceeded is False
+        assert a.override_reason is None

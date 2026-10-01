@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
@@ -15,6 +15,16 @@ PaymentMethod = Literal["cash", "transfer", "other"]
 #: `repository.CONTRACT_SORTS`; el porqué del default, en `docs/API_GUIDE.md` §7.
 ContractSort = Literal["next_due_asc", "number_desc", "number_asc", "customer_asc"]
 DEFAULT_CONTRACT_SORT: ContractSort = "next_due_asc"
+
+
+#: Tasa mensual de un contrato, como la recibe `POST /contracts` (y su
+#: cotización). Los decimales de más los redondea el SNAPSHOT
+#: (`rules.snapshot_rate_pct`), no este tipo.
+InterestRatePct = Annotated[Decimal, Field(gt=0, le=100)]
+#: Meses de prórroga pactados (SNAPSHOT).
+ExtensionMonths = Annotated[int, Field(ge=1)]
+#: Días para pedir un recargo; `None` = la política de la empresa.
+ExtensionWindowDays = Annotated[int, Field(ge=0)]
 
 
 class ContractItemIn(BaseModel):
@@ -44,16 +54,16 @@ class ContractCreateIn(BaseModel):
     account_id: UUID | None = None
     customer_id: UUID
     principal: PositiveMoney
-    interest_rate_pct: Decimal = Field(gt=0, le=100)
+    interest_rate_pct: InterestRatePct
     appraisal_value: Money | None = None
     items: list[ContractItemIn] = Field(min_length=1)
     payment_method: PaymentMethod
-    extension_months: int = Field(default=1, ge=1)
+    extension_months: ExtensionMonths = 1
     legacy_code: str | None = None
     notes: str | None = None
     #: Días para pedir un recargo. Si no viene, se toma la política de la
     #: empresa (`company.settings.extension_window_days`, default 28).
-    extension_window_days: int | None = Field(default=None, ge=0)
+    extension_window_days: ExtensionWindowDays | None = None
     #: El correo del cliente, capturado en el mismo mostrador donde se firma
     #: el contrato (NOTIFICACIONES §1c y §9.2-f). **Solo llena un vacío:** si
     #: el cliente ya tiene otro correo se rechaza (`VALIDATION_ERROR` con
@@ -71,6 +81,76 @@ class ContractCreateIn(BaseModel):
     customer_email_consent: bool | None = None
 
 
+class ContractQuoteItemIn(BaseModel):
+    """Una prenda en la cotización: solo pesa su categoría. El resto de
+    `ContractItemIn` (descripción, peso, fotos…) se acepta y se ignora, para
+    que el formulario mande la prenda como la tenga."""
+
+    #: `None` mientras la fila no tiene categoría elegida: se salta.
+    category_id: UUID | None = None
+
+
+class ContractQuoteIn(BaseModel):
+    """`POST /contracts/quote`: lo que define el préstamo en `ContractCreateIn`,
+    todo opcional para cotizar MIENTRAS se llena el formulario. Lo que falta
+    sale `null` en la respuesta, no como error; lo que viene mal (una tasa
+    sobre 100, una categoría ajena) sí es error, con el mismo código que
+    daría crear."""
+
+    #: Mismo tipo que el capital de crear, pero admite 0: es el valor inicial
+    #: del formulario y significa «todavía no hay capital», no un error.
+    principal: Money | None = None
+    interest_rate_pct: InterestRatePct | None = None
+    #: El avalúo TOTAL (`appraisal_value` de crear): es el que mide el LTV.
+    #: Los avalúos por prenda no lo reemplazan, igual que al crear.
+    appraisal_value: Money | None = None
+    items: list[ContractQuoteItemIn] = Field(default_factory=list)
+    extension_months: ExtensionMonths = 1
+    extension_window_days: ExtensionWindowDays | None = None
+
+
+class ContractQuoteOut(BaseModel):
+    """El «Resumen del préstamo» de Nuevo contrato, calculado con las mismas
+    funciones que `create_contract`: crear con el mismo cuerpo, hoy, da
+    exactamente estos números. `null` = falta el dato para calcularlo."""
+
+    #: Hoy de la EMPRESA: la fecha que llevará el contrato.
+    start_date: date
+    #: La tasa como queda en el SNAPSHOT (dos decimales).
+    interest_rate_pct: Decimal | None
+    #: `rules.monthly_interest(tasa, capital)`. Necesita capital y tasa.
+    monthly_interest: Decimal | None
+    #: De la categoría de la primera prenda con categoría, heredado del
+    #: árbol (`term_months`, `arrears_window_months`, LTV).
+    term_months: int | None
+    arrears_window_months: int | None
+    extension_months: int
+    #: La del cuerpo o, sin ella, la política de la empresa.
+    extension_window_days: int
+    #: Primera cuota: `start_date + 1 mes`. No depende de la categoría.
+    first_due_date: date
+    #: Fin del plazo pactado: `start_date + term_months`.
+    due_date: date | None
+    #: El avalúo total; `null` sin avalúo o en 0.
+    appraisal_total: Decimal | None
+    #: `capital / avalúo × 100`, dos decimales, para mostrar. Lo que decide
+    #: si se pasa es `ltv_exceeded`, no este número redondeado.
+    ltv_pct: Decimal | None
+    #: `max_ltv_pct` de la categoría; `null` si no tiene LTV o aún no hay
+    #: categoría.
+    ltv_ceiling: Decimal | None
+    #: El mayor capital que no se pasa del techo (truncado a centavos).
+    max_loan: Decimal | None
+    ltv_exceeded: bool
+    #: Crear exigiría `contracts.override_ltv`. `false` también cuando aún no
+    #: hay categoría: no se sabe si tiene techo (`ltv_ceiling` y
+    #: `term_months` en `null` lo delatan).
+    requires_override: bool
+    override_reason: Literal["appraisal_missing", "ltv_exceeded"] | None
+    #: Lo que sale de la caja al crear: el capital entero.
+    amount_to_disburse: Decimal | None
+
+
 class ContractImportIn(BaseModel):
     """docs/MIGRACION_CONTRATOS.md: importa la foto financiera al corte de
     un contrato del sistema anterior. A diferencia de `ContractCreateIn`,
@@ -86,7 +166,7 @@ class ContractImportIn(BaseModel):
     customer_id: UUID
     principal: PositiveMoney
     capital_balance: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
-    interest_rate_pct: Decimal = Field(gt=0, le=100)
+    interest_rate_pct: InterestRatePct
     term_months: int
     arrears_window_months: int
     extension_months: int = 1

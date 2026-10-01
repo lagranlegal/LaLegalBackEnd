@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -42,6 +43,8 @@ from app.modules.contracts.schemas import (
     ContractItemOut,
     ContractListItemOut,
     ContractOut,
+    ContractQuoteIn,
+    ContractQuoteOut,
     ContractSort,
     ContractUpdateIn,
     ExtensionQuoteOut,
@@ -163,81 +166,62 @@ async def _check_ltv(
     tiene `contracts.override_ltv` puede prestar sin tasar —es la misma
     excepción que pasarse del techo— y el contrato queda con la bandera,
     porque nadie comprobó el cupo.
+
+    La regla (qué falta, si se pasa) es `rules.assess_ltv`, la misma que
+    informa `POST /contracts/quote`; acá solo se decide con el permiso.
     """
-    if max_ltv_pct is None:
+    assessment = rules.assess_ltv(
+        principal=principal, appraisal_value=appraisal_value, max_ltv_pct=max_ltv_pct
+    )
+    if assessment.override_reason is None:
         return False
-    if not appraisal_value or appraisal_value <= 0:
-        if await has_permission(db, role_id, "contracts.override_ltv"):
-            return True
+    if await has_permission(db, role_id, "contracts.override_ltv"):
+        return True
+    if assessment.override_reason == "appraisal_missing":
         raise ContractAppraisalRequiredError(
             "La categoría de la prenda tiene un préstamo máximo sobre el avalúo "
             f"({max_ltv_pct} %): registra el avalúo para poder calcular el cupo, o "
             "pide a un responsable con el permiso para autorizarlo que lo registre.",
             details={"max_ltv_pct": str(max_ltv_pct), "permission": "contracts.override_ltv"},
         )
-    if principal / appraisal_value * 100 <= max_ltv_pct:
-        return False
-    if not await has_permission(db, role_id, "contracts.override_ltv"):
-        raise PermissionDeniedError(
-            "El préstamo supera el LTV máximo de la categoría. Pide a un "
-            "responsable con el permiso para autorizarlo que lo registre.",
-            details={"permission": "contracts.override_ltv", "max_ltv_pct": str(max_ltv_pct)},
-        )
-    return True
-
-
-async def create_contract(
-    db: AsyncSession,
-    *,
-    company_id: UUID,
-    body: ContractCreateIn,
-    created_by: UUID,
-    role_id: UUID,
-    idempotency_key: str,
-) -> tuple[ContractOut, UUID | None]:
-    """Devuelve el contrato y la entrega del aviso C1 que nació `pending` (o
-    None), para que el router la mande después del commit (NOTIFICACIONES §18).
-    Un reintento con la misma llave devuelve el contrato que ya existía y
-    ningún aviso: el aviso de ese contrato ya se registró la primera vez."""
-    existing = await repository.find_contract_by_idempotency_key(
-        db, company_id=company_id, idempotency_key=idempotency_key
-    )
-    if existing is not None:
-        return (
-            await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"]),
-            None,
-        )
-
-    customer = await customers_repo.get_customer(
-        db, company_id=company_id, customer_id=body.customer_id
-    )
-    if customer is None:
-        raise NotFoundError("El cliente no existe en esta empresa.")
-    # El correo y la casilla de avisos del formulario (NOTIFICACIONES
-    # §9.2-f). Se validan PRIMERO: es lo que el asesor corrige en un segundo,
-    # y rechazarlo después del resto haría rehacer todo el préstamo.
-    await customers_integration.check_contract_form_email(
-        db,
-        company_id=company_id,
-        customer_id=body.customer_id,
-        email=body.customer_email,
-        consent=body.customer_email_consent,
+    raise PermissionDeniedError(
+        "El préstamo supera el LTV máximo de la categoría. Pide a un "
+        "responsable con el permiso para autorizarlo que lo registre.",
+        details={"permission": "contracts.override_ltv", "max_ltv_pct": str(max_ltv_pct)},
     )
 
+
+@dataclass(frozen=True)
+class _CategoryTerms:
+    """Lo que la categoría impone al contrato (SNAPSHOT y techo de LTV)."""
+
+    term_months: int
+    arrears_window_months: int
+    max_ltv_pct: Decimal | None
+
+
+async def _resolve_category_terms(
+    db: AsyncSession, *, company_id: UUID, category_ids: list[UUID]
+) -> _CategoryTerms:
+    """Plazo, ventana de mora y LTV de un contrato a partir de las categorías
+    de sus prendas, con los rechazos de crear (categoría ajena o inexistente
+    → 404, que no sea de nivel 3, sin plazo en el árbol, prendas con plazos
+    distintos). Manda la PRIMERA prenda. Lo usan `create_contract` y la
+    cotización: la misma resolución, no una copia."""
     categories = []
-    for item in body.items:
+    for category_id in category_ids:
         category = await catalogs_repo.get_category(
-            db, company_id=company_id, category_id=item.category_id
+            db, company_id=company_id, category_id=category_id
         )
         if category is None:
             raise NotFoundError(
                 "Una de las categorías de los artículos no existe.",
-                details={"category_id": str(item.category_id)},
+                details={"category_id": str(category_id)},
             )
         if category._mapping["level"] != _MAX_LEVEL:
             raise AppError(
                 "Los artículos deben clasificarse en una categoría de nivel 3 (la más específica).",
-                details={"category_id": str(item.category_id)},
+                details={"category_id": str(category_id)},
             )
         categories.append(category)
 
@@ -279,6 +263,54 @@ async def create_contract(
                 "Todos los artículos de un contrato deben compartir el mismo plazo "
                 "y ventana de mora (categoría)."
             )
+    return _CategoryTerms(
+        term_months=term_months,
+        arrears_window_months=arrears_window_months,
+        max_ltv_pct=max_ltv_pct,
+    )
+
+
+async def create_contract(
+    db: AsyncSession,
+    *,
+    company_id: UUID,
+    body: ContractCreateIn,
+    created_by: UUID,
+    role_id: UUID,
+    idempotency_key: str,
+) -> tuple[ContractOut, UUID | None]:
+    """Devuelve el contrato y la entrega del aviso C1 que nació `pending` (o
+    None), para que el router la mande después del commit (NOTIFICACIONES §18).
+    Un reintento con la misma llave devuelve el contrato que ya existía y
+    ningún aviso: el aviso de ese contrato ya se registró la primera vez."""
+    existing = await repository.find_contract_by_idempotency_key(
+        db, company_id=company_id, idempotency_key=idempotency_key
+    )
+    if existing is not None:
+        return (
+            await get_contract(db, company_id=company_id, contract_id=existing._mapping["id"]),
+            None,
+        )
+
+    customer = await customers_repo.get_customer(
+        db, company_id=company_id, customer_id=body.customer_id
+    )
+    if customer is None:
+        raise NotFoundError("El cliente no existe en esta empresa.")
+    # El correo y la casilla de avisos del formulario (NOTIFICACIONES
+    # §9.2-f). Se validan PRIMERO: es lo que el asesor corrige en un segundo,
+    # y rechazarlo después del resto haría rehacer todo el préstamo.
+    await customers_integration.check_contract_form_email(
+        db,
+        company_id=company_id,
+        customer_id=body.customer_id,
+        email=body.customer_email,
+        consent=body.customer_email_consent,
+    )
+
+    terms = await _resolve_category_terms(
+        db, company_id=company_id, category_ids=[item.category_id for item in body.items]
+    )
 
     # El desembolso sale por la cuenta elegida; la sesión la exige el tipo de
     # cuenta (efectivo sí, banco no), no la operación. `direction='out'`
@@ -293,23 +325,21 @@ async def create_contract(
     )
 
     start_date = await platform_integration.get_company_today(db, company_id=company_id)
-    due_date = rules.add_months(start_date, term_months)
+    due_date = rules.term_end_date(start_date, terms.term_months)
 
     ltv_warning = await _check_ltv(
         db,
         role_id=role_id,
         principal=body.principal,
         appraisal_value=body.appraisal_value,
-        max_ltv_pct=max_ltv_pct,
+        max_ltv_pct=terms.max_ltv_pct,
     )
 
     # La ventana de recargo sale de la política de la EMPRESA salvo que este
     # contrato traiga la suya. Se congela acá: cambiar la política mañana no
     # puede alterar lo que este cliente firmó hoy.
-    extension_window_days = (
-        body.extension_window_days
-        if body.extension_window_days is not None
-        else await platform_integration.get_extension_window_days(db, company_id=company_id)
+    extension_window_days = await _resolve_extension_window_days(
+        db, company_id=company_id, requested=body.extension_window_days
     )
 
     contract_id = uuid4()
@@ -324,9 +354,9 @@ async def create_contract(
         principal=body.principal,
         capital_balance=body.principal,
         appraisal_value=body.appraisal_value,
-        interest_rate_pct=body.interest_rate_pct,
-        term_months=term_months,
-        arrears_window_months=arrears_window_months,
+        interest_rate_pct=rules.snapshot_rate_pct(body.interest_rate_pct),
+        term_months=terms.term_months,
+        arrears_window_months=terms.arrears_window_months,
         extension_months=body.extension_months,
         start_date=start_date,
         due_date=due_date,
@@ -407,11 +437,86 @@ async def create_contract(
         payload={
             "contract_number": number,
             "principal": str(body.principal),
-            "next_due_date": rules.add_months(start_date, 1).isoformat(),
+            "next_due_date": rules.next_due_date(start_date).isoformat(),
         },
     )
 
     return await get_contract(db, company_id=company_id, contract_id=contract_id), notice
+
+
+async def _resolve_extension_window_days(
+    db: AsyncSession, *, company_id: UUID, requested: int | None
+) -> int:
+    """La del contrato si la trae; si no, la política de la empresa."""
+    if requested is not None:
+        return requested
+    return await platform_integration.get_extension_window_days(db, company_id=company_id)
+
+
+async def quote_contract(
+    db: AsyncSession, *, company_id: UUID, body: ContractQuoteIn
+) -> ContractQuoteOut:
+    """`POST /contracts/quote`: lo que `create_contract` calcularía hoy con
+    estos datos, sin escribir nada (ni caja, ni auditoría, ni contador).
+
+    Cada número sale de la misma función que usa crear: la categoría por
+    `_resolve_category_terms` (con sus mismos rechazos), las fechas por
+    `rules.term_end_date`/`next_due_date` desde el hoy de la empresa, la
+    tasa por `rules.snapshot_rate_pct`, el interés por
+    `rules.monthly_interest` y el LTV por `rules.assess_ltv`. Lo que falta
+    (capital en 0, sin tasa, sin categoría) sale `None`: es un formulario a
+    medio llenar, no un error.
+    """
+    start_date = await platform_integration.get_company_today(db, company_id=company_id)
+    category_ids = [item.category_id for item in body.items if item.category_id is not None]
+    terms = (
+        await _resolve_category_terms(db, company_id=company_id, category_ids=category_ids)
+        if category_ids
+        else None
+    )
+    principal = body.principal if body.principal is not None and body.principal > 0 else None
+    rate = (
+        rules.snapshot_rate_pct(body.interest_rate_pct)
+        if body.interest_rate_pct is not None
+        else None
+    )
+    ltv = rules.assess_ltv(
+        principal=principal,
+        appraisal_value=body.appraisal_value,
+        max_ltv_pct=terms.max_ltv_pct if terms is not None else None,
+    )
+    appraisal = (
+        body.appraisal_value
+        if body.appraisal_value is not None and body.appraisal_value > 0
+        else None
+    )
+    return ContractQuoteOut(
+        start_date=start_date,
+        interest_rate_pct=rate,
+        monthly_interest=(
+            rules.monthly_interest(rate, principal)
+            if rate is not None and principal is not None
+            else None
+        ),
+        term_months=terms.term_months if terms is not None else None,
+        arrears_window_months=terms.arrears_window_months if terms is not None else None,
+        extension_months=body.extension_months,
+        extension_window_days=await _resolve_extension_window_days(
+            db, company_id=company_id, requested=body.extension_window_days
+        ),
+        first_due_date=rules.next_due_date(start_date),
+        due_date=(
+            rules.term_end_date(start_date, terms.term_months) if terms is not None else None
+        ),
+        appraisal_total=appraisal,
+        ltv_pct=ltv.ltv_pct,
+        ltv_ceiling=terms.max_ltv_pct if terms is not None else None,
+        max_loan=ltv.max_loan,
+        ltv_exceeded=ltv.exceeded,
+        requires_override=ltv.override_reason is not None,
+        override_reason=ltv.override_reason,
+        amount_to_disburse=principal,
+    )
 
 
 async def import_contract(

@@ -6,7 +6,8 @@ resto del módulo solo persiste lo que esta capa calcula.
 import calendar
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from typing import Literal
 
 from app.common.money import quantize
 
@@ -82,6 +83,98 @@ def months_since_start_exact(start: date, end: date) -> int | None:
 def monthly_interest(interest_rate_pct: Decimal, capital_balance: Decimal) -> Decimal:
     """CLAUDE.md: interés mensual = tasa_contrato × saldo_capital_actual."""
     return quantize(interest_rate_pct / Decimal(100) * capital_balance)
+
+
+_RATE_SCALE = Decimal("0.01")
+_CENTS = Decimal("0.01")
+
+
+def snapshot_rate_pct(interest_rate_pct: Decimal) -> Decimal:
+    """La tasa tal como queda en el SNAPSHOT: `contract.interest_rate_pct` es
+    `numeric(5,2)` y el cuerpo de `POST /contracts` no limita los decimales,
+    así que 5,555 % se guarda 5,56 % y todo interés del contrato sale de esa.
+    Postgres redondea la mitad alejándose de cero, que en positivos es
+    `ROUND_HALF_UP`. Crear lo aplica antes de insertar y la cotización antes
+    de calcular: sin esto, la cotización con 5,555 % diría un interés y el
+    contrato firmado otro."""
+    return interest_rate_pct.quantize(_RATE_SCALE, rounding=ROUND_HALF_UP)
+
+
+def next_due_date(interest_paid_until: date) -> date:
+    """La próxima cuota: un mes después del ancla. Al crear, el ancla es la
+    fecha del contrato, así que es la primera cuota (aviso C1, cotización)."""
+    return add_months(interest_paid_until, 1)
+
+
+def term_end_date(start_date: date, term_months: int) -> date:
+    """`due_date` del contrato: el fin del plazo pactado (no la próxima
+    cuota)."""
+    return add_months(start_date, term_months)
+
+
+# ----------------------------------------------------------------- LTV ----
+#: Por qué un contrato exige `contracts.override_ltv` (`LtvAssessment`).
+LtvOverrideReason = Literal["appraisal_missing", "ltv_exceeded"]
+
+
+@dataclass(frozen=True)
+class LtvAssessment:
+    """El préstamo frente al techo de la categoría, sin decidir permisos:
+    quien decide es `service._check_ltv` (bloquea o marca `ltv_warning`) y
+    la cotización solo lo informa. Las dos leen ESTA evaluación."""
+
+    #: `principal / avalúo × 100`, a dos decimales, para MOSTRAR. `None` sin
+    #: capital o sin avalúo. No decide nada: 70,004 % se muestra 70,00 % y sí
+    #: excede; lo que decide es `exceeded`.
+    ltv_pct: Decimal | None
+    #: `avalúo × LTV / 100` truncado a centavos: el mayor capital que no se
+    #: pasa. Truncado y no redondeado para que `principal <= max_loan` diga
+    #: exactamente lo mismo que `exceeded` (el capital tiene centavos
+    #: enteros). `None` sin avalúo o sin LTV.
+    max_loan: Decimal | None
+    #: El capital supera el techo. `False` si no hay con qué comparar.
+    exceeded: bool
+    #: `None` = no hace falta permiso. `appraisal_missing`: la categoría
+    #: tiene LTV y no hay avalúo (o es 0) — F4-05, con o sin capital.
+    #: `ltv_exceeded`: hay avalúo y el capital se pasa del techo.
+    override_reason: LtvOverrideReason | None
+
+
+def assess_ltv(
+    *,
+    principal: Decimal | None,
+    appraisal_value: Decimal | None,
+    max_ltv_pct: Decimal | None,
+) -> LtvAssessment:
+    """Regla de LTV y avalúo al crear un contrato (DOMINIO §2.1).
+
+    Se compara `principal × 100 > avalúo × LTV`, sin dividir: hasta el
+    01/10/2026 era `principal / avalúo × 100 > LTV`, que da lo mismo salvo
+    por el redondeo de la división a 28 dígitos — que con montos de 14
+    dígitos y LTV de dos decimales nunca cae justo en el borde, pero
+    multiplicando ni hay que pensarlo.
+    """
+    appraisal = appraisal_value if appraisal_value is not None and appraisal_value > 0 else None
+    capital = principal if principal is not None and principal > 0 else None
+    ltv_pct = (
+        quantize(capital * 100 / appraisal)
+        if capital is not None and appraisal is not None
+        else None
+    )
+    if max_ltv_pct is None:
+        return LtvAssessment(ltv_pct=ltv_pct, max_loan=None, exceeded=False, override_reason=None)
+    if appraisal is None:
+        return LtvAssessment(
+            ltv_pct=None, max_loan=None, exceeded=False, override_reason="appraisal_missing"
+        )
+    max_loan = (appraisal * max_ltv_pct / Decimal(100)).quantize(_CENTS, rounding=ROUND_DOWN)
+    exceeded = capital is not None and capital * 100 > appraisal * max_ltv_pct
+    return LtvAssessment(
+        ltv_pct=ltv_pct,
+        max_loan=max_loan,
+        exceeded=exceeded,
+        override_reason="ltv_exceeded" if exceeded else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -288,7 +381,7 @@ def attention_for(
     )
     # Fuera de los terminales y `active`, `months_owed >= 1`: hay opciones.
     catch_up = quote.options[-1].total
-    first_due = add_months(interest_paid_until, 1)
+    first_due = next_due_date(interest_paid_until)
     days_overdue = (today - first_due).days
 
     def _build(reason: str, reference: date, amount: Decimal) -> Attention:
