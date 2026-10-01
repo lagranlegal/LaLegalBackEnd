@@ -1,4 +1,4 @@
-# Estado — 29/09/2026
+# Estado — 30/09/2026
 
 > **Corto y vivo.** Se **reemplaza** en cada sesión, no se apila: lo que deja de ser cierto se borra (git guarda
 > la historia). Las cifras llevan la fecha en que se midieron. Qué es Prendo y el mapa de documentos:
@@ -6,41 +6,37 @@
 
 ## 1. Dónde estamos
 
-- **Solo existe dev** (`dev.prendo.com.co` / `api-dev.prendo.com.co`), y el primer cliente opera ahí con datos
-  reales. **Producción es el único bloqueante para vender**; el paso a paso está en [`PRODUCCION.md`](PRODUCCION.md)
-  y Mateo lo dejó a propósito para cuando haya un segundo cliente.
-- **Auditoría integral en curso** (plan: [`PLAN_AUDITORIA_INTEGRAL.md`](PLAN_AUDITORIA_INTEGRAL.md)). Hechas las
-  fases 1–8, 10, 11 (documentación consolidada en los dos repos; en el front quedan `CLAUDE.md`,
-  `docs/ARQUITECTURA.md` y `docs/DESIGN_SYSTEM.md`), 12 y 13, y las tandas de arreglos A, B, D, E, F1, F2 y G.
-  Faltan: 9 (UI/UX, informe entregado, arreglos pendientes), 14 recomendaciones, 15 bugs a GitHub Issues + E2E
-  versionada, 16 rediseño visual.
-- **Último deploy verificado en navegador:** 29/09 08:15 — backend `af8affe` (migraciones hasta 00064), front
-  `16a37d5`; 9/9 comprobaciones, 0 errores de JS, 0 respuestas 5xx. **Después hay commits de la fase 8 en los dos
-  repos** (plantilla activa no vaciable, piso de la Ley 2300, comprobantes fuera del tope diario, Storage de perfil
-  con 00065, subtotales del estado de resultados): verificar qué está servido antes de asumirlo
-  ([`OPERACION.md`](OPERACION.md) §4.1).
-- **Suites (29/09):** backend 949 passed (por tramos, más 1 intermitente conocido), front 543.
-- **Avisos por correo:** todo construido y desplegado; **ninguna empresa manda avisos al cliente** (nacen
-  apagados); la invitación de usuario sale siempre por Resend.
-- Tamaño (29/09): 65 migraciones, 15 módulos backend, 43 permisos. Se recuentan, no se copian.
+- **Solo existe dev** (`dev.prendo.com.co` / `api-dev.prendo.com.co`). Los datos de la empresa del primer cliente
+  en dev son **de prueba** (Mateo, 30/09): no hay nada de producción todavía. **Producción es el único bloqueante
+  para vender**; el paso a paso está en [`PRODUCCION.md`](PRODUCCION.md) (§0: las decisiones previas).
+- **Auditoría integral** (plan: [`PLAN_AUDITORIA_INTEGRAL.md`](PLAN_AUDITORIA_INTEGRAL.md)): hechas las fases
+  1–15 y las tandas de arreglos A, B, D, E, F1, F2, F3, G, G2, H (back y front) e I (front), todas desplegadas en
+  dev y verificadas en navegador. Recomendaciones: [`RECOMENDACIONES.md`](RECOMENDACIONES.md). Los bugs abiertos
+  viven en GitHub Issues con la etiqueta `auditoría-2026-09` ([`QA.md`](QA.md) §4). Falta la fase 16 (rediseño
+  visual): la propuesta está entregada y espera las decisiones de Mateo.
+- **Último deploy:** backend `ca420cd` (migraciones hasta 00066); front `1ed321e` (code-splitting por ruta: JS
+  inicial de 1.950 kB a 928 kB). CI en verde en los dos repos.
+- **Suites (30/09):** backend 971 passed (más 1 intermitente conocido), front 702.
+- **Avisos por correo:** todo construido y desplegado; los avisos al cliente nacen apagados por empresa. El
+  comprobante pedido en el mostrador (`send_receipt_email` en ventas y abonos) se manda aunque el cliente no haya
+  autorizado avisos, pero respeta el interruptor general de correos de la empresa ([`DOMINIO.md`](DOMINIO.md) §9.2).
+- Tamaño (30/09): 66 migraciones, 14 módulos backend. Se recuentan, no se copian.
 
 ## 2. Lo que espera a Mateo (no es código)
 
-1. **Seguridad P0-1**: el paso descrito en `SEGURIDAD_PRIVADO.md` (raíz del workspace, fuera del repo).
-2. **Desplegar** lo commiteado después de `af8affe`: `supabase db push --linked` → `./scripts/deploy_dev.sh` →
-   push del front ([`OPERACION.md`](OPERACION.md) §2).
-3. Crear o redirigir el buzón **`contacto@prendo.com.co`** (la landing lo publica y hoy no recibe).
-4. Encender avisos por empresa; en el primer cliente, después de agregar la cláusula de autorización a su plantilla
-   de contrato y, idealmente, de una revisión legal. Pedir el correo del cliente en el mostrador (hoy lo tienen 2
-   de 16).
-5. Decirle al primer cliente que su cajón quedó en negativo por abrir sin registrar el efectivo inicial.
-6. Publicar la guía de usuario revisada y mover el pin del kit de identidad (`marca/`).
-7. DMARC y prueba de spam.
+1. Las **decisiones del rediseño** (fase 16) y las previas a producción ([`PRODUCCION.md`](PRODUCCION.md) §0).
+2. Crear o redirigir el buzón **`contacto@prendo.com.co`** (la landing lo publica).
+3. Antes de encender avisos al cliente en una empresa real: la cláusula de autorización en su plantilla de
+   contrato e, idealmente, una revisión legal.
+4. DMARC y prueba de spam.
+5. Pasar los repos a privados cuando el plan de Vercel lo permita.
 
 ## 3. Qué falta (código)
 
-Lista única de bugs abiertos: [`QA.md`](QA.md) §4. Lo siguiente, en orden: desplegar y verificar lo de la fase 8;
-arreglos de la fase 9 que sean altos; pasar los abiertos a GitHub Issues; rediseño visual (propuesta primero).
+Issues abiertas con la etiqueta `auditoría-2026-09` (24 del backend; en el front, las que no cerró la tanda I).
+Lo siguiente: el rediseño (P1 tokens y componentes, P2 pantallas de mostrador, P3 resto) cuando Mateo decida; la
+casilla «Enviar comprobante» del POS y del abono (necesita que el backend exponga el interruptor general de
+correos a quien vende); `pip-audit`.
 
 ## 4. Decisiones de negocio abiertas
 
@@ -58,8 +54,8 @@ arreglos de la fase 9 que sean altos; pasar los abiertos a GitHub Issues; redise
 
 Guardar no es aplicar · el deploy es `./scripts/deploy_dev.sh`, nunca `fly deploy` pelado · la Machine del job no
 se destruye · dos bases (tests local, todo lo demás remoto) · el ref de Supabase sale de `SUPABASE_URL` · nunca
-`supabase config push` · lecturas a la remota con `BEGIN TRANSACTION READ ONLY` · backend antes que front · datos
-del primer cliente intocables. Detalle: [`OPERACION.md`](OPERACION.md) §4.
+`supabase config push` · lecturas a la remota con `BEGIN TRANSACTION READ ONLY` · backend antes que front, salvo
+que una migración exija el front nuevo. Detalle: [`OPERACION.md`](OPERACION.md) §4.
 
 ## 6. Qué leer
 
@@ -72,3 +68,4 @@ del primer cliente intocables. Detalle: [`OPERACION.md`](OPERACION.md) §4.
 | desplegar o diagnosticar | [`OPERACION.md`](OPERACION.md) |
 | montar producción | [`PRODUCCION.md`](PRODUCCION.md) |
 | probar o reportar un bug | [`QA.md`](QA.md) |
+| qué mejorar frente a apps profesionales | [`RECOMENDACIONES.md`](RECOMENDACIONES.md) |

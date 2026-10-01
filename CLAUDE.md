@@ -106,7 +106,7 @@ app/
   core/      settings, db (claims por TX, NullPool), security (JWKS, permisos), errors, logging, security_headers, observability
   common/    money, idempotency, pagination, tenant_time, search, rate_limit, cors, co_holidays
   modules/   platform identity company customers catalogs contracts cashbox accounts capital
-             inventory sales audit reports notifications      (15; cada uno router/service/repository/schemas)
+             inventory sales audit reports notifications      (14; cada uno router/service/repository/schemas)
   jobs/      nightly.py — estados, suscripciones, resúmenes, recordatorios, despacho de correos
 tests/       unit/ (reglas puras y contratos) · integration/ (HTTP contra Postgres local) · rls/ (aislamiento)
 supabase/    migrations/ (fuente de verdad del esquema) · seed.sql (permisos y planes)
