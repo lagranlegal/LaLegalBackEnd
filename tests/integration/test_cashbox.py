@@ -185,6 +185,107 @@ def test_current_session_with_allow_empty_answers_null_not_404(
     assert response.json()["id"] == opened.json()["id"]
 
 
+def test_la_sesion_actual_trae_el_esperado_en_vivo_y_quien_abrio(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """La franja de caja: abierta, `expected_cash` venía `null` (la columna
+    solo se escribe al cerrar). Ahora es el esperado EN VIVO —el mismo número
+    del acta y del cierre— y trae el nombre de quien abrió."""
+    headers = _headers(cashbox_tenant["token"])
+    client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "100000.00"}
+    )
+    current = client.get("/api/v1/cashbox/sessions/current", headers=headers).json()
+    assert current["expected_cash"] == "100000.00"
+    assert current["opened_by_name"] == "Cajero Test"
+    assert current["opened_by"] == str(cashbox_tenant["user_id"])
+
+    category = client.post(
+        "/api/v1/cashbox/expense-categories", headers=headers, json={"name": "Tinto"}
+    ).json()
+    for metodo in ("cash", "transfer"):  # la transferencia no sale del cajón
+        gasto = client.post(
+            "/api/v1/cashbox/expenses",
+            headers=headers,
+            json={
+                "category_id": category["id"],
+                "description": "Café",
+                "amount": "15000.00",
+                "payment_method": metodo,
+            },
+        )
+        assert gasto.status_code == 201, gasto.text
+
+    current = client.get("/api/v1/cashbox/sessions/current", headers=headers).json()
+    report = client.get(f"/api/v1/cashbox/sessions/{current['id']}/report", headers=headers)
+    assert current["expected_cash"] == "85000.00"
+    assert current["expected_cash"] == report.json()["expected_cash"]
+    today = client.get("/api/v1/cashbox/sessions/today", headers=headers).json()
+    assert today["expected_cash"] == "85000.00"
+    assert today["opened_by_name"] == "Cajero Test"
+
+    # Cerrada, `expected_cash` es el valor congelado del cierre (el mismo).
+    closed = client.post(
+        f"/api/v1/cashbox/sessions/{current['id']}/close",
+        headers=headers,
+        json={"counted_cash": "85000.00"},
+    ).json()
+    assert closed["expected_cash"] == "85000.00"
+    assert closed["difference"] == "0.00"
+    assert closed["opened_by_name"] == "Cajero Test"
+
+
+@pytest.mark.asyncio
+async def test_el_nombre_de_quien_abrio_no_cruza_empresas(
+    client: TestClient, cashbox_tenant: dict
+) -> None:
+    """`cash_session.opened_by` no tiene FK: si apuntara a un usuario de OTRA
+    empresa, el nombre no se filtra (LEFT JOIN por empresa + RLS de
+    `app_user`): sale `null` y la sesión igual se lee."""
+    headers = _headers(cashbox_tenant["token"])
+    opened = client.post(
+        "/api/v1/cashbox/sessions/open", headers=headers, json={"opening_balance": "0.00"}
+    ).json()
+    otra, rol, ajeno = uuid4(), uuid4(), uuid4()
+    try:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text("insert into public.company (id, name) values (:id, 'Empresa ajena')"),
+                {"id": str(otra)},
+            )
+            await session.execute(
+                text("insert into public.role (id, company_id, name) values (:id, :cid, 'X')"),
+                {"id": str(rol), "cid": str(otra)},
+            )
+            await session.execute(
+                text(
+                    "insert into public.app_user (id, company_id, role_id, full_name, email, "
+                    "status) values (:id, :cid, :rol, 'Usuario Ajeno', :email, 'active')"
+                ),
+                {"id": str(ajeno), "cid": str(otra), "rol": str(rol), "email": f"{ajeno}@x.co"},
+            )
+            await session.execute(
+                text("update public.cash_session set opened_by = :u where id = :id"),
+                {"u": str(ajeno), "id": opened["id"]},
+            )
+        current = client.get("/api/v1/cashbox/sessions/current", headers=headers)
+        assert current.status_code == 200, current.text
+        assert current.json()["opened_by"] == str(ajeno)
+        assert current.json()["opened_by_name"] is None
+        assert current.json()["expected_cash"] == "0.00"
+    finally:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(
+                text("delete from public.app_user where company_id = :cid"), {"cid": str(otra)}
+            )
+            await session.execute(
+                text("delete from public.role where company_id = :cid"), {"cid": str(otra)}
+            )
+            await session.execute(
+                text("delete from public.company where id = :cid"), {"cid": str(otra)}
+            )
+
+
 def test_close_session_with_no_movements_matches_opening_balance(
     client: TestClient, cashbox_tenant: dict
 ) -> None:

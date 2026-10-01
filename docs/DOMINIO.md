@@ -216,7 +216,9 @@ terminan divergiendo (ya pasó).
 - **Cerrar**: el backend calcula `expected_cash` (efectivo del turno por tipo de cuenta, no por medio de pago: un
   gasto pagado por transferencia no salió del cajón) y el desglose módulo × concepto × medio; el usuario registra
   lo contado; **toda diferencia exige justificación, sin tolerancia**; el cierre emite su ajuste y el cajón pasa a
-  valer lo contado. Sesión cerrada = inmutable.
+  valer lo contado. Sesión cerrada = inmutable. Mientras está abierta, la franja de caja
+  (`/cashbox/sessions/current`) muestra ese mismo `expected_cash` **en vivo** (misma función que el cierre, no una
+  fórmula aparte): lo que la franja dice que debería haber es exactamente lo que el cierre va a pedir contar.
 - Los ajustes de arqueo llevan **`session_id = NULL` a propósito** (corrigen la cuenta, no son operaciones del
   turno: dentro, `expected_cash` los contaría dos veces y el acta siempre cuadraría); la trazabilidad va por
   `reference_type`/`reference_id`.

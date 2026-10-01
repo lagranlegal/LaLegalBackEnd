@@ -40,7 +40,9 @@ el backend ya trae `GET /contracts/attention` («Para hoy», con `contracts.view
 anterior para comparar —desde el 01/10, el **mismo tramo** (del 1 al mismo día), no el mes completo: mismos
 nombres de campo—; falta la pantalla. Para la lista de contratos (issue #10 del front, P2-d), `GET /contracts`
 ya trae `customer_name`/`customer_document` y `?sort=` (`next_due_asc` por defecto; API_GUIDE §7) —sin desplegar, el
-front tiene que regenerar tipos y volver a la primera página al cambiar de orden—. Falta la
+front tiene que regenerar tipos y volver a la primera página al cambiar de orden—. La franja de caja ya tiene sus datos:
+`GET /cashbox/sessions/current` trae `expected_cash` en vivo (antes `null` hasta cerrar) y `opened_by_name` (sin
+desplegar; el front regenera tipos). Falta la
 casilla «Enviar comprobante» del POS y del abono (necesita que el backend exponga el interruptor general de
 correos a quien vende); `pip-audit`.
 

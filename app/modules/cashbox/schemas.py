@@ -51,8 +51,16 @@ class SessionOut(BaseModel):
     register_id: UUID
     session_date: date
     opened_by: UUID
+    #: Nombre visible de quien abrió (`app_user.full_name`, de la misma
+    #: empresa). `null` si el usuario ya no existe.
+    opened_by_name: str | None = None
     opened_at: datetime
     opening_balance: Decimal
+    #: Efectivo que debería haber en el cajón: apertura + neto de los
+    #: movimientos de la sesión en cuentas `cash` (la misma cuenta que hace el
+    #: cierre). Cerrada, es el valor congelado del cierre. ABIERTA, en
+    #: `/sessions/current` y `/sessions/today` es el esperado EN VIVO (a este
+    #: momento); en el resto de rutas una abierta trae `null`.
     expected_cash: Decimal | None
     counted_cash: Decimal | None
     difference: Decimal | None

@@ -11,6 +11,15 @@ _SESSION_COLUMNS = (
     "id, register_id, session_date, opened_by, opened_at, opening_balance, expected_cash, "
     "counted_cash, difference, difference_reason, closed_by, closed_at, status"
 )
+# La sesión con el nombre visible de quien la abrió (`opened_by_name`). LEFT
+# JOIN con `company_id` en la condición: `app_user` tiene RLS por empresa, y
+# un usuario borrado o ajeno da `null`, nunca saca la sesión del resultado.
+_SESSION_SELECT = (
+    "select "
+    + ", ".join(f"s.{c.strip()}" for c in _SESSION_COLUMNS.split(","))
+    + ", u.full_name as opened_by_name from public.cash_session s "
+    "left join public.app_user u on u.id = s.opened_by and u.company_id = s.company_id"
+)
 _EXPENSE_COLUMNS = (
     "id, session_id, module, category_id, description, amount, payment_method, "
     "receipt_url, created_at"
@@ -146,10 +155,7 @@ async def insert_session(
 
 async def get_session(db: AsyncSession, *, company_id: UUID, session_id: UUID) -> Row[Any] | None:
     result = await db.execute(
-        text(
-            f"select {_SESSION_COLUMNS} from public.cash_session "
-            "where company_id = :company_id and id = :id"
-        ),
+        text(f"{_SESSION_SELECT} where s.company_id = :company_id and s.id = :id"),
         {"company_id": str(company_id), "id": str(session_id)},
     )
     return result.first()
@@ -158,12 +164,12 @@ async def get_session(db: AsyncSession, *, company_id: UUID, session_id: UUID) -
 async def list_sessions(
     db: AsyncSession, *, company_id: UUID, cursor: UUID | None, limit: int
 ) -> list[Row[Any]]:
-    query = f"select {_SESSION_COLUMNS} from public.cash_session where company_id = :company_id"
+    query = f"{_SESSION_SELECT} where s.company_id = :company_id"
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}
     if cursor is not None:
-        query += " and id > :cursor"
+        query += " and s.id > :cursor"
         params["cursor"] = str(cursor)
-    query += " order by id limit :limit"
+    query += " order by s.id limit :limit"
     result = await db.execute(text(query), params)
     return list(result.all())
 

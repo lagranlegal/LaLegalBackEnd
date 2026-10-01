@@ -2323,3 +2323,49 @@ async def test_dashboard_el_tramo_anterior_corta_en_el_mismo_dia(
         ) - Decimal(estado["sales_returns"])
         # Y el mes «en curso» (marzo de 2026) no tiene nada.
         assert body["sales"]["month_total"] == "0.00"
+
+
+def test_la_franja_de_caja_cuadra_con_venta_compra_y_gasto_en_efectivo(
+    client: TestClient, reports_tenant: dict
+) -> None:
+    """`GET /cashbox/sessions/current` (franja de caja) con operación real:
+    compra en efectivo (sale del cajón), venta en efectivo (entra) y gasto en
+    efectivo (sale). Vive acá porque este tenant ya puede comprar y vender.
+    El esperado en vivo es el que el cierre exige contar."""
+    token = reports_tenant["token"]
+    client.post(
+        "/api/v1/cashbox/sessions/open",
+        headers=_headers(token),
+        json={"opening_balance": "1000000.00"},
+    )
+    _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price="450000.00")
+    categoria = client.post(
+        "/api/v1/cashbox/expense-categories", headers=_headers(token), json={"name": "Aseo"}
+    ).json()
+    gasto = client.post(
+        "/api/v1/cashbox/expenses",
+        headers=_headers(token),
+        json={
+            "category_id": categoria["id"],
+            "description": "Escoba",
+            "amount": "20000.00",
+            "payment_method": "cash",
+        },
+    )
+    assert gasto.status_code == 201, gasto.text
+
+    actual = client.get("/api/v1/cashbox/sessions/current", headers=_headers(token)).json()
+    # 1.000.000 − 100.000 (compra) + 450.000 (venta) − 20.000 (gasto)
+    assert actual["expected_cash"] == "1330000.00"
+    assert actual["opened_by_name"] == "Full User"
+    acta = client.get(
+        f"/api/v1/cashbox/sessions/{actual['id']}/report", headers=_headers(token)
+    ).json()
+    assert actual["expected_cash"] == acta["expected_cash"]
+    cierre = client.post(
+        f"/api/v1/cashbox/sessions/{actual['id']}/close",
+        headers=_headers(token),
+        json={"counted_cash": actual["expected_cash"]},
+    )
+    assert cierre.status_code == 200, cierre.text
+    assert cierre.json()["difference"] == "0.00"

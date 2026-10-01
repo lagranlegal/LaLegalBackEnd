@@ -41,6 +41,7 @@ def _row_to_session(row: Row[Any]) -> SessionOut:
         register_id=m["register_id"],
         session_date=m["session_date"],
         opened_by=m["opened_by"],
+        opened_by_name=m["opened_by_name"],
         opened_at=m["opened_at"],
         opening_balance=m["opening_balance"],
         expected_cash=m["expected_cash"],
@@ -225,7 +226,23 @@ async def get_current_session(db: AsyncSession, *, company_id: UUID) -> SessionO
         db, company_id=company_id, session_id=row._mapping["id"]
     )
     assert full_row is not None
-    return _row_to_session(full_row)
+    return await _with_live_expected_cash(db, company_id=company_id, session=full_row)
+
+
+async def _with_live_expected_cash(
+    db: AsyncSession, *, company_id: UUID, session: Row[Any]
+) -> SessionOut:
+    """La sesión con `expected_cash` EN VIVO si sigue abierta (la franja de
+    caja: «hoy deberías tener X en el cajón»). La columna solo se escribe al
+    cerrar, así que abierta venía `null`. Sale de `_expected_cash`, la misma
+    función del cierre y del acta: el número que muestra la franja es el que
+    el cierre va a exigir contar. Cerrada, se respeta el valor congelado."""
+    out = _row_to_session(session)
+    if out.status == "open":
+        out.expected_cash, _lines = await _expected_cash(
+            db, company_id=company_id, session_id=out.id, opening_balance=out.opening_balance
+        )
+    return out
 
 
 async def get_today_session(db: AsyncSession, *, company_id: UUID) -> SessionOut:
@@ -254,7 +271,7 @@ async def get_today_session(db: AsyncSession, *, company_id: UUID) -> SessionOut
         db, company_id=company_id, session_id=row._mapping["id"]
     )
     assert full_row is not None
-    return _row_to_session(full_row)
+    return await _with_live_expected_cash(db, company_id=company_id, session=full_row)
 
 
 async def assert_can_read_session(
