@@ -38,8 +38,9 @@
 
 Issues abiertas con la etiqueta `auditoría-2026-09` (24 del backend; en el front, las que no cerró la tanda I).
 Lo siguiente: lo que queda abierto en Issues del front (#12 en Reportes, #13 sin reproducir, restos de #16 y #17)
-y del backend (24); el resumen de Nuevo contrato calcula el interés mensual en el front con la misma regla del
-backend (excepción a «la UI no calcula intereses»; alternativa: un endpoint de cotización). Notas de la P2: «vs. mes
+y del backend (24); `POST /contracts/quote` (01/10, sin desplegar) cotiza el contrato nuevo con
+las mismas funciones que crear: falta que el resumen de Nuevo contrato del front lo use y retire `loanPreview.ts`
+(API_GUIDE §7). Notas de la P2: «vs. mes
 anterior» compara el **mismo tramo** (del 1 al mismo día; mismos nombres de campo); `GET /contracts` ordena por
 `next_due_asc` por defecto y el cursor lleva el orden (API_GUIDE §7); `sessions/current` trae `expected_cash` en vivo
 y `opened_by_name`; el listado de contratos aún hace una consulta de prendas por contrato (N+1 heredado). Falta la

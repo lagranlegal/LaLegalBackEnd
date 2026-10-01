@@ -63,6 +63,13 @@ Código: `app/modules/contracts/` (`rules.py` es lo puro: intereses, estados, cu
   auditado como quien autorizó. Sin LTV en la categoría no hay techo. Por qué un permiso y no una casilla por
   empresa: nadie sabe contestar "¿advierte o bloquea?" al dar de alta una empresa, y el permiso expresa además
   el caso real (el asesor no puede, el dueño sí).
+- **La cotización es el contrato** (`POST /contracts/quote`, `service.quote_contract`): el «Resumen del
+  préstamo» de Nuevo contrato lo calcula el backend con las mismas funciones que crear —categoría, fechas desde
+  el hoy de la empresa, tasa del snapshot, interés, LTV— y sin escribir nada. El contrato es un documento legal:
+  lo que la pantalla anuncia tiene que ser lo que se firma, y dos implementaciones de la misma cuenta terminan
+  diciendo cosas distintas. La tasa se cotiza como la guarda el snapshot (`numeric(5,2)`,
+  `rules.snapshot_rate_pct`), y el techo de LTV se muestra truncado a centavos para que «máximo a prestar» y
+  «se pasa» nunca se contradigan (`rules.assess_ltv`).
 - **El desembolso sale de la caja** (`loan_disbursed`): en efectivo exige turno abierto
   ([§4.3](#43-el-turno-y-el-arqueo)). Hoy **no** se valida que haya efectivo suficiente (decisión abierta, ver
   [`ESTADO.md`](ESTADO.md)).
@@ -74,7 +81,8 @@ Código: `app/modules/contracts/` (`rules.py` es lo puro: intereses, estados, cu
 - **Solo meses COMPLETOS.** Un pago parcial de interés se rechaza (`PAYMENT_PARTIAL_INTEREST_REJECTED`). El
   capital solo recibe abono cuando los intereses quedan al día en el mismo pago o ya lo estaban.
   `GET /contracts/{id}/payment-options` devuelve los montos exactos aceptables (1 mes, 2 meses… todo + capital
-  libre): la UI nunca calcula un interés.
+  libre): la UI nunca calcula un interés. Tampoco antes de crear: el interés del contrato nuevo lo da
+  `POST /contracts/quote` ([§2.1](#21-crear)).
 - Pagar N meses mueve el ancla: `interest_paid_until += N meses`, y se recalcula el estado.
 - **Saldar causa como mínimo UN mes** (`rules.minimum_payoff_months`, decisión del dueño 27/09/2026): sin esto,
   quien empeña y devuelve dentro del primer mes no pagaba interés. El mínimo es sobre la vida del contrato: si
