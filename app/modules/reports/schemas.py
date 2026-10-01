@@ -18,7 +18,10 @@ class ContractKpisOut(BaseModel):
     #: de interés: la misma cifra que `income-statement.interest_revenue` para
     #: ese rango (sale de `contract_payment`, el documento).
     interest_collected_month: MoneyOut = Decimal("0.00")
-    #: Ídem, el mes calendario ANTERIOR completo.
+    #: Ídem, el MISMO TRAMO del mes anterior: del 1 al mismo número de día que
+    #: hoy, o hasta su último día si ese mes es más corto (hoy 31/03 → 1–28/02).
+    #: No el mes anterior completo: el día 1 eso daba «▼ 100 %». El nombre se
+    #: conserva (el front ya lo consume); cambió la semántica el 01/10/2026.
     interest_collected_prev_month: MoneyOut = Decimal("0.00")
     #: Contratos rematados este mes (por la fecha del remate, no por el estado
     #: actual; `auctioned_count` es el total histórico).
@@ -44,8 +47,10 @@ class SalesKpisOut(BaseModel):
     today_returns: MoneyOut = Decimal("0.00")
     month_gross: MoneyOut = Decimal("0.00")
     month_returns: MoneyOut = Decimal("0.00")
-    #: Ventas netas del mes calendario ANTERIOR completo, con el mismo
-    #: criterio que `month_total` (bruto − devoluciones de ese mes).
+    #: Ventas netas del MISMO TRAMO del mes anterior (del 1 al mismo número de
+    #: día que hoy, o hasta su último día si ese mes es más corto), con el
+    #: mismo criterio que `month_total` (bruto − devoluciones del tramo). Ver
+    #: `contracts.interest_collected_prev_month`.
     month_total_prev: MoneyOut = Decimal("0.00")
 
 

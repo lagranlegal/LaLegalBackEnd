@@ -16,6 +16,7 @@ from _jwt_helpers import FakeJwkClient, make_token
 from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, text
 
+from app.common.tenant_time import previous_month_to_date_bounds
 from app.core import security
 from app.core.db import AsyncSessionLocal, engine
 
@@ -2092,7 +2093,8 @@ def test_F7_13_la_posicion_resta_pasivos_y_da_el_patrimonio_neto(
 
 
 # ---- Dashboard del Admin (rediseño P2, 30/09/2026): mes en curso contra el
-# mes anterior completo, con las mismas fuentes que el estado de resultados.
+# MISMO TRAMO del mes anterior (01/10/2026; antes, el mes anterior completo),
+# con las mismas fuentes que el estado de resultados.
 
 
 def _estado_rango(client: TestClient, token: str, frm: date, to: date) -> dict:
@@ -2139,15 +2141,15 @@ async def _retroceder_ancla(tenant: dict, contract_id: str, meses: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dashboard_compara_el_mes_con_el_anterior_completo(
+async def test_dashboard_compara_el_mes_con_el_mismo_tramo_del_anterior(
     client: TestClient, reports_tenant: dict
 ) -> None:
     token = reports_tenant["token"]
     cid = str(reports_tenant["company_id"])
     hoy = hoy_empresa()
     primero = hoy.replace(day=1)
-    fin_anterior = primero - timedelta(days=1)
-    inicio_anterior = fin_anterior.replace(day=1)
+    # El día 1 del mes anterior cae en el tramo comparable sea cual sea hoy.
+    inicio_anterior, fin_tramo = previous_month_to_date_bounds(hoy)
     client.post(
         "/api/v1/cashbox/sessions/open",
         headers=_headers(token),
@@ -2195,8 +2197,8 @@ async def test_dashboard_compara_el_mes_con_el_anterior_completo(
             {
                 "cid": cid,
                 "ct": pagado,
-                "cuando": mediodia_empresa(fin_anterior),
-                "ipu": fin_anterior,
+                "cuando": mediodia_empresa(inicio_anterior),
+                "ipu": inicio_anterior,
                 "key": str(uuid4()),
             },
         )
@@ -2212,7 +2214,7 @@ async def test_dashboard_compara_el_mes_con_el_anterior_completo(
     async with AsyncSessionLocal() as s, s.begin():
         await s.execute(
             text("update public.sale set sold_at = :cuando where id = :sid"),
-            {"cuando": mediodia_empresa(fin_anterior), "sid": venta_vieja["id"]},
+            {"cuando": mediodia_empresa(inicio_anterior), "sid": venta_vieja["id"]},
         )
 
     r = client.get("/api/v1/reports/dashboard", headers=_headers(token))
@@ -2221,7 +2223,7 @@ async def test_dashboard_compara_el_mes_con_el_anterior_completo(
     contratos, ventas = body["contracts"], body["sales"]
 
     este_mes = _estado_rango(client, token, primero, hoy)
-    mes_anterior = _estado_rango(client, token, inicio_anterior, fin_anterior)
+    mes_anterior = _estado_rango(client, token, inicio_anterior, fin_tramo)
     assert contratos["interest_collected_month"] == "40000.00"
     assert contratos["interest_collected_month"] == este_mes["interest_revenue"]
     assert contratos["interest_collected_prev_month"] == "25000.00"
@@ -2235,3 +2237,89 @@ async def test_dashboard_compara_el_mes_con_el_anterior_completo(
     # Los campos de antes siguen ahí.
     assert contratos["auctioned_count"] == 1
     assert "ready_for_auction_count" in contratos and "today_total" in ventas
+
+
+def _abono_viejo(tenant: dict, contract_id: str, recibo: int, dia: date, interes: str) -> dict:
+    """Un abono de 1 mes con fecha `dia` (`contract_payment` es inmutable: se
+    INSERTA con su fecha, como en el test de arriba)."""
+    return {
+        "cid": str(tenant["company_id"]),
+        "ct": contract_id,
+        "recibo": recibo,
+        "cuando": mediodia_empresa(dia),
+        "interes": Decimal(interes),
+        "ipu": dia,
+        "key": str(uuid4()),
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_el_tramo_anterior_corta_en_el_mismo_dia(
+    client: TestClient, reports_tenant: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Hoy» fijo (el día de la empresa se reemplaza solo para el dashboard):
+    con hoy = 10/03, una venta y un abono del 05/02 cuentan y los del 25/02
+    NO; con hoy = 31/03 el tramo llega al 28/02 y cuentan los dos; con hoy =
+    01/03 el tramo es solo el 01/02 y no cuenta ninguno. Fechas de 2026 lejos
+    de las que crea el test vía API (hoy real), que no caen en ningún tramo."""
+    from app.modules.platform import integration as platform_integration
+
+    token = reports_tenant["token"]
+    client.post(
+        "/api/v1/cashbox/sessions/open",
+        headers=_headers(token),
+        json={"opening_balance": "5000000.00"},
+    )
+    contrato = _contrato(client, reports_tenant, "1000000.00")
+    dentro, fuera = date(2026, 2, 5), date(2026, 2, 25)
+    async with AsyncSessionLocal() as s, s.begin():
+        for params in (
+            _abono_viejo(reports_tenant, contrato, 910001, dentro, "30000"),
+            _abono_viejo(reports_tenant, contrato, 910002, fuera, "70000"),
+        ):
+            await s.execute(
+                text(
+                    "insert into public.contract_payment (company_id, contract_id, "
+                    "receipt_number, paid_at, months_covered, interest_amount, discount_amount, "
+                    "payment_method, total, new_capital_balance, new_interest_paid_until, "
+                    "idempotency_key) values (:cid, :ct, :recibo, :cuando, 1, :interes, 0, "
+                    "'cash', :interes, 1000000, :ipu, :key)"
+                ),
+                params,
+            )
+    for dia, precio in ((dentro, "450000.00"), (fuera, "300000.00")):
+        venta = _sell_one(client, reports_tenant, unit_cost="100000.00", unit_price=precio)
+        async with AsyncSessionLocal() as s, s.begin():
+            await s.execute(
+                text("update public.sale set sold_at = :cuando where id = :sid"),
+                {"cuando": mediodia_empresa(dia), "sid": venta["id"]},
+            )
+
+    def _dashboard_el(hoy: date) -> dict:
+        async def _hoy_fijo(_db: object, *, company_id: object) -> date:
+            return hoy
+
+        with monkeypatch.context() as m:
+            m.setattr(platform_integration, "get_company_today", _hoy_fijo)
+            r = client.get("/api/v1/reports/dashboard", headers=_headers(token))
+        assert r.status_code == 200, r.text
+        assert r.json()["as_of"] == hoy.isoformat()
+        return dict(r.json())
+
+    casos = (
+        (date(2026, 3, 10), date(2026, 2, 10), "30000.00", "450000.00"),
+        (date(2026, 3, 31), date(2026, 2, 28), "100000.00", "750000.00"),
+        (date(2026, 3, 1), date(2026, 2, 1), "0.00", "0.00"),
+    )
+    for hoy, fin_tramo, interes, ventas in casos:
+        body = _dashboard_el(hoy)
+        assert body["contracts"]["interest_collected_prev_month"] == interes, hoy
+        assert body["sales"]["month_total_prev"] == ventas, hoy
+        # La misma cifra que el estado de resultados para ese tramo.
+        estado = _estado_rango(client, token, date(2026, 2, 1), fin_tramo)
+        assert body["contracts"]["interest_collected_prev_month"] == estado["interest_revenue"]
+        assert Decimal(body["sales"]["month_total_prev"]) == Decimal(
+            estado["sales_revenue"]
+        ) - Decimal(estado["sales_returns"])
+        # Y el mes «en curso» (marzo de 2026) no tiene nada.
+        assert body["sales"]["month_total"] == "0.00"

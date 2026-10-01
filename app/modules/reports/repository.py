@@ -16,13 +16,6 @@ _SALES_WITH_RETURNS_IN_RANGE = (
     "where company_id = :company_id and return_date between :from_date and :to_date)"
 )
 
-# Ídem para el dashboard: ventas con alguna devolución en el MES de `today`.
-_SALES_WITH_RETURNS_THIS_MONTH = (
-    "ret.sale_id in (select sale_id from public.sale_return "
-    "where company_id = :company_id "
-    "and date_trunc('month', return_date) = date_trunc('month', :today))"
-)
-
 _CLOSING_COLUMNS = (
     "id, session_date, opening_balance, expected_cash, counted_cash, difference, "
     "difference_reason, closed_by, closed_at"
@@ -78,7 +71,9 @@ async def auctions_in_range(
     return int(result.scalar_one())
 
 
-async def sales_kpis(db: AsyncSession, *, company_id: UUID, tz_name: str, today: date) -> Row[Any]:
+async def sales_kpis(
+    db: AsyncSession, *, company_id: UUID, tz_name: str, today: date, month_from: date
+) -> Row[Any]:
     """Ventas de hoy y del mes para el dashboard, NETAS de devoluciones (F7-07,
     auditoría fase 7): «Ventas de hoy» decía 5.120.250 con 1.383.333,33
     devueltos ese mismo día.
@@ -88,6 +83,10 @@ async def sales_kpis(db: AsyncSession, *, company_id: UUID, tz_name: str, today:
     nunca cuenta), devoluciones = contra-ingreso por `return_date` con el
     valor de `return_line_amounts_sql` —lo mismo que `profit_summary`—, y
     total = bruto − devoluciones = `sales_revenue − sales_returns` del IS.
+
+    «El mes» es el tramo `month_from`…`today`, ambos incluidos: con el 1 del
+    mes en curso da el mes a la fecha; con el 1 del mes anterior y el mismo
+    día de ese mes (`previous_month_to_date_bounds`), el tramo comparable.
     """
     result = await db.execute(
         text(
@@ -99,8 +98,7 @@ async def sales_kpis(db: AsyncSession, *, company_id: UUID, tz_name: str, today:
                   count(*) filter (where (sold_at at time zone :tz)::date = :today)
                     as today_count,
                   coalesce(sum(total) filter (
-                    where date_trunc('month', sold_at at time zone :tz)
-                          = date_trunc('month', :today)
+                    where (sold_at at time zone :tz)::date between :from_date and :today
                   ), 0) as month_gross
                 from public.sale
                 where company_id = :company_id and status = 'completed'
@@ -110,9 +108,9 @@ async def sales_kpis(db: AsyncSession, *, company_id: UUID, tz_name: str, today:
                   coalesce(sum(ra.gross - ra.discount) filter (where ra.return_date = :today), 0)
                     as today_returns,
                   coalesce(sum(ra.gross - ra.discount) filter (
-                    where date_trunc('month', ra.return_date) = date_trunc('month', :today)
+                    where ra.return_date between :from_date and :today
                   ), 0) as month_returns
-                from {return_line_amounts_sql(_SALES_WITH_RETURNS_THIS_MONTH)} ra
+                from {return_line_amounts_sql(_SALES_WITH_RETURNS_IN_RANGE)} ra
                 join public.sale s on s.id = ra.sale_id and s.company_id = :company_id
                 where s.status = 'completed'
             )
@@ -124,7 +122,13 @@ async def sales_kpis(db: AsyncSession, *, company_id: UUID, tz_name: str, today:
             from ventas, devoluciones
             """
         ),
-        {"company_id": str(company_id), "tz": tz_name, "today": today},
+        {
+            "company_id": str(company_id),
+            "tz": tz_name,
+            "today": today,
+            "from_date": month_from,
+            "to_date": today,
+        },
     )
     return result.one()
 

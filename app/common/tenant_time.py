@@ -39,7 +39,16 @@ def month_start(d: date) -> date:
 
 def previous_month_bounds(d: date) -> tuple[date, date]:
     """El mes calendario ANTERIOR al de `d`, completo: `(primer día, último
-    día)`. Es el «vs. agosto» del dashboard: el mes cerrado entero, no los
-    mismos días del mes pasado."""
+    día)`."""
     last = month_start(d) - timedelta(days=1)
     return last.replace(day=1), last
+
+
+def previous_month_to_date_bounds(d: date) -> tuple[date, date]:
+    """El MISMO TRAMO del mes anterior: del 1 al mismo número de día que `d`,
+    o hasta el último día del mes anterior si es más corto (31/03 → 1–28/02,
+    o 1–29/02 en bisiesto). Es el «vs. septiembre» del dashboard: comparar
+    del 1 a hoy contra el mes anterior COMPLETO hace que el día 1 todo salga
+    «▼ 100 %»; contra el mismo tramo la comparación es pareja todo el mes."""
+    first, last = previous_month_bounds(d)
+    return first, first.replace(day=min(d.day, last.day))

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize
 from app.common.pagination import CursorPage, make_page
-from app.common.tenant_time import month_start, previous_month_bounds, today_in
+from app.common.tenant_time import month_start, previous_month_to_date_bounds
 from app.core.errors import InvalidDateRangeError
 from app.modules.platform import integration as platform_integration
 from app.modules.reports import repository
@@ -67,19 +67,22 @@ def _interest_revenue(pawn_row: Row[Any]) -> Decimal:
 
 async def get_dashboard(db: AsyncSession, *, company_id: UUID) -> DashboardOut:
     tz_name = await platform_integration.get_company_timezone(db, company_id=company_id)
-    today = today_in(tz_name)
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    first_day = month_start(today)
 
     contract_row = await repository.contract_kpis(db, company_id=company_id, today=today)
-    sales_row = await repository.sales_kpis(db, company_id=company_id, tz_name=tz_name, today=today)
+    sales_row = await repository.sales_kpis(
+        db, company_id=company_id, tz_name=tz_name, today=today, month_from=first_day
+    )
     inventory_row = await repository.inventory_kpis(db, company_id=company_id)
     session_row = await repository.current_open_session(db, company_id=company_id)
 
-    # Mes en curso y mes anterior completo, con las MISMAS consultas que el
-    # estado de resultados (intereses) y que `month_total` (ventas): el
-    # dashboard no estrena una definición. `sales_kpis` con la víspera del
-    # primero como «hoy» da el mes anterior entero.
-    first_day = month_start(today)
-    prev_from, prev_to = previous_month_bounds(today)
+    # Mes en curso (del 1 a hoy) contra el MISMO TRAMO del mes anterior (del 1
+    # al mismo día, o a su último día si es más corto), con las MISMAS
+    # consultas que el estado de resultados (intereses) y que `month_total`
+    # (ventas): el dashboard no estrena una definición. Contra el mes anterior
+    # completo, el día 1 todo salía «▼ 100 %».
+    prev_from, prev_to = previous_month_to_date_bounds(today)
     pawn_month = await repository.pawn_performance(
         db, company_id=company_id, tz_name=tz_name, from_date=first_day, to_date=today
     )
@@ -87,7 +90,7 @@ async def get_dashboard(db: AsyncSession, *, company_id: UUID) -> DashboardOut:
         db, company_id=company_id, tz_name=tz_name, from_date=prev_from, to_date=prev_to
     )
     sales_prev = await repository.sales_kpis(
-        db, company_id=company_id, tz_name=tz_name, today=prev_to
+        db, company_id=company_id, tz_name=tz_name, today=prev_to, month_from=prev_from
     )
     auctioned_month = await repository.auctions_in_range(
         db, company_id=company_id, tz_name=tz_name, from_date=first_day, to_date=today

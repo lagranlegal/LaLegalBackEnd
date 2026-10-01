@@ -54,3 +54,53 @@ def test_el_mes_en_curso_empieza_el_primero() -> None:
     from app.common.tenant_time import month_start
 
     assert month_start(date(2026, 2, 28)) == date(2026, 2, 1)
+
+
+# --- mismo tramo del mes anterior (dashboard: «vs. septiembre») -------------
+def test_el_tramo_anterior_va_del_1_al_mismo_dia() -> None:
+    from app.common.tenant_time import previous_month_to_date_bounds
+
+    assert previous_month_to_date_bounds(date(2026, 10, 10)) == (
+        date(2026, 9, 1),
+        date(2026, 9, 10),
+    )
+
+
+def test_el_dia_1_compara_contra_el_dia_1() -> None:
+    """El bug que esto arregla: el día 1 contra el mes anterior completo
+    salía «▼ 100 %» en todo."""
+    from app.common.tenant_time import previous_month_to_date_bounds
+
+    assert previous_month_to_date_bounds(date(2026, 10, 1)) == (date(2026, 9, 1), date(2026, 9, 1))
+
+
+def test_si_el_mes_anterior_es_mas_corto_el_tramo_termina_en_su_ultimo_dia() -> None:
+    from app.common.tenant_time import previous_month_to_date_bounds
+
+    assert previous_month_to_date_bounds(date(2026, 3, 31)) == (date(2026, 2, 1), date(2026, 2, 28))
+    assert previous_month_to_date_bounds(date(2026, 3, 29)) == (date(2026, 2, 1), date(2026, 2, 28))
+    assert previous_month_to_date_bounds(date(2026, 10, 31)) == (
+        date(2026, 9, 1),
+        date(2026, 9, 30),
+    )
+
+
+def test_en_bisiesto_el_tramo_llega_al_29_de_febrero() -> None:
+    from app.common.tenant_time import previous_month_to_date_bounds
+
+    assert previous_month_to_date_bounds(date(2028, 3, 31)) == (date(2028, 2, 1), date(2028, 2, 29))
+    assert previous_month_to_date_bounds(date(2028, 3, 29)) == (date(2028, 2, 1), date(2028, 2, 29))
+    assert previous_month_to_date_bounds(date(2028, 3, 28)) == (date(2028, 2, 1), date(2028, 2, 28))
+
+
+def test_en_enero_el_tramo_es_de_diciembre_y_el_31_12_va_contra_noviembre() -> None:
+    from app.common.tenant_time import previous_month_to_date_bounds
+
+    assert previous_month_to_date_bounds(date(2027, 1, 15)) == (
+        date(2026, 12, 1),
+        date(2026, 12, 15),
+    )
+    assert previous_month_to_date_bounds(date(2026, 12, 31)) == (
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+    )
