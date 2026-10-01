@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.common.money import Money, PositiveMoney
+from app.common.money import Money, MoneyOut, PositiveMoney
 from app.common.text import Reason
 
 PaymentMethod = Literal["cash", "transfer", "other"]
@@ -119,7 +119,7 @@ class ContractQuoteOut(BaseModel):
     #: La tasa como queda en el SNAPSHOT (dos decimales).
     interest_rate_pct: Decimal | None
     #: `rules.monthly_interest(tasa, capital)`. Necesita capital y tasa.
-    monthly_interest: Decimal | None
+    monthly_interest: MoneyOut | None
     #: De la categoría de la primera prenda con categoría, heredado del
     #: árbol (`term_months`, `arrears_window_months`, LTV).
     term_months: int | None
@@ -132,7 +132,7 @@ class ContractQuoteOut(BaseModel):
     #: Fin del plazo pactado: `start_date + term_months`.
     due_date: date | None
     #: El avalúo total; `null` sin avalúo o en 0.
-    appraisal_total: Decimal | None
+    appraisal_total: MoneyOut | None
     #: `capital / avalúo × 100`, dos decimales, para mostrar. Lo que decide
     #: si se pasa es `ltv_exceeded`, no este número redondeado.
     ltv_pct: Decimal | None
@@ -140,7 +140,7 @@ class ContractQuoteOut(BaseModel):
     #: categoría.
     ltv_ceiling: Decimal | None
     #: El mayor capital que no se pasa del techo (truncado a centavos).
-    max_loan: Decimal | None
+    max_loan: MoneyOut | None
     ltv_exceeded: bool
     #: Crear exigiría `contracts.override_ltv`. `false` también cuando aún no
     #: hay categoría: no se sabe si tiene techo (`ltv_ceiling` y
@@ -148,7 +148,7 @@ class ContractQuoteOut(BaseModel):
     requires_override: bool
     override_reason: Literal["appraisal_missing", "ltv_exceeded"] | None
     #: Lo que sale de la caja al crear: el capital entero.
-    amount_to_disburse: Decimal | None
+    amount_to_disburse: MoneyOut | None
 
 
 class ContractImportIn(BaseModel):
