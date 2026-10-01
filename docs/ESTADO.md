@@ -17,9 +17,9 @@
   «Para hoy», detalle de contrato, punto de venta, lista de contratos y búsqueda global; Reportes con índice,
   Nuevo contrato con resumen fijo, barra de acción fija, Clientes, Caja, Inventario, Configuración y páginas de
   salida.
-- **Último deploy (01/10):** backend `7cfdfd1` (migraciones hasta 00066, sin nuevas); front `d10a308` (rediseño P3).
+- **Último deploy (01/10):** backend `a75cbf5` (migraciones hasta 00066, sin nuevas); front `81c8297` (rediseño P3, cotización y POS sin diálogo).
   CI en verde en los dos repos.
-- **Suites (01/10):** backend 1023 passed, front 1006.
+- **Suites (01/10):** backend 1046 passed, front 1013.
 - **Avisos por correo:** todo construido y desplegado; los avisos al cliente nacen apagados por empresa. El
   comprobante pedido en el mostrador (`send_receipt_email` en ventas y abonos) se manda aunque el cliente no haya
   autorizado avisos, pero respeta el interruptor general de correos de la empresa ([`DOMINIO.md`](DOMINIO.md) §9.2).
@@ -27,7 +27,7 @@
 
 ## 2. Lo que espera a Mateo (no es código)
 
-1. Si la venta **confirma antes de cobrar** (hoy sí; `CONFIRM_BEFORE_CHARGE` en el front) y las decisiones previas a producción ([`PRODUCCION.md`](PRODUCCION.md) §0).
+1. Las decisiones previas a producción ([`PRODUCCION.md`](PRODUCCION.md) §0).
 2. Crear o redirigir el buzón **`contacto@prendo.com.co`** (la landing lo publica).
 3. Antes de encender avisos al cliente en una empresa real: la cláusula de autorización en su plantilla de
    contrato e, idealmente, una revisión legal.
