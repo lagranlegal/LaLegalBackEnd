@@ -1,4 +1,4 @@
-# Estado — 30/09/2026
+# Estado — 01/10/2026
 
 > **Corto y vivo.** Se **reemplaza** en cada sesión, no se apila: lo que deja de ser cierto se borra (git guarda
 > la historia). Las cifras llevan la fecha en que se midieron. Qué es Prendo y el mapa de documentos:
@@ -13,11 +13,12 @@
   1–15 y las tandas de arreglos A, B, D, E, F1, F2, F3, G, G2, H (back y front) e I (front), todas desplegadas en
   dev y verificadas en navegador. Recomendaciones: [`RECOMENDACIONES.md`](RECOMENDACIONES.md). Los bugs abiertos
   viven en GitHub Issues con la etiqueta `auditoría-2026-09` ([`QA.md`](QA.md) §4). Fase 16 (rediseño visual):
-  Mateo aprobó la propuesta el 30/09; **P1 (tokens y componentes compartidos) desplegada**; siguen P2 (Inicio con
-  «Para hoy», detalle de contrato, punto de venta, lista de contratos, búsqueda global) y P3 (el resto).
-- **Último deploy:** backend `ca420cd` (migraciones hasta 00066); front `9dc1a10` (rediseño P1 y formularios con el
-  campo compartido). CI en verde en los dos repos.
-- **Suites (30/09):** backend 971 passed (más 1 intermitente conocido), front 801.
+  Mateo aprobó la propuesta el 30/09; **P1 (tokens y componentes compartidos) y P2 (Inicio con «Para hoy», detalle
+  de contrato, punto de venta, lista de contratos con cliente y orden, búsqueda global) desplegadas**; sigue P3 (el
+  resto de pantallas).
+- **Último deploy (01/10):** backend `7cfdfd1` (migraciones hasta 00066, sin nuevas); front `6a29a3d` (rediseño P2).
+  CI en verde en los dos repos.
+- **Suites (01/10):** backend 1023 passed, front 936.
 - **Avisos por correo:** todo construido y desplegado; los avisos al cliente nacen apagados por empresa. El
   comprobante pedido en el mostrador (`send_receipt_email` en ventas y abonos) se manda aunque el cliente no haya
   autorizado avisos, pero respeta el interruptor general de correos de la empresa ([`DOMINIO.md`](DOMINIO.md) §9.2).
@@ -25,7 +26,7 @@
 
 ## 2. Lo que espera a Mateo (no es código)
 
-1. Las **decisiones del rediseño** (fase 16) y las previas a producción ([`PRODUCCION.md`](PRODUCCION.md) §0).
+1. Si la venta **confirma antes de cobrar** (hoy sí; `CONFIRM_BEFORE_CHARGE` en el front) y las decisiones previas a producción ([`PRODUCCION.md`](PRODUCCION.md) §0).
 2. Crear o redirigir el buzón **`contacto@prendo.com.co`** (la landing lo publica).
 3. Antes de encender avisos al cliente en una empresa real: la cláusula de autorización en su plantilla de
    contrato e, idealmente, una revisión legal.
@@ -35,14 +36,11 @@
 ## 3. Qué falta (código)
 
 Issues abiertas con la etiqueta `auditoría-2026-09` (24 del backend; en el front, las que no cerró la tanda I).
-Lo siguiente: el rediseño P2 (pantallas de mostrador, idénticas a la §5 de la propuesta) y P3 — para el Inicio
-el backend ya trae `GET /contracts/attention` («Para hoy», con `contracts.view`), y el dashboard del Admin trae el mes
-anterior para comparar —desde el 01/10, el **mismo tramo** (del 1 al mismo día), no el mes completo: mismos
-nombres de campo—; falta la pantalla. Para la lista de contratos (issue #10 del front, P2-d), `GET /contracts`
-ya trae `customer_name`/`customer_document` y `?sort=` (`next_due_asc` por defecto; API_GUIDE §7) —sin desplegar, el
-front tiene que regenerar tipos y volver a la primera página al cambiar de orden—. La franja de caja ya tiene sus datos:
-`GET /cashbox/sessions/current` trae `expected_cash` en vivo (antes `null` hasta cerrar) y `opened_by_name` (sin
-desplegar; el front regenera tipos). Falta la
+Lo siguiente: el rediseño P3 (Reportes con índice lateral, Nuevo contrato con resumen fijo, barra de acción fija,
+páginas de salida, y Clientes, Caja, Inventario y Configuración con los compartidos nuevos). Notas de la P2: «vs. mes
+anterior» compara el **mismo tramo** (del 1 al mismo día; mismos nombres de campo); `GET /contracts` ordena por
+`next_due_asc` por defecto y el cursor lleva el orden (API_GUIDE §7); `sessions/current` trae `expected_cash` en vivo
+y `opened_by_name`; el listado de contratos aún hace una consulta de prendas por contrato (N+1 heredado). Falta la
 casilla «Enviar comprobante» del POS y del abono (necesita que el backend exponga el interruptor general de
 correos a quien vende); `pip-audit`.
 
