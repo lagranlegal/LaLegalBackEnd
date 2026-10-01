@@ -12,11 +12,12 @@
 - **Auditoría integral** (plan: [`PLAN_AUDITORIA_INTEGRAL.md`](PLAN_AUDITORIA_INTEGRAL.md)): hechas las fases
   1–15 y las tandas de arreglos A, B, D, E, F1, F2, F3, G, G2, H (back y front) e I (front), todas desplegadas en
   dev y verificadas en navegador. Recomendaciones: [`RECOMENDACIONES.md`](RECOMENDACIONES.md). Los bugs abiertos
-  viven en GitHub Issues con la etiqueta `auditoría-2026-09` ([`QA.md`](QA.md) §4). Falta la fase 16 (rediseño
-  visual): la propuesta está entregada y espera las decisiones de Mateo.
-- **Último deploy:** backend `ca420cd` (migraciones hasta 00066); front `1ed321e` (code-splitting por ruta: JS
-  inicial de 1.950 kB a 928 kB). CI en verde en los dos repos.
-- **Suites (30/09):** backend 971 passed (más 1 intermitente conocido), front 702.
+  viven en GitHub Issues con la etiqueta `auditoría-2026-09` ([`QA.md`](QA.md) §4). Fase 16 (rediseño visual):
+  Mateo aprobó la propuesta el 30/09; **P1 (tokens y componentes compartidos) desplegada**; siguen P2 (Inicio con
+  «Para hoy», detalle de contrato, punto de venta, lista de contratos, búsqueda global) y P3 (el resto).
+- **Último deploy:** backend `ca420cd` (migraciones hasta 00066); front `9dc1a10` (rediseño P1 y formularios con el
+  campo compartido). CI en verde en los dos repos.
+- **Suites (30/09):** backend 971 passed (más 1 intermitente conocido), front 801.
 - **Avisos por correo:** todo construido y desplegado; los avisos al cliente nacen apagados por empresa. El
   comprobante pedido en el mostrador (`send_receipt_email` en ventas y abonos) se manda aunque el cliente no haya
   autorizado avisos, pero respeta el interruptor general de correos de la empresa ([`DOMINIO.md`](DOMINIO.md) §9.2).
@@ -34,7 +35,7 @@
 ## 3. Qué falta (código)
 
 Issues abiertas con la etiqueta `auditoría-2026-09` (24 del backend; en el front, las que no cerró la tanda I).
-Lo siguiente: el rediseño (P1 tokens y componentes, P2 pantallas de mostrador, P3 resto) cuando Mateo decida; la
+Lo siguiente: el rediseño P2 (pantallas de mostrador, idénticas a la §5 de la propuesta) y P3; la
 casilla «Enviar comprobante» del POS y del abono (necesita que el backend exponga el interruptor general de
 correos a quien vende); `pip-audit`.
 
