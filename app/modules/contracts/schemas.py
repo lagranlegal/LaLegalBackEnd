@@ -181,6 +181,22 @@ class ContractOut(BaseModel):
     items: list[ContractItemOut]
 
 
+class ContractListItemOut(ContractOut):
+    """Un contrato del LISTADO (`GET /contracts`): `ContractOut` más el cliente.
+
+    Subclase y no campos opcionales en `ContractOut`: así el nombre es
+    obligatorio donde siempre viene (un JOIN en la misma consulta del
+    listado) y no aparece como `null` en el detalle ni en las respuestas de
+    crear, abonar o ampliar, que no lo traen. Para el front es un superconjunto
+    de `ContractOut`: lo que ya tipaba la lista con `ContractOut` sigue
+    compilando (issue #10 del front, rediseño P2-d).
+    """
+
+    customer_name: str
+    #: El número de documento del cliente (`customer.doc_number`), tal cual.
+    customer_document: str
+
+
 class ContractChainLinkOut(BaseModel):
     """Un eslabón de la cadena de ampliaciones (docs/RECARGOS.md §6).
 

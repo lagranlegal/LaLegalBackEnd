@@ -389,14 +389,19 @@ async def list_contracts(
     customer_id: UUID | None = None,
     q: str | None = None,
 ) -> list[Row[Any]]:
-    # `q` necesita el cliente (nombre/documento) que `contract` no tiene —
-    # LEFT JOIN incondicional en vez de armar dos formas de query distintas
-    # según si `q` viene o no; `customer_id` es NOT NULL así que en la
-    # práctica siempre resuelve, LEFT por si acaso.
+    # El cliente viaja en la MISMA consulta (issue #10 del front): cada ítem
+    # del listado trae `customer_name`/`customer_document`, y `q` busca por
+    # ellos. JOIN interno: `customer_id` es NOT NULL con FK, y la policy de
+    # `customer` es la misma de aislamiento por empresa que la de `contract`
+    # (no exige `customers.view`), así que el JOIN nunca descarta un
+    # contrato visible. Hasta el 01/10/2026 era LEFT "por si acaso" y el
+    # nombre no salía: la pantalla tenía que pedir cada cliente aparte.
     columns = ", ".join(f"c.{col.strip()}" for col in _CONTRACT_COLUMNS.split(","))
     query = (
-        f"select {columns} from public.contract c "
-        "left join public.customer cu on cu.id = c.customer_id "
+        f"select {columns}, cu.full_name as customer_name, "
+        "cu.doc_number as customer_document "
+        "from public.contract c "
+        "join public.customer cu on cu.id = c.customer_id and cu.company_id = c.company_id "
         "where c.company_id = :company_id"
     )
     params: dict[str, Any] = {"company_id": str(company_id), "limit": limit + 1}

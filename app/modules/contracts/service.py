@@ -34,6 +34,7 @@ from app.modules.contracts.schemas import (
     ContractExtendIn,
     ContractImportIn,
     ContractItemOut,
+    ContractListItemOut,
     ContractOut,
     ContractUpdateIn,
     ExtensionQuoteOut,
@@ -702,7 +703,7 @@ async def list_contracts(
     status_filter: str | None,
     customer_id: UUID | None = None,
     q: str | None = None,
-) -> CursorPage[ContractOut]:
+) -> CursorPage[ContractListItemOut]:
     rows = await repository.list_contracts(
         db,
         company_id=company_id,
@@ -718,7 +719,14 @@ async def list_contracts(
         item_rows = await repository.list_contract_items(
             db, company_id=company_id, contract_id=row._mapping["id"]
         )
-        items_out.append(_row_to_contract(row, _row_to_items(item_rows)))
+        contract = _row_to_contract(row, _row_to_items(item_rows))
+        items_out.append(
+            ContractListItemOut(
+                **dict(contract),
+                customer_name=row._mapping["customer_name"],
+                customer_document=row._mapping["customer_document"],
+            )
+        )
     return CursorPage(items=items_out, next_cursor=page.next_cursor)
 
 

@@ -14,6 +14,7 @@ from app.modules.contracts.schemas import (
     ContractCreateIn,
     ContractExtendIn,
     ContractImportIn,
+    ContractListItemOut,
     ContractOut,
     ContractUpdateIn,
     ExtensionQuoteOut,
@@ -97,7 +98,7 @@ async def import_contract(
     )
 
 
-@router.get("", response_model=CursorPage[ContractOut])
+@router.get("", response_model=CursorPage[ContractListItemOut])
 async def list_contracts(
     user: Annotated[CurrentUser, Depends(_view)],
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
@@ -108,7 +109,7 @@ async def list_contracts(
     q: Annotated[
         str | None, Query(description="Número, código anterior o nombre/documento del cliente")
     ] = None,
-) -> CursorPage[ContractOut]:
+) -> CursorPage[ContractListItemOut]:
     return await service.list_contracts(
         db,
         company_id=user.company_id,
