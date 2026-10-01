@@ -211,6 +211,121 @@ def compute_status(
     return "in_extension", new_extension_ends_at
 
 
+# --------------------------------------------------------- «Para hoy» ----
+#: Los motivos de `GET /contracts/attention`, en orden de URGENCIA: la
+#: posición en esta tupla es el primer criterio del orden de la lista.
+ATTENTION_REASONS = ("ready_for_auction", "in_arrears", "in_extension", "due_today")
+
+
+@dataclass(frozen=True)
+class Attention:
+    """Por qué un contrato pide acción hoy, y cuánto se cobraría."""
+
+    reason: str
+    #: El estado EFECTIVO (`compute_status` con el hoy de la empresa), no el
+    #: persistido: el job nocturno puede ir un día atrás.
+    status: str
+    months_owed: int
+    #: Días desde la primera cuota sin pagar (`ancla + 1 mes`). 0 el día en
+    #: que vence.
+    days_overdue: int
+    #: La fecha que explica el motivo: fin de prórroga (vencida o por vencer),
+    #: la cuota que venció (mora) u hoy (vence hoy).
+    reference_date: date
+    #: Ponerse al día (`monthly × months_owed`, la última opción de
+    #: `payment-options`); en «listo para remate», SALDAR (`payoff_total`):
+    #: con la prórroga vencida la conversación es recoger la prenda o perderla.
+    amount_due_today: Decimal
+    #: `monthly × months_owed`: el interés atrasado.
+    overdue_interest: Decimal
+
+
+def attention_for(
+    *,
+    current_status: str,
+    interest_paid_until: date,
+    arrears_window_months: int,
+    extension_months: int,
+    extension_ends_at: date | None,
+    capital_balance: Decimal,
+    interest_rate_pct: Decimal,
+    start_date: date,
+    today: date,
+) -> Attention | None:
+    """El motivo por el que un contrato aparece en «Para hoy», o `None`.
+
+    Los motivos no se solapan (cada contrato cuenta en UNA tarjeta):
+
+    - `ready_for_auction`: prórroga con fin `< hoy` (el criterio de
+      `/ready-for-auction`).
+    - `due_today`: la primera cuota sin pagar vence HOY. Ese día
+      `months_owed` ya es 1, así que el estado efectivo es `in_arrears` (o
+      `in_extension` con ventana de un mes); el motivo, no el estado, es lo
+      que distingue «vence hoy» de «en mora».
+    - `in_arrears`: en mora con al menos un día de atraso.
+    - `in_extension`: en prórroga sin vencer.
+
+    Todo monto sale de `quote_payment_options`: la tarjeta y los botones de
+    cobro del contrato no pueden decir números distintos.
+    """
+    status, ends_at = compute_status(
+        current_status=current_status,
+        interest_paid_until=interest_paid_until,
+        arrears_window_months=arrears_window_months,
+        extension_months=extension_months,
+        extension_ends_at=extension_ends_at,
+        today=today,
+    )
+    if status in TERMINAL_STATUSES or status == "active":
+        return None
+
+    quote = quote_payment_options(
+        capital_balance=capital_balance,
+        interest_rate_pct=interest_rate_pct,
+        interest_paid_until=interest_paid_until,
+        today=today,
+        start_date=start_date,
+    )
+    # Fuera de los terminales y `active`, `months_owed >= 1`: hay opciones.
+    catch_up = quote.options[-1].total
+    first_due = add_months(interest_paid_until, 1)
+    days_overdue = (today - first_due).days
+
+    def _build(reason: str, reference: date, amount: Decimal) -> Attention:
+        return Attention(
+            reason=reason,
+            status=status,
+            months_owed=quote.months_owed,
+            days_overdue=days_overdue,
+            reference_date=reference,
+            amount_due_today=amount,
+            overdue_interest=catch_up,
+        )
+
+    if status == "in_extension" and ends_at is not None and ends_at < today:
+        return _build("ready_for_auction", ends_at, quote.payoff_total)
+    if first_due == today:
+        return _build("due_today", today, quote.monthly_interest)
+    if status == "in_arrears":
+        return _build("in_arrears", first_due, catch_up)
+    assert ends_at is not None  # `compute_status` siempre fija el fin de una prórroga
+    return _build("in_extension", ends_at, catch_up)
+
+
+def attention_sort_key(a: Attention, *, number: int) -> tuple[int, int, int]:
+    """Orden de «Requieren acción»: remate (la prórroga vencida más vieja
+    primero) → mora (más días de atraso primero) → prórroga (la que vence
+    antes primero) → vence hoy. Desempata el número del contrato."""
+    rank = ATTENTION_REASONS.index(a.reason)
+    if a.reason == "in_arrears":
+        within = -a.days_overdue
+    elif a.reason == "due_today":
+        within = 0
+    else:
+        within = a.reference_date.toordinal()
+    return (rank, within, number)
+
+
 # ------------------------------------------------------ ampliar préstamo ----
 @dataclass(frozen=True)
 class ExtensionQuote:

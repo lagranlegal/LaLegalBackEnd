@@ -465,6 +465,40 @@ async def list_ready_for_auction(
     return list(result.all())
 
 
+async def list_attention_candidates(
+    db: AsyncSession, *, company_id: UUID, today: date
+) -> list[Row[Any]]:
+    """Contratos NO terminales que deben al menos un mes, con el nombre del
+    cliente, para «Para hoy» (`service.get_attention`). Una sola consulta: el
+    motivo y los montos los decide `rules.attention_for` fila por fila.
+
+    El filtro `interest_paid_until < :today` es un SUPERCONJUNTO barato de
+    «debe al menos un mes» (`ancla + 1 mes <= hoy`): la aritmética de meses
+    vive en `rules`, no se repite en SQL. Lee el estado persistido solo para
+    descartar terminales; el efectivo lo recalcula la regla.
+    """
+    result = await db.execute(
+        text(
+            """
+            select c.id, c.number, c.customer_id, cu.full_name as customer_name,
+                   c.status::text as status, c.interest_paid_until, c.arrears_window_months,
+                   c.extension_months, c.extension_ends_at, c.capital_balance,
+                   c.interest_rate_pct, c.start_date
+            from public.contract c
+            join public.customer cu on cu.id = c.customer_id
+            where c.company_id = :company_id and c.status::text <> all(:terminal)
+              and c.interest_paid_until < :today
+            """
+        ),
+        {
+            "company_id": str(company_id),
+            "terminal": sorted(rules.TERMINAL_STATUSES),
+            "today": today,
+        },
+    )
+    return list(result.all())
+
+
 async def update_contract_fields(
     db: AsyncSession, *, company_id: UUID, contract_id: UUID, fields: dict[str, Any]
 ) -> None:

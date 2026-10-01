@@ -103,6 +103,13 @@ se edita a mano.**
 guarda, el job, la puerta de abonos y el cupo de ampliación). **"Listo para remate" no es un estado**: es
 `in_extension` con `extension_ends_at` vencida (`GET /contracts/ready-for-auction`).
 
+**«Para hoy»** (`GET /contracts/attention`, `rules.attention_for`): cada contrato que debe al menos un mes cae en
+**un** motivo — listo para remate, en mora, en prórroga o **vence hoy** — para que las tarjetas no se pisen. «Vence
+hoy» es que la primera cuota sin pagar (`ancla + 1 mes`) cae hoy; como `months_owed` pasa de 0 a 1 ese mismo día, el
+estado ya es `in_arrears`, y por eso el motivo, no el estado, es lo que separa «vence hoy» de «en mora» (≥1 día de
+atraso). Los montos son los de `payment-options`: ponerse al día, un mes en «vence hoy», y saldar en «listo para
+remate». Hay días sin vencimientos: el 31/10 ninguna cuota vence (no hay 31/09 y el 30/09 + 1 mes es el 30/10).
+
 ### 2.4 Remate
 
 `service.auction_contract` (`contracts.auction`, especial): en una transacción el contrato y sus prendas pasan

@@ -24,6 +24,11 @@ from app.modules.cashbox import integration as cashbox_integration
 from app.modules.catalogs import repository as catalogs_repo
 from app.modules.contracts import repository, rules
 from app.modules.contracts.schemas import (
+    AttentionArrearsOut,
+    AttentionDueTodayOut,
+    AttentionItemOut,
+    AttentionReadyOut,
+    ContractAttentionOut,
     ContractChainLinkOut,
     ContractCreateIn,
     ContractExtendIn,
@@ -1130,6 +1135,74 @@ async def list_ready_for_auction(db: AsyncSession, *, company_id: UUID) -> list[
         )
         result.append(_row_to_contract(row, _row_to_items(item_rows)))
     return result
+
+
+async def get_attention(db: AsyncSession, *, company_id: UUID, limit: int) -> ContractAttentionOut:
+    """«Para hoy» del Inicio (docs/DOMINIO.md §2.3): qué contratos piden
+    acción, por qué y cuánto se cobraría. Una consulta y las reglas puras de
+    `rules.attention_for` en lote — ni N+1 ni una segunda fórmula de interés.
+
+    Como `get_contract_chain`, recalcula el estado sin persistirlo: es una
+    lectura de muchos contratos y escribir acá bloquearía filas en la
+    pantalla que más se abre.
+    """
+    today = await platform_integration.get_company_today(db, company_id=company_id)
+    rows = await repository.list_attention_candidates(db, company_id=company_id, today=today)
+
+    entries: list[tuple[rules.Attention, Any]] = []
+    for row in rows:
+        m = row._mapping
+        att = rules.attention_for(
+            current_status=m["status"],
+            interest_paid_until=m["interest_paid_until"],
+            arrears_window_months=m["arrears_window_months"],
+            extension_months=m["extension_months"],
+            extension_ends_at=m["extension_ends_at"],
+            capital_balance=m["capital_balance"],
+            interest_rate_pct=m["interest_rate_pct"],
+            start_date=m["start_date"],
+            today=today,
+        )
+        if att is not None:
+            entries.append((att, m))
+    entries.sort(key=lambda e: rules.attention_sort_key(e[0], number=e[1]["number"]))
+
+    def _of(reason: str) -> list[rules.Attention]:
+        return [a for a, _ in entries if a.reason == reason]
+
+    ready, arrears, due = _of("ready_for_auction"), _of("in_arrears"), _of("due_today")
+    return ContractAttentionOut(
+        as_of=today,
+        ready_for_auction=AttentionReadyOut(
+            count=len(ready),
+            earliest_expired_on=min((a.reference_date for a in ready), default=None),
+        ),
+        in_arrears=AttentionArrearsOut(
+            count=len(arrears),
+            overdue_interest_total=quantize(
+                sum((a.overdue_interest for a in arrears), Decimal("0"))
+            ),
+        ),
+        due_today=AttentionDueTodayOut(
+            count=len(due),
+            amount_total=quantize(sum((a.amount_due_today for a in due), Decimal("0"))),
+        ),
+        items_total=len(entries),
+        items=[
+            AttentionItemOut(
+                contract_id=m["id"],
+                number=m["number"],
+                customer_id=m["customer_id"],
+                customer_name=m["customer_name"],
+                status=a.status,
+                reason_code=a.reason,
+                days_overdue=a.days_overdue,
+                reference_date=a.reference_date,
+                amount_due_today=a.amount_due_today,
+            )
+            for a, m in entries[:limit]
+        ],
+    )
 
 
 async def recompute_all_statuses(db: AsyncSession) -> int:

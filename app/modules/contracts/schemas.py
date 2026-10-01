@@ -264,3 +264,63 @@ class SettlementInfoOut(BaseModel):
 
     settled_at: datetime
     receipt_number: int
+
+
+# ------------------------------------------------------------ «Para hoy» ----
+AttentionReason = Literal["ready_for_auction", "in_arrears", "in_extension", "due_today"]
+
+
+class AttentionReadyOut(BaseModel):
+    count: int
+    #: La prórroga vencida MÁS VIEJA (`extension_ends_at`); `null` sin ninguna.
+    earliest_expired_on: date | None
+
+
+class AttentionArrearsOut(BaseModel):
+    count: int
+    #: Σ interés atrasado (`meses adeudados × interés mensual`) de los
+    #: contratos de esta tarjeta.
+    overdue_interest_total: Decimal
+
+
+class AttentionDueTodayOut(BaseModel):
+    count: int
+    #: Σ un mes de interés de cada contrato que vence hoy.
+    amount_total: Decimal
+
+
+class AttentionItemOut(BaseModel):
+    contract_id: UUID
+    number: int
+    customer_id: UUID
+    customer_name: str
+    #: Estado EFECTIVO con el hoy de la empresa. El día del vencimiento ya es
+    #: `in_arrears` (o `in_extension` con ventana de 1 mes): la etiqueta de la
+    #: fila sale de `reason_code`, no de acá.
+    status: str
+    reason_code: AttentionReason
+    #: Días desde la primera cuota sin pagar; 0 en «vence hoy». Nunca `null`
+    #: hoy (todo contrato de la lista debe al menos un mes); el tipo lo admite
+    #: por si aparece un motivo sin deuda.
+    days_overdue: int | None
+    #: Prórroga vencida el / vence el (remate, prórroga), cuota vencida el
+    #: (mora), hoy (vence hoy).
+    reference_date: date
+    #: Ponerse al día en mora y prórroga; un mes en «vence hoy»; SALDAR
+    #: (capital + interés, `payoff_total`) en «listo para remate». Coincide
+    #: con `payment-options` del mismo contrato.
+    amount_due_today: Decimal
+
+
+class ContractAttentionOut(BaseModel):
+    """«Para hoy» del Inicio (`GET /contracts/attention`). Las tres tarjetas
+    cuentan TODOS los contratos; `items` es la lista topada por `limit`."""
+
+    as_of: date
+    ready_for_auction: AttentionReadyOut
+    in_arrears: AttentionArrearsOut
+    due_today: AttentionDueTodayOut
+    #: Cuántos contratos piden acción en total (incluye prórrogas sin
+    #: vencer): `items` trae los primeros `limit`.
+    items_total: int
+    items: list[AttentionItemOut]

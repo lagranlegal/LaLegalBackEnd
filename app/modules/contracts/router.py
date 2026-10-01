@@ -9,6 +9,7 @@ from app.common.pagination import CursorPage, decode_cursor
 from app.core.security import CurrentUser, get_tenant_db, require_permission
 from app.modules.contracts import service
 from app.modules.contracts.schemas import (
+    ContractAttentionOut,
     ContractChainLinkOut,
     ContractCreateIn,
     ContractExtendIn,
@@ -40,6 +41,22 @@ async def list_ready_for_auction(
     db: Annotated[AsyncSession, Depends(get_tenant_db)],
 ) -> list[ContractOut]:
     return await service.list_ready_for_auction(db, company_id=user.company_id)
+
+
+@router.get("/attention", response_model=ContractAttentionOut)
+async def get_attention(
+    user: Annotated[CurrentUser, Depends(_view)],
+    db: Annotated[AsyncSession, Depends(get_tenant_db)],
+    limit: int = Query(default=20, ge=1, le=50),
+) -> ContractAttentionOut:
+    """«Para hoy» del Inicio: listos para remate, en mora, vencen hoy, y la
+    lista «Requieren acción» ordenada por urgencia (docs/DOMINIO.md §2.3).
+
+    Va con `contracts.view` y no con `contracts.auction` aunque cuente los
+    listos para remate: el conteo, la fecha y el monto son información del
+    contrato que quien atiende ya ve en cada ficha; Rematar (y la lista de
+    `/ready-for-auction`) siguen exigiendo `contracts.auction`."""
+    return await service.get_attention(db, company_id=user.company_id, limit=limit)
 
 
 @router.post("", response_model=ContractOut, status_code=201)
